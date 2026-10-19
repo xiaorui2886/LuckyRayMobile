@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    // STILL-01.1: noUnusedLocals must stay OFF — the ui/*.tsx authority copies
+    // under src/presentation/still01/ are byte-frozen to
+    // design/still-01-1-authority @17039ea (enforced by
+    // tests/stillParityContract.test.ts), and TypeScript cannot exempt
+    // imported files from a program. App files keep noUnusedParameters.
+    "noUnusedLocals": false,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"],
+  "exclude": ["src/presentation/still01"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

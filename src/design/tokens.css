@@ -1,0 +1,278 @@
+/* LuckyRay Mobile — visual system, migrated from the approved R6 prototype
+ * (LuckyRay-Mobile-Visual-Rebuild-R6.html, SHA256 db603422…a538).
+ *
+ * ONE component tree, THREE interface styles × TWO color modes. The styles are
+ * pure presentation presets (tokens + geometry); they never change routes,
+ * data, sync, provenance or capability.
+ *
+ *   data-style = quiet | ledger | night      (Quiet Dock is the default)
+ *   data-theme = light | dark                (Color Mode)
+ *
+ * Token names mirror the R6 prototype exactly (canvas/nav/field/ink/ink2/
+ * tertiary/sep/accent/accentInk/success/pending/danger/notch/fabShadow) so the
+ * approved visuals map 1:1 instead of being re-derived.
+ *
+ * WebView 83 constraints: no flex-gap dependency, no backdrop-filter
+ * dependency, no container queries. Geometry vars carry the per-style radius
+ * and density so components never branch on the style themselves.
+ */
+
+/* ---------------------------------------------------------------------------
+ * Quiet Dock — Light (default)
+ * ------------------------------------------------------------------------- */
+:root,
+:root[data-style="quiet"] {
+  color-scheme: light;
+  --canvas: #f7f7f4;
+  --nav: #fbfbf8;
+  --field: #eeeeea;
+  --ink: #191a17;
+  --ink2: #6d7069;
+  --tertiary: #9da098;
+  --sep: #e1e2dd;
+  --accent: #b86f2f;
+  --accentInk: #fff;
+  --success: #397b59;
+  --pending: #a06c28;
+  --danger: #ad4545;
+  --notch: #dddeda;
+  --fabShadow: rgba(152, 81, 25, 0.25);
+
+  /* geometry — Quiet Dock */
+  --r-art: 8px;
+  --r-control: 10px;
+  --r-well: 12px;
+  --r-media: 16px;
+  --r-sheet: 19px;
+  --r-nav: 0px;
+  --row-min: 66px;
+  --nav-h: 64px;
+  --nav-inset-x: 0px;
+  --nav-inset-b: 0px;
+  --nav-top-pad: 7px;
+  --fab-size: 44px;
+  --fab-radius: 50%;
+  --fab-bottom: 72px;
+  --search-bg: var(--field);
+  --search-border: 0;
+  --search-pad: 11px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Content Ledger — Light
+ * ------------------------------------------------------------------------- */
+:root[data-style="ledger"] {
+  --canvas: #fbfaf7;
+  --nav: #fbfaf7;
+  --field: #f1eee8;
+  --ink: #151617;
+  --ink2: #65676a;
+  --tertiary: #98999b;
+  --sep: #dedbd4;
+  --accent: #377064;
+  --accentInk: #fff;
+  --success: #377064;
+  --pending: #a36d2d;
+  --danger: #a74343;
+  --notch: #e4e1da;
+  --fabShadow: rgba(40, 95, 82, 0.2);
+
+  --r-art: 4px;
+  --r-control: 6px;
+  --r-well: 8px;
+  --r-media: 8px;
+  --r-sheet: 15px;
+  --r-nav: 0px;
+  --row-min: 64px;
+  --nav-h: 61px;
+  --nav-inset-x: 0px;
+  --nav-inset-b: 0px;
+  --nav-top-pad: 10px;
+  --fab-size: 44px;
+  --fab-radius: 12px;
+  --fab-bottom: 72px;
+  --search-bg: transparent;
+  --search-border: 0;
+  --search-pad: 0px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Night Shelf — Light
+ * ------------------------------------------------------------------------- */
+:root[data-style="night"] {
+  --canvas: #f2f1ec;
+  --nav: #f8f7f1;
+  --field: #e8e6de;
+  --ink: #181914;
+  --ink2: #666a61;
+  --tertiary: #93978c;
+  --sep: #dad8cf;
+  --accent: #9c763b;
+  --accentInk: #fff;
+  --success: #3f7753;
+  --pending: #936a2f;
+  --danger: #a94b4b;
+  --notch: #e0ded6;
+  --fabShadow: rgba(156, 118, 59, 0.22);
+
+  --r-art: 13px;
+  --r-control: 11px;
+  --r-well: 13px;
+  --r-media: 14px;
+  --r-sheet: 20px;
+  --r-nav: 18px;
+  --row-min: 72px;
+  --nav-h: 61px;
+  --nav-inset-x: 12px;
+  --nav-inset-b: 10px;
+  --nav-top-pad: 9px;
+  --fab-size: 44px;
+  --fab-radius: 50%;
+  --fab-bottom: 70px;
+  --search-bg: transparent;
+  --search-border: 1px solid var(--sep);
+  --search-pad: 10px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Dark color mode — one block per interface style
+ * ------------------------------------------------------------------------- */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #12130f;
+  --nav: #171814;
+  --field: #20211c;
+  --ink: #f1f1ec;
+  --ink2: #a5a79f;
+  --tertiary: #74776e;
+  --sep: #2a2c26;
+  --accent: #d69a5a;
+  --accentInk: #171814;
+  --success: #73aa86;
+  --pending: #c89a55;
+  --danger: #d16c6c;
+  --notch: #292b26;
+  --fabShadow: rgba(209, 149, 84, 0.18);
+}
+:root[data-style="ledger"][data-theme="dark"] {
+  --canvas: #141615;
+  --nav: #191b19;
+  --field: #222522;
+  --ink: #f0f2ef;
+  --ink2: #a5aaa6;
+  --tertiary: #737875;
+  --sep: #2b2f2c;
+  --accent: #6ea296;
+  --accentInk: #141615;
+  --success: #6ea296;
+  --pending: #c59658;
+  --danger: #d07373;
+  --notch: #262926;
+  --fabShadow: rgba(110, 162, 150, 0.18);
+}
+:root[data-style="night"][data-theme="dark"] {
+  --canvas: #131411;
+  --nav: #171814;
+  --field: #20211d;
+  --ink: #f0f1eb;
+  --ink2: #a2a59c;
+  --tertiary: #6f726b;
+  --sep: #292b26;
+  --accent: #c49b55;
+  --accentInk: #151611;
+  --success: #6eaa83;
+  --pending: #c39a52;
+  --danger: #cf7070;
+  --notch: #2a2c27;
+  --fabShadow: rgba(197, 157, 87, 0.18);
+}
+
+/* ---------------------------------------------------------------------------
+ * Typography, spacing, motion — shared by every style
+ * ------------------------------------------------------------------------- */
+:root {
+  --font: "Geist", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+
+  /* R6 type roles */
+  --t-brand: 18px;          /* Home masthead only */
+  --t-content-title: 20px;  /* note/asset content title */
+  --t-detail-title: 13px;   /* pushed child nav title */
+  --t-headline: 15px;       /* empty/important state */
+  --t-section: 13.5px;      /* grouping */
+  --t-body: 14px;           /* reading/forms */
+  --t-row-title: 12.5px;    /* content rows */
+  --t-secondary: 11px;      /* row subtitle/description */
+  --t-caption: 11.5px;      /* controls/metadata */
+  --t-meta: 10.5px;         /* time/status/context */
+
+  /* spacing rhythm 4/8/12/16/20/24/32/40 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+
+  --page-x: 16px;
+  --page-y: 12px;
+  --header-h: 50px;
+  --content-max: 720px;
+  --app-viewport-h: 100vh;
+  --touch-target: 44px;
+
+  /* motion */
+  --dur-press: 110ms;
+  --dur-page: 180ms;
+  --dur-sheet: 240ms;
+  --dur-tab: 170ms;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  /* Safe-area authority (REAL-DEVICE-UI-POLISH-R1):
+     On Android the native MainActivity already pads android.R.id.content by
+     the real systemBars/cutout insets, so the web layer MUST NOT add CSS
+     env() on top (double inset produced a ~90 CSS px void on cutout devices
+     like the Xiaomi 14 Ultra; MI 8's WebView 83 reports env()=0 which is why
+     the bug was invisible there). The vars therefore default to 0 on Android
+     and only a browser/dev harness may override them explicitly. */
+  --safe-top: 0px;
+  --safe-bottom: 0px;
+  --safe-left: 0px;
+  --safe-right: 0px;
+  --screen-bottom-space: calc(
+    var(--nav-h) + var(--nav-inset-b) + var(--safe-bottom) + var(--page-y) + 8px
+  );
+  --fab-bottom-abs: calc(var(--fab-bottom) + var(--nav-inset-b) + var(--safe-bottom));
+
+  /* -------------------------------------------------------------------------
+   * Responsive layout tokens (ADAPTIVE-FOUNDATION-R1)
+   * Continuous, viewport-aware bounds preserving 393×769 Golden Anchor exactly.
+   * ----------------------------------------------------------------------- */
+  --layout-page-x: var(--page-x);
+  --layout-content-max: var(--content-max);
+  --layout-nav-h: var(--nav-h);
+  --layout-sheet-max-h: calc(82vh - 130px);
+
+  /* (REAL-DEVICE-UI-POLISH + INTERACTION-CLOSURE) All R6-era artificial fold
+     spacers are removed: note, capture and settings content flow naturally. */
+}
+
+/* Page horizontal padding: 16 @320 → 18 around 360-430 → max 22 by 600 */
+@media (min-width: 360px) {
+  :root { --page-x: 18px; }
+}
+@media (min-width: 600px) {
+  :root { --page-x: 22px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-press: 1ms;
+    --dur-page: 1ms;
+    --dur-sheet: 1ms;
+    --dur-tab: 1ms;
+  }
+}

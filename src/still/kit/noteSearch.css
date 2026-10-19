@@ -1,0 +1,36 @@
+/* Same-vault search continuity: quiet, bounded controls; body selection stays CM-owned. */
+.st-note-find{display:flex;align-items:center;gap:4px;min-height:44px;margin:-10px 0 12px;color:var(--st-secondary);font-size:11px;border-bottom:1px solid var(--st-line)}
+.st-note-find-query{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-note-find-count{white-space:nowrap;font-variant-numeric:tabular-nums}
+.st-note-prose .st-note-find{position:sticky;top:0;z-index:1;background:var(--st-canvas);white-space:normal}
+.st-note-find button{flex:none;min-height:44px;min-width:44px;padding:0 4px;color:var(--st-secondary);font-size:11px}
+.st-note-find button:disabled{opacity:.4}
+.st-note-find-hit{background:var(--st-focus);border-radius:2px}
+.st-note-find-hit.is-current{background:var(--st-focus);box-shadow:inset 0 -2px var(--st-accent)}
+.st-note-switcher-status{padding:12px 4px;color:var(--st-secondary);font-size:12px;line-height:1.7}
+
+/* CM6 virtual block gaps carry the height of unrendered text. They must
+   remain in layout for long-note search scrolling and scroll snapshots.
+   Keep this stable after search closes and across read/edit reattachment;
+   a selector tied to the temporary search bar would collapse them again. */
+.st-note-editor.is-cm .cm-content .cm-gap{display:block}
+
+/* CM measures virtual gap heights and flex geometry synchronously. The
+   app's reduced-motion duration must not interpolate those internal sizes.
+   Keep page/sheet motion outside the editor and retain this after find closes. */
+.st-note-editor.is-cm .cm-editor,
+.st-note-editor.is-cm .cm-editor *{transition-property:none!important}
+
+/* The reader itself is the body entry target, including an empty note.
+   Keep the title and placeholder together until the user asks for input. */
+.st-note-prose.is-tap-editable{min-height:270px;cursor:text}
+.st-note-placeholder{color:var(--st-muted)}
+
+/* Keep the horizontal touch target visibly inside the app, not in the system
+   Back edge. MI8 diagnosis: an internal pan retains input; x=40 is in MIUI's
+   54px GestureStubLeft and dismisses IME just like normal Back. No gesture
+   exclusion, Back interception or second IME/layout authority is introduced. */
+@media(pointer:coarse){
+  .st-note-surface.has-editor-tools .st-reader-bottom{padding-left:24px;padding-right:24px}
+  .st-note-surface.has-editor-tools .st-editor-tools{margin-left:auto;margin-right:auto}
+}

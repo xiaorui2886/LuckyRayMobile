@@ -1,0 +1,10 @@
+{
+  "changes": [
+    { "seq": 1, "entityType": "asset", "entityId": "asset-a1b2c3d4", "operation": "upsert", "revision": "r1", "updatedAt": "2026-08-07T09:00:00Z" },
+    { "seq": 2, "entityType": "note", "entityId": "kdoc-1111", "operation": "upsert", "revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6", "updatedAt": "2026-08-07T09:01:00Z" },
+    { "seq": 3, "entityType": "asset", "entityId": "asset-z9y8x7w6", "operation": "delete", "updatedAt": "2026-08-07T09:02:00Z" },
+    { "seq": 4, "entityType": "agent_run", "entityId": "run-aaaabbbbccccdddd", "operation": "upsert", "revision": "st1", "updatedAt": "2026-08-07T09:03:00Z" }
+  ],
+  "after": 4,
+  "hasMore": false
+}

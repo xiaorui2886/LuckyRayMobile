@@ -1,0 +1,33 @@
+// DOM/interaction checks only. This does not claim pixel geometry or Android IME coverage.
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { JSDOM } = require(process.env.LR_JSDOM_MODULE || 'jsdom');
+const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'https://qa.invalid', pretendToBeVisual: true });
+for (const name of ['window','document','HTMLElement','Element','Node','localStorage','MutationObserver','Event','MouseEvent','KeyboardEvent']) global[name] = dom.window[name];
+global.requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window);
+global.cancelAnimationFrame = dom.window.cancelAnimationFrame.bind(dom.window);
+window.matchMedia = query => ({ matches: query.includes('reduced-motion'), addEventListener(){},removeEventListener(){} });
+const { mountToolbarFixture } = require(path.resolve(process.argv[2]));
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const byLabel = label => [...document.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === label);
+const click = async button => { assert.ok(button, 'button exists'); button.click(); await sleep(35); };
+const commands = () => [...document.querySelectorAll('.st-editor-command')].map(button => button.getAttribute('aria-label'));
+(async () => {
+  const received=[]; let root=mountToolbarFixture(document.getElementById('root'), command=>received.push(command)); await sleep(60);
+  assert.equal(commands().length,16);
+  await click(byLabel('笔记更多操作')); assert.equal(document.querySelectorAll('.st-toolbar-settings li').length,16);
+  await click(byLabel('隐藏加粗')); assert.equal(commands().includes('加粗'),false); assert.ok(byLabel('显示加粗'));
+  await click(byLabel('上移插入内部链接')); assert.deepEqual(commands().slice(0,3),['撤销','插入内部链接','重做']);
+  await click(byLabel('显示加粗')); assert.ok(commands().includes('加粗'));
+  await click(byLabel('隐藏加粗'));
+  document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); await sleep(70);
+  assert.equal(document.querySelector('.st-toolbar-settings'),null); assert.equal(commands().includes('加粗'),false);
+  await click(byLabel('插入内部链接')); assert.deepEqual(received,['wiki']);
+  assert.ok(byLabel('插入附件')); await click(byLabel('插入附件')); assert.deepEqual(received,['wiki','attachment']);
+  root.unmount(); await sleep(20); root=mountToolbarFixture(document.getElementById('root'),command=>received.push(command)); await sleep(50);
+  assert.equal(commands().includes('加粗'),false); assert.equal(commands()[1],'插入内部链接');
+  await click(byLabel('笔记更多操作')); await click([...document.querySelectorAll('button')].find(button=>button.textContent==='恢复默认工具栏'));
+  assert.equal(commands().length,16); assert.deepEqual(commands().slice(0,3),['撤销','重做','插入内部链接']);
+  assert.equal(document.querySelector('[data-test="preview"] img'),null); assert.match(document.querySelector('[data-test="preview"]').textContent,/<img/);
+  root.unmount(); console.log(JSON.stringify({status:'passed',checks:12,kind:'DOM interaction, not browser geometry or device IME'})); dom.window.close();
+})().catch(error=>{console.error(error);dom.window.close();process.exitCode=1});

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luckyray.local/protocol-v1/desktop-identity.schema.json",
+  "title": "DesktopIdentity",
+  "description": "Identity of a paired Desktop gateway instance.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["instanceId", "displayName", "platform", "appVersion", "protocolVersion", "certificateFingerprint"],
+  "properties": {
+    "instanceId": { "type": "string", "minLength": 1 },
+    "displayName": { "type": "string" },
+    "platform": { "enum": ["windows", "macos", "linux"] },
+    "appVersion": { "type": "string" },
+    "protocolVersion": { "type": "integer" },
+    "certificateFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

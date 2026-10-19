@@ -1,0 +1,28 @@
+const assert=require('node:assert/strict'),path=require('node:path');const {JSDOM}=require(process.env.LR_JSDOM_MODULE||'jsdom');
+const dom=new JSDOM('<div id="root"></div>',{url:'https://qa.invalid',pretendToBeVisual:true});
+for(const k of ['window','document','HTMLElement','Element','Node','localStorage','Event','MouseEvent','KeyboardEvent','MutationObserver','DOMRect','Window'])global[k]=dom.window[k];
+global.getComputedStyle=window.getComputedStyle.bind(window);global.requestAnimationFrame=window.requestAnimationFrame.bind(window);global.cancelAnimationFrame=window.cancelAnimationFrame.bind(window);
+window.Range.prototype.getClientRects=()=>[];window.Range.prototype.getBoundingClientRect=()=>new DOMRect(0,0,0,0);window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
+Object.defineProperty(document.documentElement,'clientWidth',{value:360,configurable:true});Object.defineProperty(document.documentElement,'clientHeight',{value:700,configurable:true});
+window.__TAURI_INTERNALS__={convertFileSrc:path=>'asset://qa'+path};
+const {mount,wikiCompletionBounds}=require(path.resolve(process.argv[2]));const wait=(ms=80)=>new Promise(r=>setTimeout(r,ms));
+(async()=>{const events=[];let checks=0;const f=mount(document.getElementById('root'),e=>events.push(e));await wait(180);
+let image=document.querySelector('.note-reading img');assert.ok(image);checks++;
+const paper=document.querySelector('.st-note-paper');paper.scrollTop=650;
+const srcMutations=[];const observer=new MutationObserver(records=>srcMutations.push(...records));observer.observe(image,{attributes:true,attributeFilter:['src']});
+for(let i=0;i<30;i++){f.render();await wait(5)}
+assert.ok(document.querySelector('.note-reading img')===image,'attachment DOM must survive unchanged parent renders');assert.equal(events.filter(e=>e[0]==='fetch').length,1);assert.equal(events.filter(e=>e[0]==='cache').length,1);assert.equal(paper.scrollTop,650);assert.equal(srcMutations.length+observer.takeRecords().length,0);checks+=5;
+f.setOnline(false);await wait();assert.ok(document.querySelector('.note-reading img')===image,'attachment DOM must survive unchanged parent renders');assert.equal(image.getAttribute('src'),'asset://qa/qa/v1.png');checks+=2;
+f.setOnline(true);await wait(180);assert.ok(document.querySelector('.note-reading img')===image,'attachment DOM must survive unchanged parent renders');assert.equal(paper.scrollTop,650);checks+=2;
+f.setVersion('v2');await wait(180);assert.ok(document.querySelector('.note-reading img')!==image,'real version change retires old attachment');assert.equal(document.querySelector('.note-reading img').getAttribute('src'),'asset://qa/qa/v2.png');checks+=2;
+f.setScope('qa-new');await wait(180);assert.equal(events.filter(e=>e[0]==='cache').at(-1)[4],'qa-new');checks++;
+assert.ok(document.querySelector('[aria-label="笔记更多操作"] [data-note-icon="menu"]'));assert.equal(document.querySelector('[aria-label="查找笔记"] svg').getAttribute('width'),'25');assert.ok(document.querySelector('.st-option [data-note-icon="code"]'));checks+=3;
+f.edit();await wait(200);const h=f.ref.current;assert.ok(document.querySelector('.st-editor-image img'));assert.equal(document.querySelector('.st-editor-image-caption').hidden,true);checks+=2;
+h.focus();h.setSelection({start:4,end:7});const before=h.getValue();const sel=h.getSelection();
+f.source(true);await wait(180);assert.equal(document.querySelector('.st-editor-image'),null);assert.equal(h.getValue(),before);assert.deepEqual(h.getSelection(),sel);assert.equal(f.ref.current,h);assert.equal(events.filter(e=>e[0]==='change').length,0);checks+=5;
+f.source(false);await wait(180);assert.ok(document.querySelector('.st-editor-image img'));assert.equal(h.getValue(),before);checks+=2;
+h.setSelection({start:before.length-2,end:before.length-2});await wait(260);const popup=document.querySelector('.st-wiki-completion');assert.ok(popup);assert.equal(popup.closest('.cm-editor'),null);assert.ok(document.body.contains(popup));assert.equal(popup.style.width,'336px');checks+=3;
+assert.deepEqual(wikiCompletionBounds(360,400,0,0),{left:12,right:348,top:8,bottom:392});checks++;
+Object.defineProperty(document.documentElement,'clientWidth',{value:280});window.dispatchEvent(new Event('resize'));await wait();assert.equal(popup.style.width,'256px');checks++;
+f.root.unmount();await wait();assert.equal(document.querySelector('.st-wiki-completion'),null);checks++;
+console.log(JSON.stringify({status:'passed',checks,kind:'React + CM DOM lifecycle; jsdom geometry stubbed, NOT device/pixel proof'}));dom.window.close();})().catch(e=>{console.error(e);dom.window.close();process.exitCode=1});

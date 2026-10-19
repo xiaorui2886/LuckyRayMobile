@@ -1,0 +1,26 @@
+LuckyRay Mobile development player — AndroidX Media3 1.11.1
+
+Includes unmodified AndroidX Media3 exoplayer, ui, common, container,
+datasource, decoder, extractor and database modules.
+The Android Open Source Project and AndroidX Media3 contributors.
+Licensed under the Apache License, Version 2.0.
+The accompanying APACHE-2.0.txt contains the full license conditions.
+Source and original license: https://github.com/androidx/media/tree/1.11.1
+https://github.com/androidx/media/blob/1.11.1/LICENSE
+
+Resolved Media3 runtime transitives:
+Google Guava 33.3.1-android, failureaccess 1.0.2 and the empty
+listenablefuture 9999.0-empty-to-avoid-conflict-with-guava placeholder.
+Copyright Google Inc. Apache License, Version 2.0.
+Source: https://github.com/google/guava/tree/v33.3.1
+Other AndroidX, Kotlin and annotation libraries are retained in the existing
+application dependency graph; see the saved resolved runtime review.
+
+Uses the Android platform MediaCodec implementations. No FFmpeg/libmpv,
+software codec extension or Cronet/GMS network stack is included by this
+player. Actual container/codec/profile capability depends on the device.
+
+This is a development feasibility candidate, not a formal distribution or
+codec-patent clearance. Existing declared application dependencies are retained.
+Resolved transitive additions/upgrades and their dependency notices are reviewed
+with the candidate's dependency review before any formal distribution.

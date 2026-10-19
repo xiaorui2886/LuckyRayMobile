@@ -1,0 +1,240 @@
+name: Public build and tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - main
+      - "public/**"
+  workflow_dispatch:
+
+# This workflow needs only source checkout. It never receives signing keys,
+# production credentials, an Android emulator, or a connected device.
+permissions:
+  contents: read
+
+concurrency:
+  group: public-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-contract:
+    name: Frontend, sync, and Protocol V1 conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install locked JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+      - name: TypeScript typecheck
+        run: node node_modules/typescript/bin/tsc --noEmit
+      # Keep this offline-safe list explicit. Live companion integration tests
+      # are intentionally outside the public CI contract.
+      - name: Navigation, sync, local protocol, autosave, filter, library, invalidation, provenance, and IME-authority tests
+        run: >-
+          node --experimental-strip-types --test
+          tests/navigation.test.ts
+          tests/stillScene.test.ts
+          tests/contentSyncDiagnostic.test.ts
+          tests/syncCoordinator.test.ts
+          tests/knowledgeLiveSyncPrep.test.ts
+          tests/knowledgeEditingSession.test.ts
+          tests/knowledgeLiveSyncConsumer.test.ts
+          tests/knowledgeColdCacheBootstrap.contract.test.ts
+          tests/protocolConformance.test.ts
+          tests/localNoteAutosave.test.ts
+          tests/knowledgeFilter.test.ts
+          tests/libraryFilter.test.ts
+          tests/libraryPagination.test.ts
+          tests/thumbnailQueue.test.ts
+          tests/assetProtocolScope.test.ts
+          tests/homeLocalModel.test.ts
+          tests/localDataStore.test.ts
+          tests/generationPagination.test.ts
+          tests/unifiedSearchContract.test.ts
+          tests/unifiedSearchSession.test.ts
+          tests/knowledgeNotesPager.test.ts
+          tests/knowledgeReplicaS1.test.ts
+          tests/knowledgeContinuityR1.test.ts
+          tests/noteReadingPosition.test.ts
+          tests/noteTapEditing.test.ts
+          tests/knowledgeNavigation.test.ts
+          tests/qa99LocalWiki.test.ts
+          tests/mobileNavigationRepair.test.ts
+          tests/localInvalidation.test.ts
+          tests/exportPolicy.test.ts
+          tests/productShell.test.ts
+          tests/scaleStress.test.ts
+          tests/shareCompatibility.test.ts
+          tests/capabilityAcl.test.ts
+          tests/androidPatchContract.test.ts
+          tests/androidBuildGeneration.test.ts
+          tests/connectionShell.test.ts
+          tests/noteProvenance.test.ts
+          tests/desktopNoteReader.test.ts
+          tests/noteResourceSession.test.ts
+          tests/pausedNoteRecovery.test.ts
+          tests/androidImeAuthority.test.ts
+          tests/touchNavigationBlocker.test.ts
+          tests/noteArchiveParity.test.ts
+          tests/responsiveDesignContract.test.ts
+          tests/safeAreaAuthority.test.ts
+          tests/uiPolishContract.test.ts
+          tests/interactionClosureContract.test.ts
+          tests/stillParityContract.test.ts
+          tests/cm6EditorAdapter.test.ts
+          tests/stillUserQaFixContract.test.ts
+          tests/a0StateStabilization.test.ts
+          tests/waveAMaterialOrganization.test.ts
+          tests/localKnowledgeUsability.test.ts
+          tests/localLibraryUsability.test.ts
+          tests/lshSurface.test.ts
+          tests/lshAndroidShell.test.ts
+          tests/filterDraft.test.ts
+          tests/companionServicesV1.contract.test.ts
+          tests/companionServicesV1Repair.contract.test.ts
+          tests/companionServicesV1Repair2.contract.test.ts
+          tests/companionServicesV1Repair3.contract.test.ts
+          tests/companionServicesV1Repair4.contract.test.ts
+          tests/companionServicesV1Repair5.contract.test.ts
+          tests/companionServicesV1Repair6.contract.test.ts
+          tests/companionServicesV1G1.contract.test.ts
+          tests/companionServicesV1Repair8.contract.test.ts
+          tests/servicesAcceptanceDriver.contract.test.ts
+          tests/servicesAssetDetail.contract.test.ts
+          tests/servicesSearchR1.contract.test.ts
+          tests/materialLibraryInstantR1.contract.test.ts
+          tests/materialLibraryWiring.contract.test.ts
+          tests/desktopPageAuthority.contract.test.ts
+          tests/desktopPageCoalescing.contract.test.ts
+          tests/desktopPageMountSequence.contract.test.ts
+          tests/pressGesture.contract.test.ts
+          tests/pressGestureTap.contract.test.ts
+          tests/materialSelectionR5.contract.test.ts
+          tests/materialSelectionBarR6.contract.test.ts
+          tests/materialPolishR7.contract.test.ts
+          tests/materialPolishR7b.contract.test.ts
+          tests/materialPolishR7c.contract.test.ts
+          tests/servicesKnowledgeBrowse.contract.test.ts
+          tests/servicesKnowledgeBrowseRepair.contract.test.ts
+          tests/servicesKnowledgeBrowseRepair2.contract.test.ts
+          tests/knowledgeUxRepairR4.contract.test.ts
+          tests/knowledgeSessionBehaviorR41.contract.test.ts
+          tests/knowledgeSessionBehaviorR42.contract.test.ts
+          tests/knowledgeSessionBehaviorR43.contract.test.ts
+          tests/knowledgeSessionBehaviorR44.contract.test.ts
+          tests/knowledgeOrganizationR1.contract.test.ts
+          tests/pressGuardR7a.contract.test.ts
+          tests/uxPolishR1.contract.test.ts
+          tests/uxPolishR1Repair.contract.test.ts
+          tests/durablePublishDebounce.test.ts
+          tests/editorToolbarPreferences.test.ts
+          tests/localWikiPresentation.test.ts
+          tests/readingModeTransition.test.ts
+          tests/uiPrimitives.test.ts
+          tests/webviewCompatibility.test.ts
+          tests/wikiCompletion.test.ts
+          tests/wikiCompletionLayout.test.ts
+      - name: Build production web assets
+        run: pnpm build
+      - name: Verify dependency lockfiles unchanged
+        run: git diff --exit-code -- pnpm-lock.yaml src-tauri/Cargo.lock
+
+  pinning-tests:
+    name: Focused Rust TLS pinning tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Select Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Test actual pinning module with locked dependencies
+        run: python3 scripts/check-pinning-public.py
+      - name: Verify application lockfile unchanged
+        run: git diff --exit-code -- src-tauri/Cargo.lock
+
+  android-debug:
+    name: Android ARM64 development APK
+    needs: [frontend-contract, pinning-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci-android-target
+      CARGO_TERM_COLOR: always
+      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.workers.max=2
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install Android SDK components
+        run: |
+          # Use the runner's existing SDK and accepted licenses. Never auto-accept new terms.
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" < /dev/null
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          test -d "$ANDROID_HOME/ndk/27.2.12479018"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Select Rust stable and Android ARM64 target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android
+          rustc --version
+          cargo --version
+      - name: Install locked JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build development APK from tracked sources
+        run: bash scripts/build-android-public.sh
+      - name: Verify dependency lockfiles unchanged
+        run: git diff --exit-code -- pnpm-lock.yaml src-tauri/Cargo.lock
+      - name: Verify APK and prepare artifact
+        run: |
+          mkdir -p public-apk
+          mapfile -d '' apks < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*debug*.apk' -print0)
+          test "${#apks[@]}" -gt 0
+          for apk in "${apks[@]}"; do
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+            "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" > "$RUNNER_TEMP/apk-badging.txt"
+            grep -q "package: name='com.luckyray.mobile'" "$RUNNER_TEMP/apk-badging.txt"
+            grep -q "native-code:.*'arm64-v8a'" "$RUNNER_TEMP/apk-badging.txt"
+            python scripts/check-apk-bridges.py "$apk"
+            cp "$apk" public-apk/
+          done
+          (cd public-apk && sha256sum ./*.apk > SHA256SUMS)
+          cp BUILDING.md public-apk/
+      - name: Upload development APK (7 days)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: LuckyRayMobile-android-arm64-development-${{ github.sha }}
+          path: public-apk/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

@@ -1,0 +1,63 @@
+/* Knowledge UI R3: one quiet list rhythm at every directory depth. */
+.st-app .st-knowledge-folders{margin:0}
+.st-app .st-knowledge-folders .st-folder-row{position:relative;display:flex;align-items:center;gap:0;min-height:72px;width:100%;padding:14px 0!important;border-bottom:1px solid var(--st-line);border-radius:0;font-size:15px;font-weight:500;line-height:22px;color:var(--st-ink);text-align:left}
+.st-app .st-folder-symbol{display:flex;align-items:center;justify-content:center;width:24px;height:24px;flex:none;margin-right:12px;color:var(--st-secondary)}
+.st-app .st-folder-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-app .st-knowledge-folders .st-folder-row>.st-icon{margin-left:10px;flex:none;color:var(--st-muted)}
+.st-app .st-knowledge-note-symbol{display:none}
+.st-app .st-knowledge-view .st-note-row{position:relative;min-height:72px;padding:14px 0 14px 36px!important;border-bottom:1px solid var(--st-line)!important}
+.st-app .st-knowledge-view .st-note-row .st-knowledge-note-symbol{position:absolute;left:0;top:24px;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--st-secondary)}
+.st-app .st-knowledge-view .st-note-row strong{font-size:15px;font-weight:500;line-height:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st-app .st-knowledge-view .st-note-row p,.st-app .st-knowledge-view .st-note-row .st-note-hit{margin:4px 0 0;font-size:12px;line-height:18px;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.st-app .st-knowledge-view .st-note-row p:empty{display:none}
+.st-app .st-knowledge-view .st-note-row small{font-size:10px;line-height:16px;margin-top:4px}
+.st-app .st-knowledge-view .st-note-row.is-selecting{padding-right:34px!important}
+.st-app .st-folder-breadcrumbs{display:flex;flex-direction:column;align-items:stretch;padding:8px 0 6px;margin:0;border-bottom:1px solid var(--st-line);color:var(--st-secondary)}
+.st-app .st-folder-trail{display:flex;align-items:center;min-width:0;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;white-space:nowrap}
+.st-app .st-folder-trail>span{display:inline-flex;align-items:center;flex:none;max-width:75%}
+.st-app .st-folder-trail button,.st-app .st-folder-trail strong{display:block;min-height:36px;padding:7px 0;font-size:12px;line-height:22px;font-weight:400;overflow:hidden;text-overflow:ellipsis;color:var(--st-secondary)}
+.st-app .st-folder-trail strong{font-size:14px;font-weight:550;color:var(--st-ink)}
+.st-app .st-folder-trail .st-icon{color:var(--st-muted);flex:none;margin:0 8px}
+.st-app .st-knowledge-view .st-scroll{padding-top:8px}
+.st-app .st-note-surface>.st-header{grid-template-columns:52px minmax(0,1fr) 96px}
+.st-app .st-note-header-actions{display:flex;align-items:center;gap:0;padding:0 2px;border-radius:22px;background:var(--st-surface)}
+.st-app .st-note-header-actions .st-icon-button:before{display:none}
+.st-app .st-note-action-icon{display:block;flex:none;pointer-events:none}
+.st-app .st-note-prose.is-tap-editable{min-height:160px}
+.st-app .st-note-surface .st-editor-command{display:flex;align-items:center;justify-content:center;min-width:44px;height:44px}
+.st-app .st-note-surface .st-editor-command .st-note-action-icon{width:21px;height:21px}
+.st-app .st-toolbar-settings-label .st-note-action-icon{color:var(--st-secondary);flex:0 0 30px}
+
+/* Explicit margins also work on the supported Android WebView 83. */
+.st-app .st-note-header-actions>button+button{margin-left:4px}
+
+/* The original button's z-index:0 disc otherwise paints over the new SVG. */
+.st-app .st-note-surface .st-header .st-icon-button>.st-note-action-icon{position:relative;z-index:1;color:var(--st-ink)}
+/* Title has no rich-text commands. Do not float reader navigation above its IME. */
+.st-app .st-note-surface.is-title-focused>.st-reader-bottom{display:none}
+
+/* One stroke language across knowledge navigation, editing and option sheets. */
+.st-app .st-knowledge-view .st-icon,.st-app .st-note-surface .st-icon,.st-app .st-note-surface~.st-modal .st-icon,.st-app .st-knowledge-view~.st-modal .st-icon{stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.st-app .st-knowledge-view .st-collection-head .st-icon-button,.st-app .st-note-surface .st-reader-tools>button{border-radius:50%}
+.st-wiki-completion{touch-action:pan-y;overscroll-behavior-y:contain;max-height:200px;overflow-y:auto;box-sizing:border-box;min-width:0;max-width:calc(100vw - 24px);width:calc(100vw - 24px);padding:6px;background:var(--st-sheet,#f5f5f1);color:var(--st-ink,#222);border:1px solid var(--st-line,#ddd);border-radius:14px;box-shadow:0 6px 22px #0002;font-family:inherit}
+.st-wiki-completion button{display:block;width:100%;min-height:44px;padding:9px 12px;border:0;border-radius:9px;background:transparent;color:inherit;text-align:left}
+.st-wiki-completion button[aria-selected=true]{background:var(--st-selected,#e5e8df)}
+.st-wiki-completion strong{display:block;font-size:14px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-wiki-completion small{display:block;font-size:11px;color:var(--st-secondary,#777);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}
+.st-wiki-completion-status{padding:10px 12px;font-size:12px;color:var(--st-secondary,#777)}
+.st-editor-image{padding:8px 0 12px;max-width:100%;white-space:normal;user-select:none}
+.st-editor-image img{display:block;max-width:100%;max-height:320px;object-fit:contain;border-radius:10px}
+.st-editor-image img[hidden],.st-editor-image button[hidden],.st-editor-image-caption[hidden]{display:none}
+.st-editor-image-caption{display:block;font-size:11px;line-height:18px;color:var(--st-secondary);overflow-wrap:anywhere}
+.st-editor-image button{font-size:12px;min-height:40px;color:var(--st-accent)}
+
+.st-app .st-note-find>button,.st-app .st-toolbar-settings li>button{display:inline-flex;align-items:center;justify-content:center;min-width:40px;min-height:40px}
+
+/* Portal is outside transformed/scrolling editor ancestors. */
+.st-wiki-completion.cm-tooltip{z-index:1000;box-sizing:border-box;overflow-x:hidden;border-radius:16px}
+.st-wiki-completion button{box-sizing:border-box;min-width:0;font:inherit}
+
+.st-app .st-note-navigation{padding:2px 14px;min-height:52px;box-shadow:0 5px 20px #00000008}
+.st-app .st-note-navigation>.st-note-nav-button{display:flex;align-items:center;justify-content:center;min-width:44px;height:48px;color:var(--st-ink)}
+.st-app .st-note-navigation .st-note-action-icon{stroke-width:1.8}
+.st-app .st-option>.st-note-action-icon{flex:0 0 23px;width:23px;height:23px;margin-right:14px;color:var(--st-secondary);stroke-width:1.8}

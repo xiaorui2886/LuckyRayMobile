@@ -1,0 +1,9 @@
+{
+  "opId": "8fb5e386-1f25-458e-8d08-9e468014df8a",
+  "type": "text",
+  "createdAt": "2026-08-07T12:00:00Z",
+  "payload": { "text": "M1 test capture", "title": "灵感" },
+  "attachmentRefs": [],
+  "state": "pending",
+  "attemptCount": 0
+}

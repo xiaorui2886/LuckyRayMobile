@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luckyray.local/protocol-v1/sync-change.schema.json",
+  "title": "SyncChange",
+  "description": "A single durable sync change entry. Tombstones appear as operation=delete.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["seq", "entityType", "entityId", "operation", "updatedAt"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 1, "description": "monotonic per desktop instance" },
+    "entityType": { "enum": ["asset", "note", "tag", "folder", "agent_run", "capture"] },
+    "entityId": { "type": "string" },
+    "operation": { "enum": ["upsert", "delete"] },
+    "revision": { "type": "string" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  }
+}

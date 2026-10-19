@@ -1,0 +1,8 @@
+{
+  "PAIRING_REQUIRED": { "status": 401, "code": "PAIRING_REQUIRED", "message": "device not paired" },
+  "AUTH_REVOKED": { "status": 401, "code": "AUTH_REVOKED", "message": "credential revoked" },
+  "CURSOR_TOO_OLD": { "status": 410, "code": "CURSOR_TOO_OLD", "message": "sync cursor expired, resync required", "resync": true },
+  "REVISION_CONFLICT": { "status": 409, "code": "REVISION_CONFLICT", "message": "note modified elsewhere" },
+  "UNSUPPORTED_CAPABILITY": { "status": 403, "code": "UNSUPPORTED_CAPABILITY", "message": "desktop does not expose capability" },
+  "DESKTOP_INSTANCE_CHANGED": { "status": 428, "code": "DESKTOP_INSTANCE_CHANGED", "message": "re-pair required" }
+}

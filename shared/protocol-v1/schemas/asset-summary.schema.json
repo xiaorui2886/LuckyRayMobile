@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luckyray.local/protocol-v1/asset-summary.schema.json",
+  "title": "AssetSummary",
+  "description": "Asset metadata for mobile. content_hash is integrity/dedup only, never a business primary key.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["desktopAssetId", "name", "kind", "mimeType", "sizeBytes", "updatedAt", "tags"],
+  "properties": {
+    "desktopAssetId": { "type": "string" },
+    "name": { "type": "string" },
+    "kind": { "enum": ["image", "video", "document", "text", "audio", "other"] },
+    "mimeType": { "type": "string" },
+    "sizeBytes": { "type": "integer", "minimum": 0 },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "contentHash": { "type": "string" },
+    "thumbnailRevision": { "type": "string" },
+    "folderId": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } }
+  }
+}

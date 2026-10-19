@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luckyray.local/protocol-v1/note-document.schema.json",
+  "title": "NoteDocument",
+  "description": "Note with content. Updates MUST carry expectedRevision; conflict -> 409 REVISION_CONFLICT.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["noteId", "title", "content", "revision", "updatedAt"],
+  "properties": {
+    "noteId": { "type": "string" },
+    "title": { "type": "string" },
+    "relativePath": { "type": "string" },
+    "content": { "type": "string" },
+    "revision": { "type": "string" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  }
+}

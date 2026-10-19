@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luckyray.local/protocol-v1/capture-operation.schema.json",
+  "title": "CaptureOperation",
+  "description": "Offline-first capture with opId as idempotency key.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["opId", "type", "createdAt", "payload", "attachmentRefs", "state", "attemptCount"],
+  "properties": {
+    "opId": { "type": "string", "format": "uuid" },
+    "type": { "enum": ["text", "link", "image", "file"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" },
+    "attachmentRefs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["refId", "kind", "fileName", "sizeBytes"],
+        "properties": {
+          "refId": { "type": "string" },
+          "kind": { "enum": ["image", "file"] },
+          "fileName": { "type": "string" },
+          "sizeBytes": { "type": "integer", "minimum": 0 },
+          "sha256": { "type": "string" }
+        }
+      }
+    },
+    "state": { "enum": ["pending", "inflight", "completed", "failed"] },
+    "attemptCount": { "type": "integer", "minimum": 0 },
+    "lastError": { "type": "string" }
+  }
+}

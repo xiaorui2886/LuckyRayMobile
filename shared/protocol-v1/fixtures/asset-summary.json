@@ -1,0 +1,12 @@
+{
+  "desktopAssetId": "asset-a1b2c3d4",
+  "name": "m1-sample-photo.jpg",
+  "kind": "image",
+  "mimeType": "image/jpeg",
+  "sizeBytes": 2431558,
+  "updatedAt": "2026-08-07T10:00:00Z",
+  "contentHash": "d0ea78313dd4c1f1c2f2b3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4",
+  "thumbnailRevision": "th-1",
+  "folderId": "folder-0001",
+  "tags": ["UI", "参考"]
+}

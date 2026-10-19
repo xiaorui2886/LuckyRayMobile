@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luckyray.local/protocol-v1/ai-run.schema.json",
+  "title": "AiRun",
+  "description": "Agent run record (remote view).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["runId", "conversationId", "status", "startedAt", "updatedAt"],
+  "properties": {
+    "runId": { "type": "string" },
+    "conversationId": { "type": "string" },
+    "status": { "enum": ["queued", "running", "awaiting_approval", "completed", "failed", "cancelled", "stopping"] },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "summary": { "type": "string" }
+  }
+}
