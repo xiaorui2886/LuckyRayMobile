@@ -455,6 +455,39 @@ pub(crate) fn content_note_previews(
     with_db(&state, |db| db.content_note_previews(&instance, &vault, &ids))
 }
 
+/// Bounded speculative body read. Never begins an editor or publishes a draft.
+#[tauri::command]
+pub(crate) async fn content_note_prefetch(state: State<'_, SharedState>, instance: String,
+    vault: String, id: String, expected_revision: String, job_id: String) -> Result<Value,String> {
+    public_id(&id)?; public_id(&vault)?; public_id(&job_id)?;
+    if expected_revision.len() > 4096 { return Err("CONTENT_ID_INVALID".into()); }
+    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let _slot = SLOTS.try_acquire().map_err(|_| "CONTENT_BUSY")?;
+    let source = Source::capture_expected(&state, &instance)?;
+    let observed = source.with_db(&state, |db| db.content_note_cached(&instance,&vault,&id))?;
+    if !Db::content_prefetch_eligible(&observed) { return Ok(json!({"changed":false})); }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let mut jobs=DOWNLOADS.get_or_init(Default::default).lock().map_err(|_|"CONTENT_BUSY")?;
+        if jobs.contains_key(&job_id) || jobs.len()>=128 {return Err("CONTENT_BUSY".into());}
+        jobs.insert(job_id.clone(),cancelled.clone());
+    }
+    let _job=DownloadJob{id:job_id,cancelled:cancelled.clone()};
+    let check=|| { if cancelled.load(Ordering::Acquire) {return Err("CONTENT_CANCELLED".into());} source.check(&state) };
+    cancellable(source.capabilities(&state,"noteRead"),&check).await??;
+    check()?;
+    let document=cancellable(remote_note(&source,&vault,&id),&check).await??;
+    if !expected_revision.is_empty() && document["revision"].as_str()!=Some(expected_revision.as_str()) {
+        return Ok(json!({"changed":false}));
+    }
+    check()?;
+    let changed=source.with_db(&state,|db| {
+        if cancelled.load(Ordering::Acquire) {return Err("CONTENT_CANCELLED".into());}
+        db.content_prefetch_adopt(&instance,&vault,&id,&observed,&document)
+    })?;
+    Ok(json!({"changed":changed}))
+}
+
 #[tauri::command]
 pub(crate) async fn content_note_refresh(
     state: State<'_, SharedState>,

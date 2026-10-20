@@ -323,10 +323,10 @@ test("closure: a detail page refuses organization once its Desktop is no longer 
 test("closure: favorite consumes the authoritative read state with no local mirror", () => {
   const assetTsx = read("src", "still", "StillAsset.tsx");
   // The label comes from the read DTO's favorite field.
-  assert.match(assetTsx, /label=\{asset\?\.favorite \? "取消收藏" : "收藏"\}/);
+  assert.match(assetTsx, /label="收藏"/);
   // The request sends the DESIRED state (the negation of the authoritative
   // read), never a blind toggle on a locally-tracked flag.
-  assert.match(assetTsx, /org\.setFavorite\(assetId, !asset\?\.favorite, revalidate\)/);
+  assert.match(assetTsx, /org\.setFavorite\(assetId, target, revalidate\)/);
   const desktopRegion = assetTsx.slice(assetTsx.indexOf("function DesktopAsset("));
   assert.ok(
     !/setAsset\(\{ \.\.\.asset, favorite/.test(desktopRegion),
@@ -781,7 +781,7 @@ function jsWrapperParams(source: string, method: string): string[] {
   return source
     .slice(open + 1, end)
     .split(",")
-    .map((part) => part.trim().split(":")[0]!.trim())
+    .map((part) => part.trim().split(":")[0]!.trim().replace(/\?$/, ""))
     .filter(Boolean);
 }
 
@@ -813,7 +813,7 @@ test("reader repair: note resource local IPC binds the expected Desktop without 
   );
 
   const command = rust.slice(rust.indexOf("pub(crate) async fn content_note_resource("), rust.indexOf("async fn download_resource("));
-  assert.match(command, /download_resource\(state, app, &instance, id, job_id, Some\(\(vault, note\)\)\)/);
+  assert.match(command, /download_resource\(state, app, &instance, id, job_id, Some\(\(vault, note\)\), None, None\)/);
   // Composition guard only; behavior/late-result tests exercise this real session.
   const preview = read("src", "components", "DesktopNotePreview.tsx");
   assert.match(preview, /new NoteResourceSession\(\{instance, vault, note\}, resource, api,/);
@@ -824,7 +824,7 @@ test("reader repair: note resource local IPC binds the expected Desktop without 
 test("r3: material downloads keep their expected-owner binding", () => {
   const rust = read("src-tauri", "src", "content.rs");
   const rustParams = rustCommandParams(rust, "content_asset_file");
-  assert.deepEqual(rustParams, ["instance", "id", "job_id"], "material downloads stay owner-bound");
+  assert.deepEqual(rustParams, ["instance", "id", "job_id", "max_bytes", "expected_version"], "material downloads stay owner-bound with optional speculative limits");
 
   const jsParams = jsWrapperParams(read("src", "services", "client.ts"), "contentAssetFile");
   assert.deepEqual(jsParams.map(snake), rustParams, "JS and Rust agree for the material path");

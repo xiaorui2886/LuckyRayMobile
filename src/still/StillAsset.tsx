@@ -1,3 +1,4 @@
+import { usePageCurrent } from "../presentation/still01/PageLayer";
 // STILL-01.1 — 素材查看 page (authority AssetDemo composition, real data).
 // Local assets keep their real edit/export/share/delete authorities; Desktop
 // assets stay read-only with on-demand acquisition and cancel. Image zoom is
@@ -145,15 +146,16 @@ function ZoomStage({ src, alt, poster, video, onNeedOriginal, playLabel = "获�
   const area = useRef<HTMLDivElement>(null);
   const firstSignal = useRef(toggleSignal);
   const [readySrc, setReadySrc] = useState("");
+  const [reveal, setReveal] = useState(false);
   const [imageError, setImageError] = useState("");
   useEffect(() => {
     let current = true;
-    setImageError("");
+    setImageError(""); setReveal(false);
     if (!src) { setReadySrc(""); return; }
     const image = new Image();
     image.onload = () => {
       void (image.decode ? image.decode() : Promise.resolve()).then(() => {
-        if (current && image.naturalWidth > 0) setReadySrc(src);
+        if (current && image.naturalWidth > 0) { setReadySrc(src); requestAnimationFrame(() => { if(current) setReveal(true); }); }
       }).catch(() => { if (current) setImageError("图片暂时无法显示，可在更多操作中重新获取。"); });
     };
     image.onerror = () => { if (current) setImageError("图片暂时无法显示，可在更多操作中重新获取。"); };
@@ -206,10 +208,11 @@ function ZoomStage({ src, alt, poster, video, onNeedOriginal, playLabel = "获�
     >
       {video ? (
         <InlineAssetVideo key={`${video.instance || "local"}:${video.id}:${video.path}:${video.epoch || ""}`} owner={video.instance} id={video.id} localPath={video.localPath} poster={poster} onFallback={onNeedOriginal} />
-      ) : readySrc && src ? (
-        <img src={readySrc} alt={alt} style={{ transform: `translate(${offset.x}px,${offset.y}px) scale(${zoom})` }} />
-      ) : poster ? (
-        <img src={poster} alt={alt} />
+      ) : readySrc && src || poster ? (
+        <div className="st-progressive-image" style={{ transform: `translate(${offset.x}px,${offset.y}px) scale(${zoom})` }}>
+          {poster && poster !== readySrc ? <img className="st-image-placeholder" src={poster} alt="" aria-hidden="true" draggable={false} /> : null}
+          {readySrc && src ? <img className={"st-image-original" + (reveal ? " is-revealed" : "")} src={readySrc} alt={alt} draggable={false} /> : <span className="st-sr-only">{alt}</span>}
+        </div>
       ) : null}
       {onNeedOriginal && !video ? (
         <button style={{ position: "absolute", background: "rgba(0,0,0,.65)", color: "white", border: 0, borderRadius: 24, width: 48, height: 48, display: "grid", placeItems: "center" }}
@@ -294,11 +297,12 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
   async function toggleFavorite() {
     if (favoritePending.current) return;
     favoritePending.current = true; setFavoriteBusy(true);
+    const previous = asset.favorite;
+    setAsset({ ...asset, favorite: !previous });
     try {
-      await api.localAssetSetFlags(localId, { favorite: !asset.favorite });
-      setAsset({ ...asset, favorite: !asset.favorite });
+      await api.localAssetSetFlags(localId, { favorite: !previous });
       localDataStore.publish("asset");
-    } catch (e: any) { toast.error(failureCopy(e, "操作失败。")); }
+    } catch (e: any) { setAsset((current: any) => current ? { ...current, favorite: previous } : current); toast.error(failureCopy(e, "操作失败。")); }
     finally { favoritePending.current = false; setFavoriteBusy(false); }
   }
 
@@ -398,7 +402,7 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
           notice={integrityError ? `${integrityText[integrityError] || "文件异常"} — 仅保留元数据。` : loadError} />
         <div className="st-asset-actions" role="toolbar" aria-label="素材操作">
           <AssetAction icon="share" label="分享" disabled={!healthy || busy} onClick={() => void share()} />
-          <AssetAction icon="heart" label={asset.favorite ? "取消收藏" : "收藏"} active={Boolean(asset.favorite)} disabled={favoriteBusy} onClick={() => void toggleFavorite()} />
+          <AssetAction icon="heart" label="收藏" active={Boolean(asset.favorite)} disabled={favoriteBusy} onClick={() => void toggleFavorite()} />
           <AssetAction icon="info" label="信息" onClick={() => setSheet("info")} />
           <AssetAction icon="trash" label="删除" onClick={() => setSheet("delete")} />
           <AssetAction icon="more" label="更多" onClick={() => setSheet("more")} />
@@ -465,7 +469,10 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
   const { conn, mode } = useStillNav();
   const [asset, setAsset] = useState<any>(null);
   const [thumb, setThumb] = useState(preview?.thumbnail || "");
-  const [resource, setResource] = useState<{ path: string; mime: string } | null>(null);
+  const pageCurrent = usePageCurrent();
+  const [pageVisible, setPageVisible] = useState(!document.hidden);
+  useEffect(() => { const update=()=>setPageVisible(!document.hidden);document.addEventListener("visibilitychange",update);return()=>document.removeEventListener("visibilitychange",update); }, []);
+  const [resource, setResource] = useState<{ path: string; mime: string; assetVersion?: string } | null>(null);
   const [screenPreview, setScreenPreview] = useState("");
   const [previewRetry, setPreviewRetry] = useState(0);
   const appliedPreviewRetry = useRef(0);
@@ -493,7 +500,11 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     createFolder: (i, name) => api.contentMaterialCreateFolder(i, name),
     batch: (i, input) => api.contentMaterialBatch(i, input),
   })).current;
+  const [cacheChecked, setCacheChecked] = useState(false);
+  const autoImageAttempt = useRef("");
   const [orgSnapshot, setOrgSnapshot] = useState(org.snapshot());
+  const [favoritePreview, setFavoritePreview] = useState<boolean | null>(null);
+  const favoritePending = useRef(false);
   useEffect(() => org.subscribe(setOrgSnapshot), [org]);
   // The REAL detail generation. It is bumped on mount, on route/owner change,
   // and on unmount, so an in-flight detail read or revalidation whose page is
@@ -589,7 +600,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     assetRef.current=null;denied.current=false;thumbRef.current=preview?.thumbnail||"";
     setAsset(null); setThumb(thumbRef.current); setResource(null); setScreenPreview("");setUnavailable(false);setMessage(""); setBusy(false);
     setPlayBusy(false); setPlayMessage(""); setPlayEvidence(null); playPosition.current = 0;
-    setPresent(null);
+    setPresent(null); setFavoritePreview(null); favoritePending.current = false; setCacheChecked(false); autoImageAttempt.current="";
     org.setIdentity(owner);
     // Bind the presentation action to THIS page context; any previous
     // handle (older asset/owner) is retired so its late outcome is a no-op.
@@ -603,7 +614,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     void readDetail();
     void api.contentCachedResource(owner, assetId).then((cached) => {
       if (gen === detailGen.current && !denied.current) setResource(cached);
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => { if(gen===detailGen.current) setCacheChecked(true); });
     // Services V1 enrichment through the production controller.
     loadSource();
     return () => {
@@ -642,6 +653,22 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     void prepare();
     return ()=>{live=false;};
   },[resource,asset?.contentHash,asset?.thumbnailRevision,asset?.updatedAt,ownerMismatch,unavailable,owner,assetId,previewRetry]);
+
+  useEffect(() => {
+    if (!pageCurrent || !pageVisible || !cacheChecked || !asset || asset.kind!=="image" || unavailable || ownerMismatch
+        || conn?.ws?.state!=="connected" || document.hidden || asset.sizeBytes>32*1024*1024) return;
+    const version=materialImageVersion(asset);
+    if(resource && (!resource.assetVersion || resource.assetVersion===version)) return;
+    if(job.current || autoImageAttempt.current===version) return;
+    autoImageAttempt.current=version;
+    const gen=detailGen.current, jobId=`image-detail-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    job.current=jobId;
+    void api.contentAssetFile(owner,assetId,jobId,32*1024*1024,version).then(value=>{
+      if(gen===detailGen.current&&!denied.current&&materialImageVersion(assetRef.current)===version)setResource(value);
+    }).catch(()=>{ /* Keep the visible thumbnail and explicit original/retry action. */ })
+      .finally(()=>{if(job.current===jobId)job.current="";});
+    return ()=>{void api.contentCancel(jobId); if(job.current===jobId) {job.current="";autoImageAttempt.current="";} };
+  },[pageCurrent,pageVisible,cacheChecked,asset?.kind,asset?.contentHash,asset?.thumbnailRevision,asset?.updatedAt,resource,ownerMismatch,unavailable,owner,assetId,conn?.ws?.state]);
 
   // REPAIR-R1 P1-C1: a meaningful same-Desktop connection transition (drop ->
   // reconnect) retires the old source request epoch and re-reads — the Rust
@@ -793,14 +820,19 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
           video={!unavailable && !ownerMismatch && asset?.kind === "video" ? { instance: owner, id: assetId, path: materialImageVersion(asset), epoch: wsState } : null}
           onNeedOriginal={!unavailable && !ownerMismatch && (asset?.kind || preview?.kind) === "video" ? () => void playVideo() : undefined}
           playLabel="播放视频" playBusy={playBusy} playMessage={playMessage}
-          notice={ownerMismatch ? "当前电脑已更换，请返回素材库重新打开。" : orgSnapshot.error || (orgSnapshot.busy ? "正在同步收藏与整理状态…" : "") || message || (busy && !source ? "正在从电脑获取原文件…" : "")}
+          notice={ownerMismatch ? "当前电脑已更换，请返回素材库重新打开。" : message || (busy && !source ? "正在从电脑获取原文件…" : "")}
         />
         <div className="st-asset-actions" role="toolbar" aria-label="素材操作">
-          <AssetAction icon="heart" label={asset?.favorite ? "取消收藏" : "收藏"} active={Boolean(asset?.favorite)}
-            disabled={ownerMismatch || unavailable || !asset || orgSnapshot.busy}
+          <AssetAction icon="heart" label="收藏" active={favoritePreview ?? Boolean(asset?.favorite)}
+            disabled={ownerMismatch || unavailable || !asset}
             onClick={() => {
-              if (!guardOrganization()) return;
-              void org.setFavorite(assetId, !asset?.favorite, revalidate);
+              if (favoritePending.current || org.snapshot().busy || !guardOrganization()) return;
+              const target = !asset?.favorite, generation = detailGen.current;
+              favoritePending.current = true; setFavoritePreview(target);
+              void org.setFavorite(assetId, target, revalidate).finally(() => {
+                if (generation !== detailGen.current) return;
+                favoritePending.current = false; setFavoritePreview(null);
+              });
             }} />
           <AssetAction icon="info" label="信息" onClick={() => setSheet("info")} />
           <AssetAction icon="trash" label="删除" onClick={() => toast.info("请在电脑端删除这条素材，手机暂不支持删除电脑素材。")} />
@@ -881,7 +913,6 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
           onChanged={revalidate}
         />
       ) : null}
-      {orgSnapshot.busy ? <div className="st-notice pending" role="status">正在同步到电脑…</div> : null}
       {orgSnapshot.error ? <div className="st-notice danger" role="status">{orgSnapshot.error}</div> : null}
       {orgSnapshot.partial ? (
         <div className="st-notice danger" role="status">

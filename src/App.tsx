@@ -1,3 +1,4 @@
+import { systemBarScrim, systemBarUpdater } from "./services/systemBarAppearance";
 import { useCallback, useEffect, useSyncExternalStore, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onBackButtonPress } from "@tauri-apps/api/app";
@@ -311,14 +312,16 @@ export default function App() {
   // icons; dark -> dark bar with light icons). Presentation only — the
   // approved native inset geometry is never touched here.
   useEffect(() => {
+    const updater = systemBarUpdater(api.setSystemBarAppearance);
     const apply = () => {
       const dark = document.documentElement.dataset.theme === "dark";
-      void api.setSystemBarAppearance(dark).catch(() => {});
+      updater.request(dark, systemBarScrim.active());
     };
     apply();
     const observer = new MutationObserver(apply);
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-    return () => observer.disconnect();
+    const release = systemBarScrim.subscribe(apply);
+    return () => { release(); observer.disconnect(); updater.dispose(); };
   }, []);
 
   // Android System WebView 83 does not reliably scroll a nested flex scroller

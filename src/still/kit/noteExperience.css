@@ -77,3 +77,5 @@
 .st-app .has-editor-tools>.st-reader-bottom{padding:4px 8px calc(var(--st-safe-bottom) + 4px)}
 .st-app .st-editor-image{padding:6px 0;box-sizing:border-box}
 .st-app .st-editor-image.is-inline{display:inline-block;vertical-align:middle;max-width:100%}
+
+.st-note-opening{padding:28px 0;display:grid;gap:14px;opacity:.45}.st-note-opening i{display:block;height:9px;border-radius:5px;background:var(--st-line);width:92%}.st-note-opening i:nth-child(2){width:78%}.st-note-opening i:last-child{width:60%}

@@ -1,3 +1,4 @@
+import { systemBarScrim } from "../../services/systemBarAppearance";
 import { NoteActionIcon, noteActionPaths } from './editor/NoteActionIcon';
 import { type EditorCommand } from './editor/editorCommands';
 import { toolbarCommands } from './editor/editorToolbarPreferences';
@@ -67,6 +68,7 @@ export function Option({label,detail,selected,onClick,danger=false,icon,iconSlot
  * All dismiss paths share one guarded animation. Business commits remain callbacks.
  */
 export function Sheet({title,children,onClose,footer,registerDismiss,busy=false}:{title:string;children:ReactNode;onClose:()=>void;footer?:ReactNode;registerDismiss?:(f:()=>void)=>()=>void;busy?:boolean}){
+ useEffect(() => systemBarScrim.acquire(), []);
  const ref=useRef<HTMLDivElement>(null),dismiss=useRef(onClose),busyRef=useRef(busy);
  dismiss.current=onClose;busyRef.current=busy;
  const [shown,setShown]=useState(false),[drag,setDrag]=useState(0),[dragging,setDragging]=useState(false);
@@ -138,7 +140,7 @@ export function HomeCapture({root,onCapture}:{root:Root;onCapture:()=>void}){
 }
 
 export type NoteState='local'|'synced'|'metadata'|'outdated'|'pending'|'conflict'|'error';
-export interface NoteSurfaceProps {title:string;body:string;notebook:string;mode:'read'|'edit';state:NoteState;savedLabel?:string;onBack:()=>void;onBrowse:()=>void;onMore:()=>void;onNew:()=>void;onEdit:(bodyOffset?:number)=>void;onRead?:()=>void;onChange:(title:string,body:string)=>void;onFormat:()=>void;onSearch:()=>void;onState:()=>void;onAttach?:()=>void;onCommand?:(command:EditorCommand)=>void;onRelations?:()=>void;readOnly?:boolean;readingContent?:ReactNode;/** The same retained CM editor replaces only the body textarea. */bodyEditor?:ReactNode}
+export interface NoteSurfaceProps {title:string;body:string;notebook:string;mode:'read'|'edit';state:NoteState;bodyAvailability?:"loading"|"online"|"offline"|"error";savedLabel?:string;onBack:()=>void;onBrowse:()=>void;onMore:()=>void;onNew:()=>void;onEdit:(bodyOffset?:number)=>void;onRead?:()=>void;onChange:(title:string,body:string)=>void;onFormat:()=>void;onSearch:()=>void;onState:()=>void;onAttach?:()=>void;onCommand?:(command:EditorCommand)=>void;onRelations?:()=>void;readOnly?:boolean;readingContent?:ReactNode;/** The same retained CM editor replaces only the body textarea. */bodyEditor?:ReactNode}
 export function NoteSurface(p:NoteSurfaceProps){
  const input=useRef<HTMLTextAreaElement>(null);
  const tools=useEditorTools();
@@ -165,9 +167,9 @@ export function NoteSurface(p:NoteSurfaceProps){
    {p.onRelations?<button type="button" className="st-icon-button" aria-label="笔记链接" title="笔记链接" onClick={p.onRelations}><NoteActionIcon name="more"/></button>:null}
  </div>}/>
 
- {warnings[p.state]&&<Notice tone={p.state==='conflict'||p.state==='error'?'danger':p.state==='pending'?'pending':'muted'} onClick={p.onState}>{warnings[p.state]}</Notice>}
+ {warnings[p.state]&&p.bodyAvailability!=='loading'&&<Notice tone={p.state==='conflict'||p.state==='error'?'danger':p.state==='pending'?'pending':'muted'} onClick={p.onState}>{warnings[p.state]}</Notice>}
  <main className={'st-note-paper'+(p.mode==='edit'?' is-editing':'')}>
- {noBody?<><h1>{p.title}</h1><Empty title="连接电脑后，继续阅读" body="标题和位置已保存，正文尚未缓存。"><Button kind="quiet" onClick={p.onState}>查看连接</Button></Empty></>:<>
+ {noBody?<><h1>{p.title}</h1>{p.bodyAvailability==='loading'?<div className="st-note-opening" role="status" aria-label="正在读取笔记"><i/><i/><i/></div>:<Empty title={p.bodyAvailability==='online'||p.bodyAvailability==='error'?"正文暂未读取":"连接电脑后，继续阅读"} body={p.bodyAvailability==='online'||p.bodyAvailability==='error'?"正文还没有缓存到手机，请稍后重试。":"标题和位置已保存，正文尚未缓存。"}><Button kind="quiet" onClick={p.onState}>{p.bodyAvailability==='online'||p.bodyAvailability==='error'?"查看状态":"查看连接"}</Button></Empty>}</>:<>
  {editable?<input className="st-note-title" aria-label="笔记标题" value={p.title} onFocus={()=>{if(p.mode==='read')p.onEdit()}} onChange={e=>p.onChange(e.target.value,p.body)} placeholder="标题"/>:<h1>{p.title||'未命名笔记'}</h1>}
  {p.mode==='edit'&&editable?(p.bodyEditor??<textarea ref={input} className="st-note-editor" aria-label="笔记正文" value={p.body} onChange={e=>p.onChange(p.title,e.target.value)} placeholder="" spellCheck={false}/>):<div className={'st-note-prose'+(editable?' is-tap-editable':'')} tabIndex={editable?0:undefined} aria-label={editable?'笔记正文，点击输入':'笔记正文'}
    onPointerDown={e=>{pointer.current=e.isPrimary&&e.button===0?{x:e.clientX,y:e.clientY,at:Date.now()}:null}}

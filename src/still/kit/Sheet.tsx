@@ -1,3 +1,4 @@
+import { systemBarScrim } from "../../services/systemBarAppearance";
 // Still Sheet — Android compatibility implementation (STILL-01.1-USER-QA-FIX-R1).
 //
 // Renders the EXACT authority Sheet DOM/classes/behaviour (design/
@@ -26,6 +27,7 @@ export function Sheet({ title, children, onClose, footer, registerDismiss, busy 
   title: string; children: React.ReactNode; onClose: () => void;
   footer?: React.ReactNode; registerDismiss?: (f: () => void) => () => void; busy?: boolean; retainEditorFocus?: boolean;
 }) {
+  useEffect(() => systemBarScrim.acquire(), []);
   const ref = useRef<HTMLDivElement>(null), dismiss = useRef(onClose), busyRef = useRef(busy);
   const keepInput = useRef(false);
   dismiss.current = onClose; busyRef.current = busy;

@@ -148,6 +148,7 @@ jobs:
           tests/wikiCompletionLayout.test.ts
           tests/mobileMediaDetailR6.test.ts
           tests/mobileR6KnowledgeNavigation.test.ts
+          tests/mobileR7Polish.test.ts
       - name: Real CodeMirror attachment and viewport DOM regressions
         run: |
           npm install --prefix "$RUNNER_TEMP/lr-dom" --no-package-lock --ignore-scripts jsdom@30.1.3
@@ -176,8 +177,8 @@ jobs:
       - name: Verify application lockfile unchanged
         run: git diff --exit-code -- src-tauri/Cargo.lock
 
-  android-debug:
-    name: Android ARM64 development APK
+  android-release:
+    name: Android ARM64 optimized release APK (unsigned)
     needs: [frontend-contract, pinning-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -219,29 +220,41 @@ jobs:
           cargo --version
       - name: Install locked JavaScript dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build development APK from tracked sources
-        run: bash scripts/build-android-public.sh
+      - name: Build optimized release APK from tracked sources
+        run: bash scripts/build-android-public.sh --release
       - name: Verify dependency lockfiles unchanged
         run: git diff --exit-code -- pnpm-lock.yaml src-tauri/Cargo.lock
       - name: Verify APK and prepare artifact
         run: |
           mkdir -p public-apk
-          mapfile -d '' apks < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*debug*.apk' -print0)
-          test "${#apks[@]}" -gt 0
+          mapfile -d '' apks < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*release-unsigned.apk' -print0)
+          test "${#apks[@]}" -eq 1
           for apk in "${apks[@]}"; do
-            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
             "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" > "$RUNNER_TEMP/apk-badging.txt"
             grep -q "package: name='com.luckyray.mobile'" "$RUNNER_TEMP/apk-badging.txt"
             grep -q "native-code:.*'arm64-v8a'" "$RUNNER_TEMP/apk-badging.txt"
+            if grep -q 'application-debuggable' "$RUNNER_TEMP/apk-badging.txt"; then
+              echo 'Release APK must not be debuggable' >&2; exit 1
+            fi
+            "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$apk"
             python scripts/check-apk-bridges.py "$apk"
             cp "$apk" public-apk/
           done
           (cd public-apk && sha256sum ./*.apk > SHA256SUMS)
           cp BUILDING.md public-apk/
-      - name: Upload development APK (7 days)
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          files = ['pnpm-lock.yaml', 'src-tauri/Cargo.lock']
+          identity = {'sourceCommit': os.environ['GITHUB_SHA'], 'profile': 'release',
+                      'target': 'aarch64-linux-android', 'signing': 'unsigned; local signing required',
+                      'runUrl': f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+                      'lockfiles': {p: hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in files}}
+          pathlib.Path('public-apk/BUILD-IDENTITY.json').write_text(json.dumps(identity, indent=2) + '\n')
+          PY
+      - name: Upload unsigned release candidate (7 days)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: LuckyRayMobile-android-arm64-development-${{ github.sha }}
+          name: LuckyRayMobile-android-arm64-release-unsigned-${{ github.sha }}
           path: public-apk/
           if-no-files-found: error
           retention-days: 7

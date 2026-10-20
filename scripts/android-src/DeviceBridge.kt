@@ -46,22 +46,24 @@ object DeviceBridge {
      *  (用户问题1). Presentation only — applySystemBarInsets() geometry and
      *  IME math in MainActivity are untouched. */
     @JvmStatic
-    fun setSystemBarAppearance(dark: Boolean) {
+    fun setSystemBarAppearance(dark: Boolean, dimmed: Boolean) {
         val activity = appActivity ?: return
         activity.runOnUiThread {
             WindowInsetsControllerCompat(activity.window, activity.window.decorView).apply {
                 isAppearanceLightStatusBars = !dark
                 isAppearanceLightNavigationBars = !dark
             }
-            if (dark) {
-                activity.window.decorView.setBackgroundColor(Color.rgb(9, 9, 11))
-                activity.window.statusBarColor = Color.rgb(9, 9, 11)
-                activity.window.navigationBarColor = Color.rgb(9, 9, 11)
-            } else {
-                activity.window.decorView.setBackgroundColor(Color.rgb(247, 247, 244))
-                activity.window.statusBarColor = Color.rgb(247, 247, 244)
-                activity.window.navigationBarColor = Color.rgb(247, 247, 244)
-            }
+            val base = if (dark) Color.rgb(9, 9, 11) else Color.rgb(247, 247, 244)
+            val scrim = if (dark) Color.BLACK else Color.rgb(19, 23, 21)
+            val alpha = if (!dimmed) 0f else if (dark) 0.42f else 0.25f
+            fun blend(a: Int, b: Int) = (a * (1f - alpha) + b * alpha).toInt()
+            val status = Color.rgb(blend(Color.red(base), Color.red(scrim)),
+                blend(Color.green(base), Color.green(scrim)), blend(Color.blue(base), Color.blue(scrim)))
+            // The decor paints the status-bar inset on edge-to-edge Android.
+            // The bottom sheet remains undimmed, as does its navigation bar.
+            activity.window.decorView.setBackgroundColor(status)
+            activity.window.statusBarColor = status
+            activity.window.navigationBarColor = base
         }
     }
 }

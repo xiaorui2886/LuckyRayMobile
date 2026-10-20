@@ -258,6 +258,50 @@ mod tests {
     }
 
 
+    fn prefetch_document(revision: &str) -> Value {
+        json!({"noteId":"kn-a","vaultId":"vault-a","title":"预加载","relativePath":"预加载.md",
+          "revision":revision,"content":"","resources":[],"updatedAt":"2026-10-20T00:00:00Z","deleted":false})
+    }
+    #[test]
+    fn prefetch_empty_body_is_complete_and_does_not_allocate_epoch_or_move_cursor() {
+        let mut db=fixture(); let before=db.content_sync_position("desktop-a","vault-a").unwrap();
+        assert!(db.content_prefetch_adopt("desktop-a","vault-a","kn-a",&None,&prefetch_document("r1")).unwrap());
+        let note=db.content_note_cached("desktop-a","vault-a","kn-a").unwrap();
+        assert!(!Db::content_prefetch_eligible(&note));
+        assert_eq!(note.as_ref().unwrap()["editorEpoch"],0);
+        assert_eq!(db.content_sync_position("desktop-a","vault-a").unwrap(),before);
+    }
+    #[test]
+    fn prefetch_metadata_adoption_is_conditional_on_exact_observation() {
+        let mut db=fixture();let mut summary=prefetch_document("r1");summary.as_object_mut().unwrap().remove("content");
+        db.content_apply_batch("desktop-a","vault-a",&[summary.clone()],4,None).unwrap();
+        let old=db.content_note_cached("desktop-a","vault-a","kn-a").unwrap();
+        assert!(Db::content_prefetch_eligible(&old));
+        summary["revision"]=json!("r2");db.content_apply_batch("desktop-a","vault-a",&[summary],5,None).unwrap();
+        assert!(!db.content_prefetch_adopt("desktop-a","vault-a","kn-a",&old,&prefetch_document("r1")).unwrap());
+        let current=db.content_note_cached("desktop-a","vault-a","kn-a").unwrap();
+        assert!(db.content_prefetch_adopt("desktop-a","vault-a","kn-a",&current,&prefetch_document("r2")).unwrap());
+    }
+    #[test]
+    fn prefetch_does_not_replace_new_editor_epoch_or_dirty_draft() {
+        let mut db=fixture();let mut summary=prefetch_document("r1");summary.as_object_mut().unwrap().remove("content");
+        db.content_apply_batch("desktop-a","vault-a",&[summary],1,None).unwrap();
+        let old=db.content_note_cached("desktop-a","vault-a","kn-a").unwrap();
+        db.content_begin_edit("desktop-a","vault-a","kn-a").unwrap();
+        assert!(!db.content_prefetch_adopt("desktop-a","vault-a","kn-a",&old,&prefetch_document("r1")).unwrap());
+        for field in ["dirty","deleted"] { let mut n=old.clone().unwrap();n[field]=json!(true);assert!(!Db::content_prefetch_eligible(&Some(n))); }
+        let mut n=old.clone().unwrap();n["pendingKind"]=json!("create");assert!(!Db::content_prefetch_eligible(&Some(n)));
+        let mut n=old.unwrap();n["conflictDocument"]=json!({"content":"keep"});assert!(!Db::content_prefetch_eligible(&Some(n)));
+    }
+    #[test]
+    fn prefetch_rejects_wrong_scope_and_incomplete_documents() {
+        let mut db=fixture();for field in ["noteId","vaultId","content","resources","revision"] {
+            let mut doc=prefetch_document("r1");doc.as_object_mut().unwrap().remove(field);
+            assert!(db.content_prefetch_adopt("desktop-a","vault-a","kn-a",&None,&doc).is_err());
+        }
+        assert!(db.content_note_cached("desktop-a","vault-a","kn-a").unwrap().is_none());
+    }
+
     // ------- A0-R2: hostile-path fail-closed + literal prefix -------
     #[test]
     fn hostile_paths_fail_closed_in_directories() {
@@ -2780,6 +2824,32 @@ impl Db {
 
     /// The readonly cache probe. Only an absent exact row may bootstrap;
     /// malformed schema, conversion and other DB errors must remain errors.
+    /// Only missing bodies are speculated. Cached empty bodies are complete.
+    pub(crate) fn content_prefetch_eligible(note: &Option<Value>) -> bool {
+        note.as_ref().is_none_or(|n| n["dirty"] != true && n["deleted"] != true
+            && n["pendingKind"].as_str().is_none_or(str::is_empty)
+            && n["conflictDocument"].is_null() && n["cachedDocument"]["content"].is_null())
+    }
+
+    /// A late speculative response cannot replace a sync observation, editor
+    /// epoch, operation or draft that changed during the GET. No cursor writes.
+    pub(crate) fn content_prefetch_adopt(&mut self, instance: &str, vault: &str, id: &str,
+        expected: &Option<Value>, document: &Value) -> Result<bool, String> {
+        if text(document,"noteId") != id || text(document,"vaultId") != vault
+            || document["deleted"] == true || !document["content"].is_string()
+            || !document["resources"].is_array() || !document["title"].is_string()
+            || !document["relativePath"].is_string() || !document["updatedAt"].is_string()
+            || text(document,"revision").is_empty() { return Err("CONTENT_DOCUMENT_INVALID".into()); }
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        let current = tx.query_row(
+            &format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3"),
+            params![instance,vault,id], note_value).optional().map_err(fail)?;
+        let adopt = &current == expected && Self::content_prefetch_eligible(&current);
+        if adopt { apply_document(&tx,instance,vault,document)?; }
+        tx.commit().map_err(fail)?;
+        Ok(adopt)
+    }
+
     pub(crate) fn content_note_cached(
         &self,
         instance: &str,

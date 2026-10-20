@@ -726,10 +726,12 @@ pub(crate) async fn content_asset_file(
     instance: String,
     id: String,
     job_id: String,
+    max_bytes: Option<u64>,
+    expected_version: Option<String>,
 ) -> Result<Value, String> {
     // Material downloads are owner-bound: the page names the Desktop it belongs
     // to and a moved connection fails closed.
-    download_resource(state, app, &instance, id, job_id, None).await
+    download_resource(state, app, &instance, id, job_id, None, max_bytes, expected_version).await
 }
 
 #[tauri::command]
@@ -746,7 +748,7 @@ pub(crate) async fn content_note_resource(
     public_id(&note)?;
     // The reader names its captured Desktop, just like the material reader.
     // A moved pairing must fail before any wire request or cache mutation.
-    download_resource(state, app, &instance, id, job_id, Some((vault, note))).await
+    download_resource(state, app, &instance, id, job_id, Some((vault, note)), None, None).await
 }
 
 /// Both callers bind the Desktop their page belongs to, with no fallback to
@@ -758,6 +760,8 @@ async fn download_resource(
     id: String,
     job_id: String,
     note: Option<(String, String)>,
+    max_bytes: Option<u64>,
+    expected_version: Option<String>,
 ) -> Result<Value, String> {
     public_id(&id)?;
     public_id(&job_id)?;
@@ -846,6 +850,7 @@ async fn download_resource(
         source.with_db(&state, |db| db.asset_version(&source.instance, &id))?
             .unwrap_or_default()
     } else {String::new()};
+    if expected_version.as_ref().is_some_and(|v| v!=&asset_version) {return Err("CONTENT_VERSION_CHANGED".into());}
     if offset > 0 && !etag.is_empty() {
         request = request
             .header("Range", format!("bytes={offset}-"))
@@ -900,7 +905,8 @@ async fn download_resource(
     } else {
         0
     };
-    if start + length > 4 * 1024 * 1024 * 1024 {
+    let byte_limit=max_bytes.unwrap_or(4*1024*1024*1024).min(4*1024*1024*1024);
+    if start.saturating_add(length) > byte_limit {
         return Err("CONTENT_RESOURCE_TOO_LARGE".into());
     }
     let mut file = tokio::fs::OpenOptions::new()
@@ -924,7 +930,7 @@ async fn download_resource(
     {
         check()?;
         received += chunk.len() as u64;
-        if received > length {
+        if received > length || start.saturating_add(received) > byte_limit {
             return Err("CONTENT_LENGTH_INVALID".into());
         }
         file.write_all(&chunk)
@@ -952,6 +958,9 @@ async fn download_resource(
         "text/plain" => "txt",
         _ => "bin",
     };
+    if let Some(expected)=expected_version.as_ref() {
+        if source.with_db(&state,|db|db.asset_version(&source.instance,&id))?.as_ref()!=Some(expected) {return Err("CONTENT_VERSION_CHANGED".into());}
+    }
     let version_key = format!("{:x}", Sha256::digest(version.as_bytes()));
     let dest = root.join(format!("{key}-{version_key}.{extension}"));
     tokio::fs::rename(&part, &dest)
@@ -1068,6 +1077,11 @@ pub(crate) async fn asset_screen_preview(state:&SharedState,app:&tauri::AppHandl
     let source=source.canonicalize().map_err(|_|"CONTENT_NOT_CACHED")?;
     let root=root.canonicalize().map_err(|_|"CONTENT_NOT_CACHED")?;
     if source.parent()!=Some(root.as_path()) {return Err("CONTENT_NOT_CACHED".into());}
+    if let Some((w,h))=crate::local_asset::display_original_dimensions(&source) {
+        material_access_check(state,instance,id)?;
+        if with_db(state,|db|db.asset_version(instance,id))?!=Some(current.clone()) {return Err("CONTENT_VERSION_CHANGED".into());}
+        return Ok(json!({"uri":source.to_string_lossy(),"mime":cached["mime"],"etag":cached["etag"],"w":w,"h":h,"original":true}));
+    }
     let revision=format!("{:x}",Sha256::digest(format!("{}:{current}",cached["etag"])));
     let dest=root.join(format!("screen-{key}-{revision}.png"));
     let output=dest.clone();

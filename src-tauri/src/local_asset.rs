@@ -505,6 +505,17 @@ fn derived_preview_cached(source: &Path, dest: &Path, max_dimension: i64, force:
     Ok(dims)
 }
 
+/// Header-only safety gate before handing a raster original to one detail view.
+/// Unknown/oversized formats retain the bounded screen-preview path.
+pub(crate) fn display_original_dimensions(path: &Path) -> Option<(i64,i64)> {
+    let file=std::fs::File::open(path).ok()?;
+    let bytes=file.metadata().ok()?.len();
+    if bytes==0 || bytes>32*1024*1024 {return None;}
+    let mut header=Vec::new(); file.take(64*1024).read_to_end(&mut header).ok()?;
+    let (w,h)=crate::image_dimensions(&header);
+    (w>0 && h>0 && w<=8192 && h<=8192 && w.saturating_mul(h)<=24_000_000).then_some((w,h))
+}
+
 fn cache_dimensions(path: &Path, max_dimension: i64) -> Option<(i64, i64)> {
     let file = std::fs::File::open(path).ok()?;
     let size = file.metadata().ok()?.len();

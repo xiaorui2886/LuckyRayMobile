@@ -1,3 +1,4 @@
+import { desktopNotePrefetch } from "../services/desktopNotePrefetch";
 import { NoteActionIcon } from '../presentation/still01/editor/NoteActionIcon';
 import { wikiChoices } from "./kit/wikiChoices";
 import { settleReadingMode } from "../presentation/still01/editor/readingModeTransition";
@@ -550,6 +551,7 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
   const editingLease = useRef<KnowledgeEditingSession | null>(null);
   const [desktopEditing, setDesktopEditing] = useState(false);
   const [mobileEditingHint, setMobileEditingHint] = useState<{scope: string; hint: EditingHint}>({scope: "", hint: "disabled"});
+  const [bodyOpening, setBodyOpening] = useState(true);
   const connectedOwner = Boolean(conn?.paired && conn.identity?.instanceId === instance && conn.ws.state === "connected");
   const currentPage = useRef(current);
   const connectedPage = useRef(connectedOwner);
@@ -742,9 +744,11 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
     editGeneration.current = 0; failed.current = false;
     composing.current = false; deferredIncoming.current = false; displayedRevision.current = "";
     epoch.current = 0;
-    setNote(null); setLoadedNoteScope(""); setMessage("");
+    setNote(null); setLoadedNoteScope(""); setMessage(""); setBodyOpening(true);
     const opener = new DesktopNoteOpener(async (isAttemptCurrent) => {
       const session = ++owner.current;
+      const prefetched = await desktopNotePrefetch.waitFor(instance, vault, id);
+      if (!isAttemptCurrent() || session !== owner.current || !currentPage.current) return;
       await beginDesktopNote({
         begin: () => api.contentNoteBegin(instance, vault, id),
         refresh: () => api.contentNoteRefresh(instance, vault, id),
@@ -756,7 +760,7 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
         setNote(cached); setTitle(cached.title); setContent(cached.content);
         displayedRevision.current = cached.revision || "";
         draft.current = { title: cached.title, content: cached.content };
-        if (loaded.refreshed) return; // cold path already obtained its baseline
+        if (loaded.refreshed || (prefetched && prefetched.revision === cached.revision && hasReadableBody(cached) && !cached.bodyOutdated)) return; // baseline already fetched
         const gen = editGeneration.current;
         try {
           const fresh = await api.contentNoteRefresh(instance, vault, id);
@@ -768,7 +772,7 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
           const missing = missingBodyMessage(cached);
           if (session === owner.current && missing) setMessage(missing);
         }
-      }).catch((e) => { if (isAttemptCurrent() && session === owner.current && currentPage.current) setMessage(contentError(e)); });
+      }).catch((e) => { if (isAttemptCurrent() && session === owner.current && currentPage.current) setMessage(contentError(e)); }).finally(() => { if (session === owner.current) setBodyOpening(false); });
     }, () => epoch.current !== 0);
     noteOpener.current = opener;
     opener.setCurrent(currentPage.current);
@@ -1122,6 +1126,7 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
           onNavigate={openLinkedNote} find={find}
         />}</NoteReadingContent> : undefined}
         state={state}
+        bodyAvailability={bodyOpening ? "loading" : connectedOwner ? "online" : "offline"}
         mode={mode}
         savedLabel={savedLabel}
         onBack={() => void guardedBack()}

@@ -15,7 +15,7 @@ BRIDGES = {
     # class name -> JNI methods that MUST be present (static, called from Rust)
     "KeystoreBridge": ["saveSecret", "loadSecret", "deleteAllSecrets"],
     "CaptureBridge": ["launch", "onResult", "metaPath", "outboxDir", "cancel", "init"],
-    "DeviceBridge": ["gmsAvailable"],
+    "DeviceBridge": ["gmsAvailable", "moveTaskToBack", "setSystemBarAppearance"],
     "QrScannerBridge": ["scanStart", "scanStop", "metaPath"],
     "ShareBridge": ["handle", "localInboxDir", "localAssetsDir", "diagnosticsDir", "init", "nativeInit", "nativeNotify"],
     "ThumbnailBridge": ["generate", "warm", "nativeInit"],

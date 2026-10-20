@@ -70,8 +70,8 @@ mod platform {
     }
 
     /// INTERACTION-CLOSURE-R1: system-bar visual appearance only.
-    pub fn set_system_bar_appearance(dark: bool) -> bool {
-        call_device_static("setSystemBarAppearance", "(Z)V", &[dark.into()])
+    pub fn set_system_bar_appearance(dark: bool, dimmed: bool) -> bool {
+        call_device_static("setSystemBarAppearance", "(ZZ)V", &[dark.into(), dimmed.into()])
     }
 }
 
@@ -86,7 +86,7 @@ mod platform {
     pub fn move_task_to_back() -> bool {
         true
     }
-    pub fn set_system_bar_appearance(_dark: bool) -> bool {
+    pub fn set_system_bar_appearance(_dark: bool, _dimmed: bool) -> bool {
         true
     }
 }
@@ -99,6 +99,6 @@ pub fn move_task_to_back() -> bool {
     platform::move_task_to_back()
 }
 
-pub fn set_system_bar_appearance(dark: bool) -> bool {
-    platform::set_system_bar_appearance(dark)
+pub fn set_system_bar_appearance(dark: bool, dimmed: bool) -> bool {
+    platform::set_system_bar_appearance(dark, dimmed)
 }

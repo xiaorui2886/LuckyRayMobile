@@ -9,7 +9,7 @@
 // long-press + drag-range exactly like assets, and the page's hit-testing
 // addresses note rows instead of pretending asset tiles are Knowledge rows.
 
-import React, { useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import { Icon } from "./StillImports";
 import { useLongPress } from "./pressGesture";
 import type { HitSegment } from "./searchHit";
@@ -23,6 +23,7 @@ export type KnowledgeNoteRowProps = {
   /** The raw note id (route-grade selection key + drag hit target). */
   noteId: string;
   onClick: () => void;
+  onVisibility?: (id: string, visible: boolean) => void;
   /** Modal results must survive pointer-up until the native click is consumed;
    * otherwise removing the sheet retargets that click into the reader below.
    * Only for rows without long-press/selection, whose shared press path stays unchanged.
@@ -46,9 +47,18 @@ export type KnowledgeNoteRowProps = {
 
 export function KnowledgeNoteRow({
   title, body, meta, noteId, onClick, activateOnClick = false, onLongPress, selected = false, selecting = false,
-  onDragSelect, onDragEnd, titleHit, bodyHitLine,
+  onDragSelect, onDragEnd, titleHit, bodyHitLine, onVisibility,
 }: KnowledgeNoteRowProps) {
   const hostRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    const node = hostRef.current;
+    if (!node || !onVisibility || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) onVisibility(noteId, entry.isIntersecting);
+    }, { root: node.closest(".st-scroll"), rootMargin: "120px 0px" });
+    observer.observe(node);
+    return () => { observer.disconnect(); onVisibility(noteId, false); };
+  }, [noteId, onVisibility]);
   // The SAME gesture adapter the tiles and Library list rows use: a short tap
   // opens (or toggles in selection mode), a held press reports its position
   // for drag-select, and the trailing click after a hold is swallowed.

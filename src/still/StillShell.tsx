@@ -288,7 +288,7 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
   const rootView =
     rootTab === "home" ? <StillHome key={"root-" + rootTab} />
     : rootTab === "library" ? null
-    : rootTab === "knowledge" ? <StillKnowledge key={"root-" + rootTab} conn={conn} />
+    : rootTab === "knowledge" ? <StillKnowledge key={"root-" + rootTab} conn={conn} active={!top} />
     : rootTab === "ai" ? <StillAgent key={"root-" + rootTab} conn={conn} />
     : <StillSettingsRoot key={"root-" + rootTab} conn={conn} />;
 

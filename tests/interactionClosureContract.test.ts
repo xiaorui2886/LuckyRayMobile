@@ -144,7 +144,7 @@ test("interaction closure — dock/compose hide on text focus via visibility onl
 
 // ---- system bar appearance (用户问题1 标记1) ---------------------------------
 test("interaction closure — system-bar appearance follows color mode (visual only)", () => {
-  assert.match(clientTs, /setSystemBarAppearance: \(dark: boolean\)/, "TS api present");
+  assert.match(clientTs, /setSystemBarAppearance: \(dark: boolean, dimmed = false\)/, "TS api present");
   assert.match(appTsx, /document\.documentElement\.dataset\.theme === "dark"/, "reads the theme authority");
   assert.match(appTsx, /attributeFilter: \["data-theme"\]/, "syncs on color-mode change");
   assert.match(deviceKt, /isAppearanceLightStatusBars = !dark/, "light/dark icon appearance flips");

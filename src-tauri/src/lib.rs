@@ -2260,6 +2260,16 @@ async fn local_asset_thumbnail(
     if local_asset::check_integrity(&asset.local_path, asset.size_bytes, &asset.content_hash, false)?.status != "healthy" {
         return Err("local asset original unavailable".into());
     }
+    if preview.unwrap_or(false) {
+        if let Some((w,h))=local_asset::display_original_dimensions(std::path::Path::new(&asset.local_path)) {
+            let original=std::path::PathBuf::from(&asset.local_path).canonicalize().map_err(|_|"local asset original unavailable")?;
+            let root=local_asset::asset_root()?.join("originals").canonicalize().map_err(|_|"local asset original unavailable")?;
+            if original.parent()!=Some(root.as_path()) {return Err("local asset original unavailable".into());}
+            let latest=with_db(&state,|db|db.asset_get(&assetId))?.ok_or("local asset not found")?;
+            if latest.content_hash!=asset.content_hash || latest.local_path!=asset.local_path {return Err("local asset changed".into());}
+            return Ok(serde_json::json!({"uri":original.to_string_lossy(),"mime":asset.mime,"w":w,"h":h,"original":true}));
+        }
+    }
     let dest = if preview.unwrap_or(false) {
         let base=local_asset::thumb_path(&assetId)?;
         let owner=format!("{:x}",sha2::Sha256::digest(format!("local:{assetId}")));
@@ -2632,8 +2642,8 @@ fn move_task_to_back() -> bool {
 /// INTERACTION-CLOSURE-R1 (用户问题1): system-bar appearance follows the app
 /// color mode. Visual only; applySystemBarInsets() geometry is untouched.
 #[tauri::command]
-fn set_system_bar_appearance(dark: bool) -> bool {
-    device::set_system_bar_appearance(dark)
+fn set_system_bar_appearance(dark: bool, dimmed: Option<bool>) -> bool {
+    device::set_system_bar_appearance(dark, dimmed.unwrap_or(false))
 }
 
 // ---------------------------------------------------------------------------
@@ -2848,6 +2858,7 @@ pub fn run() {
             content::notes::content_note_get,
             content::notes::content_note_previews,
             content::notes::content_note_refresh,
+            content::notes::content_note_prefetch,
             content::notes::content_note_edit,
             content::notes::content_note_resume_paused,
             content::notes::content_note_create,

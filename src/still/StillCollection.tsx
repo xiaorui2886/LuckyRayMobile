@@ -1,3 +1,4 @@
+import { desktopNotePrefetch } from "../services/desktopNotePrefetch";
 // STILL-01.1 — Knowledge root (Still CollectionView domain=knowledge).
 // 本机 notes run through the REAL generation-safe pager authority
 // (LOCAL-KNOWLEDGE-USABILITY-R1): pagination, tag filter, per-row quick
@@ -114,7 +115,7 @@ const rememberedScroll: Record<"local" | "desktop", number> = { local: 0, deskto
 /** Local rows keep the Still NoteItem shape plus the favorite projection. */
 type LocalNoteRow = NoteItem & { favorite?: boolean; raw: any };
 
-export function StillKnowledge({ conn }: { conn: ConnState | null }) {
+export function StillKnowledge({ conn, active = true }: { conn: ConnState | null; active?: boolean }) {
   const { open, registerOverlay } = useStillNav();
   const [source, setSource] = useState<"local" | "desktop">(rememberedSource);
   // R4.1/R4.2: ONE session object owns the retention layer (Local pager +
@@ -1192,6 +1193,28 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
   const emptyState = describeLocalEmpty({ mode, tag: applied.tag, query });
   const loadedText = notesLoadedText(localPage.items.length, localPage.total);
 
+    const visibleBodies = useRef(new Set<string>());
+  const [visibleBodyTick, setVisibleBodyTick] = useState(0);
+  const noteVisibility = useCallback((route: string, visible: boolean) => {
+    const had=visibleBodies.current.has(route);
+    if (visible) visibleBodies.current.add(route); else visibleBodies.current.delete(route);
+    if (had!==visible) setVisibleBodyTick(v=>v+1);
+  }, []);
+  useEffect(() => {
+    const currentRows=directoryActive ? directorySnap.rows : desktop.rows;
+    const scope={instance:desktop.instanceId,vault:desktop.vaultId};
+    const publish=()=>{
+      const targets=[...visibleBodies.current].map(noteIdOfRoute).map(id=>currentRows.find(r=>r.noteId===id))
+        .filter((row): row is NonNullable<typeof row> => Boolean(row))
+        .map(row=>({...scope,id:row.noteId,revision:row.revision || ""}));
+      desktopNotePrefetch.setVisible(scope,targets,active&&source==="desktop"&&connected&&!document.hidden
+        && Boolean(scope.instance&&scope.vault) && (directoryActive ? directorySnap.query : desktop.query)===query.trim());
+      if(document.hidden || !connected)desktopNotePrefetch.suspend();
+    };
+    publish(); document.addEventListener("visibilitychange",publish);
+    return ()=>{ document.removeEventListener("visibilitychange",publish); desktopNotePrefetch.setVisible(scope,[],false); };
+  }, [active,source,connected,desktop.instanceId,desktop.vaultId,desktop.rows,desktop.query,directoryActive,directorySnap.rows,directorySnap.query,query,visibleBodyTick]);
+
   // ------------------------------------------------------------------
   // Desktop source keeps the unchanged CollectionView path (read-only rows).
   // ------------------------------------------------------------------
@@ -1205,7 +1228,8 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
         : "电脑知识库";
     // R1-REPAIR (5B): canonical registeredList carries no sort, so the desktop
     // source hides the (would-be-inert) sort affordance. Local keeps its own.
-    return (
+
+  return (
       <>
         <CollectionView
           domain="knowledge"
@@ -1247,6 +1271,7 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
           // to the NOTE rows (data-note-id hit targets). Long press anchors
           // the range; a held drag (and its edge auto-scroll) grows/shrinks
           // it; finger-up freezes it; plain taps toggle while selecting.
+          onNoteVisibility={source === "desktop" ? noteVisibility : undefined}
           selecting={source === "desktop" && selecting}
           selectedIds={source === "desktop" ? selectedIds : undefined}
           onLongPress={source === "desktop" ? onNoteLongPress : undefined}

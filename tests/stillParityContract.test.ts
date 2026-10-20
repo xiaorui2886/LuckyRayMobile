@@ -109,9 +109,9 @@ test("still parity — authority copies preserve the staged design blobs", () =>
     if (file === "Still.tsx") {
       const marker = "export type NoteState=";
       const split = source.indexOf(marker); assert.ok(split > 0);
-      const prefix = source.slice(0, split).replace("iconPaths[name]||noteActionPaths[name as keyof typeof noteActionPaths]||iconPaths.file", "iconPaths[name]||iconPaths.file").replace("import { NoteActionIcon, noteActionPaths } from './editor/NoteActionIcon';\n", "").replace("danger=false,icon,iconSlot}:{label:string;", "danger=false,icon}:{label:string;").replace("danger?:boolean;icon?:string;iconSlot?:ReactNode}", "danger?:boolean;icon?:string}").replace("{iconSlot??(icon&&<Icon name={icon} size={19}/>)}", "{icon&&<Icon name={icon} size={19}/>}");
+      const prefix = source.slice(0, split).replace('import { systemBarScrim } from "../../services/systemBarAppearance";\n', "").replace("\n useEffect(() => systemBarScrim.acquire(), []);", "").replace("iconPaths[name]||noteActionPaths[name as keyof typeof noteActionPaths]||iconPaths.file", "iconPaths[name]||iconPaths.file").replace("import { NoteActionIcon, noteActionPaths } from './editor/NoteActionIcon';\n", "").replace("danger=false,icon,iconSlot}:{label:string;", "danger=false,icon}:{label:string;").replace("danger?:boolean;icon?:string;iconSlot?:ReactNode}", "danger?:boolean;icon?:string}").replace("{iconSlot??(icon&&<Icon name={icon} size={19}/>)}", "{icon&&<Icon name={icon} size={19}/>}");
       assert.equal(sha256(prefix), "39dd376a6e00119b35488010e48a964a33075493d33b9b9bc5d0e233e445e3cc");
-      assert.equal(sha256(source.slice(split)), "513304ba62c9fa4e5e93175646f1f9f10a58f1633676138a2822047a13018b90");
+      assert.equal(sha256(source.slice(split)), "18bbe58d2a11aff2a9fc1d846dcee701614ca86aa611f8617d5eccb85ed77bd8");
       continue;
     }
     const liveCurrentBlock = "\n// Paint may be retained; whether this page can act must remain live.\nconst PageCurrentContext=createContext<boolean|undefined>(undefined);\nexport function usePageCurrent(fallback=true):boolean {\n return useContext(PageCurrentContext)??fallback;\n}\nexport function useRetainedPage():boolean {\n return useContext(PageCurrentContext)!==undefined;\n}\n";
@@ -126,6 +126,7 @@ test("still parity — authority copies preserve the staged design blobs", () =>
         .replace('</PageCurrentContext.Provider>', "");
     }
     if (file === "Views.tsx") {
+      pinned = pinned.replace("onNoteVisibility?:(id:string,visible:boolean)=>void;", "").replaceAll(" onVisibility={p.onNoteVisibility}", "");
       // MOBILE-R6: one optional compact toolbar slot, strictly inside the scroll.
       // Undo precisely these two additions, preserving the accepted baseline hash.
       assert.equal(pinned.split("toolbarSlot?:ReactNode;").length, 2);

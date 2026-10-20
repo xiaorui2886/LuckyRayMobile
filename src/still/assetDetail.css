@@ -24,3 +24,13 @@
 .st-app[data-mode=dark] .st-asset-view.is-image .st-asset-header { background:linear-gradient(to bottom,rgba(17,19,18,.94),rgba(17,19,18,.72) 70%,rgba(17,19,18,0)); }
 .st-app[data-mode=dark] .st-asset-view.is-image .st-asset-actions { background:linear-gradient(to bottom,rgba(17,19,18,0),rgba(17,19,18,.8) 35%,rgba(17,19,18,.94)); }
 .st-asset-view.is-image .st-media-feedback { bottom:calc(var(--st-safe-bottom) + 80px); }
+
+/* A pending favorite stays visually stable; the handler remains single-flight. */
+.st-asset-action[aria-label="收藏"]:disabled{opacity:1}
+
+.st-progressive-image{position:relative;width:100%;height:100%;transform-origin:center;pointer-events:none}
+.st-asset-view .st-progressive-image img{position:absolute;inset:0;width:100%;height:100%;max-width:100%;max-height:100%;object-fit:contain}
+.st-progressive-image .st-image-original{opacity:0;transition:opacity .24s ease}
+.st-progressive-image .st-image-original.is-revealed{opacity:1}
+@media(prefers-reduced-motion:reduce){.st-progressive-image .st-image-original{transition:none}}
+.st-app[data-reduced=true] .st-progressive-image .st-image-original{transition:none}

@@ -54,7 +54,7 @@ export const api = {
     invoke<import("../../shared/companion-content-v1/types").AssetPage>("content_assets", { instance, ...opts }),
   contentNavigation: (instance: string) => invoke<{ folders: any[]; tags: any[] }>("content_navigation", { instance }),
   contentAssetDetail: (instance: string, id: string) => invoke<any>("content_asset_detail", { instance, id }),
-  contentAssetFile: (instance: string, id: string, jobId: string) => invoke<{ path: string; mime: string; etag: string; sizeBytes: number }>("content_asset_file", { instance, id, jobId }),
+  contentAssetFile: (instance: string, id: string, jobId: string, maxBytes?: number, expectedVersion?: string) => invoke<{ path: string; mime: string; etag: string; sizeBytes: number; assetVersion?: string }>("content_asset_file", { instance, id, jobId, ...(maxBytes === undefined ? {} : {maxBytes}), ...(expectedVersion === undefined ? {} : {expectedVersion}) }),
   contentCancel: (jobId: string) => invoke<void>("content_cancel", { jobId }),
   contentMediaSource: (instance: string, id: string, vault?: string, note?: string) => invoke<{url: string; token: string}>("content_media_source", {instance,id,vault,note}),
   localAssetMediaSource: (assetId: string) => invoke<{url: string; token: string}>("local_asset_media_source", {assetId}),
@@ -129,6 +129,7 @@ export const api = {
   contentNoteGet: (instance: string, vault: string, id: string) => invoke<any>("content_note_get", { instance, vault, id }),
   /** R4 (B): ONE bounded LOCAL-ONLY bulk preview read (note_cache DB; zero network). */
   contentNotePreviews: (instance: string, vault: string, ids: string[]) => invoke<{ items: Array<{ noteId: string; content: string; dirty: boolean; bodyOutdated: boolean }> }>("content_note_previews", { instance, vault, ids }),
+  contentNotePrefetch: (instance: string, vault: string, id: string, expectedRevision: string, jobId: string) => invoke<{changed: boolean}>("content_note_prefetch", {instance, vault, id, expectedRevision, jobId}),
   contentNoteRefresh: (instance: string, vault: string, id: string) => invoke<any>("content_note_refresh", { instance, vault, id }),
   contentNoteEdit: (input: {instance: string; vault: string; id: string; title: string; content: string; epoch: number; generation: number; expectedRevision?: string}) => invoke<any>("content_note_edit", input),
   contentNoteResumePaused: (input: {instance: string; vault: string; id: string; pausedOpId: string; epoch: number; generation: number}) => invoke<any>("content_note_resume_paused", input),
@@ -253,7 +254,7 @@ export const api = {
    * used ONLY by the root Back fallback. No process kill. */
   moveTaskToBack: () => invoke<boolean>("move_task_to_back"),
   /** INTERACTION-CLOSURE-R1: system-bar visual appearance follows color mode. */
-  setSystemBarAppearance: (dark: boolean) => invoke<boolean>("set_system_bar_appearance", { dark }),
+  setSystemBarAppearance: (dark: boolean, dimmed = false) => invoke<boolean>("set_system_bar_appearance", { dark, dimmed }),
   qrScan: (timeoutMs: number) => invoke<string>("qr_scan", { timeoutMs }),
   qrCancel: () => invoke<string>("qr_cancel"),
   dbHealth: () => invoke<{ ok: boolean; schemaVersion: number; expectedVersion: number; tablesOk: boolean }>("db_health"),
