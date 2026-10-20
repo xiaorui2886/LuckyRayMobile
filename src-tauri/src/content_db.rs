@@ -276,6 +276,7 @@ mod tests {
         let mut db=fixture();let mut summary=prefetch_document("r1");summary.as_object_mut().unwrap().remove("content");
         db.content_apply_batch("desktop-a","vault-a",&[summary.clone()],4,None).unwrap();
         let old=db.content_note_cached("desktop-a","vault-a","kn-a").unwrap();
+        assert_eq!(old.as_ref().unwrap()["pendingKind"], "update", "clean rows retain the schema's sticky operation label");
         assert!(Db::content_prefetch_eligible(&old));
         summary["revision"]=json!("r2");db.content_apply_batch("desktop-a","vault-a",&[summary],5,None).unwrap();
         assert!(!db.content_prefetch_adopt("desktop-a","vault-a","kn-a",&old,&prefetch_document("r1")).unwrap());
@@ -300,6 +301,22 @@ mod tests {
             assert!(db.content_prefetch_adopt("desktop-a","vault-a","kn-a",&None,&doc).is_err());
         }
         assert!(db.content_note_cached("desktop-a","vault-a","kn-a").unwrap().is_none());
+    }
+
+    #[test]
+    fn prefetch_late_body_cannot_replace_a_draft_saved_during_the_read() {
+        let mut db=fixture();let mut summary=prefetch_document("r1");summary.as_object_mut().unwrap().remove("content");
+        db.content_apply_batch("desktop-a","vault-a",&[summary],1,None).unwrap();
+        let observed=db.content_note_cached("desktop-a","vault-a","kn-a").unwrap();
+        assert!(Db::content_prefetch_eligible(&observed));
+        let epoch=db.content_begin_edit("desktop-a","vault-a","kn-a").unwrap()["editorEpoch"].as_i64().unwrap();
+        db.content_edit_observed("desktop-a","vault-a","kn-a","my draft","keep this draft",epoch,1,None).unwrap();
+        assert!(!db.content_prefetch_adopt("desktop-a","vault-a","kn-a",&observed,&prefetch_document("r1")).unwrap());
+        let current=db.content_note_cached("desktop-a","vault-a","kn-a").unwrap().unwrap();
+        assert_eq!(current["content"],"keep this draft");
+        assert_eq!(current["dirty"],true);
+        assert_eq!(current["editorEpoch"],epoch);
+        assert!(!Db::content_prefetch_eligible(&Some(current)));
     }
 
     // ------- A0-R2: hostile-path fail-closed + literal prefix -------
@@ -2827,7 +2844,10 @@ impl Db {
     /// Only missing bodies are speculated. Cached empty bodies are complete.
     pub(crate) fn content_prefetch_eligible(note: &Option<Value>) -> bool {
         note.as_ref().is_none_or(|n| n["dirty"] != true && n["deleted"] != true
-            && n["pendingKind"].as_str().is_none_or(str::is_empty)
+            // pending_kind defaults to "update" and is sticky after an ACK;
+            // it is not proof of a pending draft. Dirty/epoch/observation
+            // fences remain authoritative; local creates/deletes stay out.
+            && matches!(n["pendingKind"].as_str(), None | Some("") | Some("update"))
             && n["conflictDocument"].is_null() && n["cachedDocument"]["content"].is_null())
     }
 
