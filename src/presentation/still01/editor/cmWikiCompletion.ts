@@ -3,7 +3,7 @@ import { Prec, StateEffect, StateField, type Extension } from '@codemirror/state
 import { EditorView, ViewPlugin, keymap, showTooltip, tooltips, type Tooltip, type ViewUpdate } from '@codemirror/view';
 import { sameWikiCompletion, wikiCompletionAt, wikiInsertion, type WikiChoice, type WikiCompletion } from './wikiCompletion';
 type Result={match:WikiCompletion;items:WikiChoice[];status:string;index:number};
-export type WikiLoader=(query:string)=>Promise<{items:WikiChoice[];partial:boolean}>;
+export type WikiLoader=(query:string,embed?:boolean)=>Promise<{items:WikiChoice[];partial:boolean}>;
 export function cmWikiCompletion(load:WikiLoader,enabled:()=>boolean):Extension {
  const space=(view?:EditorView)=>{
   const v=window.visualViewport,b=wikiCompletionBounds(v?.width||document.documentElement.clientWidth,v?.height||document.documentElement.clientHeight,v?.offsetLeft||0,v?.offsetTop||0);
@@ -16,13 +16,13 @@ export function cmWikiCompletion(load:WikiLoader,enabled:()=>boolean):Extension 
   if(!enabled()||!view.hasFocus||view.composing||view.compositionStarted)return false;
   const sel=view.state.selection.main;
   if(!sel.empty||!sameWikiCompletion(wikiCompletionAt(view.state.doc.toString(),sel.head),result.match))return false;
-  const insert=wikiInsertion(item);if(!insert)return false;
+  const insert=wikiInsertion(item,Boolean(result.match.embed));if(!insert)return false;
   view.dispatch({changes:{from:result.match.from,to:result.match.to,insert},selection:{anchor:result.match.from+insert.length},effects:replace.of(null),userEvent:'input.complete'});
   view.focus();return true;
  };
  const field=StateField.define<Result|null>({create:()=>null,update(value,tr){for(const e of tr.effects)if(e.is(replace))return e.value;return tr.docChanged||tr.selection?null:value;},
   provide:f=>showTooltip.from(f,value=>value?({pos:value.match.from,above:false,strictSide:false,arrow:false,create(view){
-   const dom=document.createElement('div');dom.className='st-wiki-completion';dom.setAttribute('role','listbox');dom.setAttribute('aria-label','匹配的笔记');
+   const dom=document.createElement('div');dom.className='st-wiki-completion';dom.setAttribute('role','listbox');dom.setAttribute('aria-label',value.match.embed?'匹配的附件':'匹配的笔记');
    const fit=()=>{const bounds=space(view);dom.style.width=Math.max(0,bounds.right-bounds.left)+'px';view.requestMeasure()};
    const style=getComputedStyle(view.dom);
    for(const key of ['--st-sheet','--st-ink','--st-line','--st-secondary','--st-selected'])dom.style.setProperty(key,style.getPropertyValue(key));
@@ -58,9 +58,9 @@ export function cmWikiCompletion(load:WikiLoader,enabled:()=>boolean):Extension 
    if(!match){view.dispatch({effects:replace.of(null)});return}
    const current=()=>!this.dead&&token===this.generation&&enabled()&&view.hasFocus&&!view.composing&&!view.compositionStarted&&sameWikiCompletion(match,wikiCompletionAt(view.state.doc.toString(),view.state.selection.main.head));
    view.dispatch({effects:replace.of({match,items:[],status:'正在匹配…',index:0})});
-   try{const result=await load(match.query);if(!current())return;
+   try{const result=await load(match.query,match.embed);if(!current())return;
     const items=result.items.filter(x=>wikiInsertion(x)!==null);
-    view.dispatch({effects:replace.of({match,items,status:items.length?(result.partial?'继续输入可缩小范围':''):(result.partial?'当前结果无匹配，请继续输入更完整的名称':'未找到匹配笔记'),index:0})});
+    view.dispatch({effects:replace.of({match,items,status:items.length?(result.partial?'继续输入可缩小范围':''):(result.partial?'当前结果无匹配，请继续输入更完整的名称':match.embed?'当前笔记中没有匹配的附件':'未找到匹配笔记'),index:0})});
    }catch{if(current())view.dispatch({effects:replace.of({match,items:[],status:'暂时无法读取候选，请稍后再试',index:0})})}
   },160)}
   destroy(){this.dead=true;++this.generation;clearTimeout(this.timer);this.view.contentDOM.removeEventListener('compositionstart',this.composing);this.view.contentDOM.removeEventListener('compositionend',this.ended)}

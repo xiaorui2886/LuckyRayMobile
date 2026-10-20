@@ -1891,6 +1891,7 @@ async fn local_note_list(
     page: i64,
     limit: i64,
     sort: Option<String>,
+    folder: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let limit = if limit <= 0 { 50 } else { limit.min(200) };
     // The sort vocabulary is bounded to what this list actually offers; the
@@ -1901,9 +1902,34 @@ async fn local_note_list(
         _ => Some("recent"),
     };
     let (items, total) = with_db(&state, |db| {
-        db.note_query(q.as_deref(), tag.as_deref(), pinned, favorite, archived, page, limit, sort)
+        db.note_query_in_folder(q.as_deref(), tag.as_deref(), pinned, favorite, archived, page, limit, sort, folder.as_deref())
     })?;
     Ok(serde_json::json!({ "items": items, "total": total, "hasMore": page * limit < total }))
+}
+
+#[tauri::command]
+async fn local_note_folders(state: State<'_, SharedState>) -> Result<serde_json::Value, String> {
+    let paths = with_db(&state, |db| db.note_folders())?;
+    Ok(serde_json::json!({ "paths": paths }))
+}
+
+#[tauri::command]
+async fn local_note_create_folder(
+    state: State<'_, SharedState>, name: String, parent: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let path = with_db(&state, |db| db.note_create_folder(&name, parent.as_deref().unwrap_or("")))?;
+    Ok(serde_json::json!({ "path": path }))
+}
+
+#[tauri::command]
+async fn local_note_set_folder(
+    state: State<'_, SharedState>, noteId: String, folder: String,
+) -> Result<serde_json::Value, String> {
+    let note = with_db(&state, |db| {
+        db.note_set_folder(&noteId, &folder)?;
+        db.note_get(&noteId)?.ok_or_else(|| "local note not found".to_string())
+    })?;
+    serde_json::to_value(note).map_err(|e| format!("serialize note: {e}"))
 }
 
 /// Every distinct tag on the Local Note tag authority (bounded, stable
@@ -1929,10 +1955,11 @@ async fn local_note_add(
     title: String,
     content: String,
     tags: Vec<String>,
+    folder: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let note_id = format!("note-{}", Uuid::new_v4().simple());
     with_db(&state, |db| {
-        db.note_insert(&note_id, &title, &content, &tags, None)
+        db.note_insert_in_folder(&note_id, &title, &content, &tags, None, folder.as_deref().unwrap_or(""))
     })?;
     let note = with_db(&state, |db| db.note_get(&note_id))?.ok_or("created note not found")?;
     Ok(serde_json::to_value(&note).map_err(|e| format!("serialize note: {e}"))?)
@@ -2800,6 +2827,7 @@ pub fn run() {
             content::content_media_status,
             content::content_video_play,
             content::local_asset_video_play,
+            content::local_asset_media_source,
             content::content_media_release,
             content::content_cached_resource,
             content::content_open_resource,
@@ -2857,6 +2885,9 @@ pub fn run() {
             local_inbox_erase_all,
             local_inbox_ingest_shares,
             local_note_list,
+            local_note_folders,
+            local_note_create_folder,
+            local_note_set_folder,
             local_note_tags,
             local_note_get,
             local_note_add,

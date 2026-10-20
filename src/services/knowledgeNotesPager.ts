@@ -31,6 +31,8 @@ export type NoteFilters = {
    *  lands inside the debounce window would fetch the new query and append it
    *  under the previous query's rows. */
   q?: string;
+  /** Undefined means all notes; empty means unfiled; non-empty is an exact folder. */
+  folder?: string;
   tag?: string;
   pinned?: boolean;
   favorite?: boolean;
@@ -221,6 +223,7 @@ export class LocalNotesPager {
 export function sameRequest(a: NoteFilters, b: NoteFilters): boolean {
   return (a.q ?? "") === (b.q ?? "")
     && (a.tag ?? "") === (b.tag ?? "")
+    && a.folder === b.folder
     && a.pinned === b.pinned
     && a.favorite === b.favorite
     && a.archived === b.archived

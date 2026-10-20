@@ -57,6 +57,7 @@ export const api = {
   contentAssetFile: (instance: string, id: string, jobId: string) => invoke<{ path: string; mime: string; etag: string; sizeBytes: number }>("content_asset_file", { instance, id, jobId }),
   contentCancel: (jobId: string) => invoke<void>("content_cancel", { jobId }),
   contentMediaSource: (instance: string, id: string, vault?: string, note?: string) => invoke<{url: string; token: string}>("content_media_source", {instance,id,vault,note}),
+  localAssetMediaSource: (assetId: string) => invoke<{url: string; token: string}>("local_asset_media_source", {assetId}),
   contentMediaRelease: (token: string) => invoke<void>("content_media_release", {token}),
   /** Native playback selects only this owner's complete cache or paired Range
    * source. No Desktop URL, bearer, arbitrary path or partial-cache authority. */
@@ -169,8 +170,11 @@ export const api = {
   localInboxEraseAll: () => invoke<string>("local_inbox_erase_all"),
   localInboxIngestShares: () => invoke<{ consumed: number }>("local_inbox_ingest_shares"),
   // Local Knowledge / Notes (M2.8) — Mobile-local durable notes, works with zero Desktop.
-  localNoteList: (opts: { q?: string; tag?: string; pinned?: boolean; favorite?: boolean; archived?: boolean; page?: number; limit?: number; sort?: "recent" | "name" }) =>
+  localNoteList: (opts: { folder?: string; q?: string; tag?: string; pinned?: boolean; favorite?: boolean; archived?: boolean; page?: number; limit?: number; sort?: "recent" | "name" }) =>
     invoke<{ items: any[]; total: number; hasMore: boolean }>("local_note_list", opts),
+  localNoteFolders: () => invoke<{ paths: string[] }>("local_note_folders"),
+  localNoteCreateFolder: (name: string, parent = "") => invoke<{ path: string }>("local_note_create_folder", { name, parent }),
+  localNoteSetFolder: (noteId: string, folder: string) => invoke<any>("local_note_set_folder", { noteId, folder }),
   /**
    * Every distinct tag on the Local Note tag AUTHORITY (bounded, stable
    * order). The filter picker needs this rather than the tags visible on the
@@ -178,8 +182,8 @@ export const api = {
    */
   localNoteTags: () => invoke<{ tags: string[] }>("local_note_tags"),
   localNoteGet: (noteId: string) => invoke<any>("local_note_get", { noteId }),
-  localNoteAdd: (title: string, content: string, tags: string[]) =>
-    invoke<any>("local_note_add", { title, content, tags }),
+  localNoteAdd: (title: string, content: string, tags: string[], folder?: string) =>
+    invoke<any>("local_note_add", { title, content, tags, folder }),
   localNoteUpdate: (noteId: string, title: string, content: string, tags: string[]) =>
     invoke<any>("local_note_update", { noteId, title, content, tags }),
   localNoteSetFlags: (noteId: string, flags: { pinned?: boolean; favorite?: boolean; archived?: boolean }) =>

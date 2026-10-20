@@ -5,9 +5,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-// Product/UI rollback to 171 keeps the already installed schema11 readable.
-// Its append-only tables remain intact, without restarting bulk preparation.
-pub const SCHEMA_VERSION: i64 = 11;
+// Append-only migrations retain existing note and offline preparation data.
+pub const SCHEMA_VERSION: i64 = 12;
 const LEGACY_CREDENTIAL_WAL_CLEANUP_KEY: &str = "legacy_credential_wal_cleanup_pending";
 pub const OUTBOX_PENDING: &str = "pending";
 pub const OUTBOX_UPLOADING: &str = "uploading";
@@ -359,6 +358,18 @@ const MIGRATIONS: &[&str] = &[
       priority INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY(desktop_instance_id,vault_id,note_id));
     "#,
+    // v12 — durable phone-local knowledge folders, including empty folders.
+    // The membership column is added conditionally by migrate_kind because
+    // reset_full preserves local_note_* tables while replaying migrations.
+    r#"
+    CREATE TABLE IF NOT EXISTS local_note_folder (
+      path TEXT PRIMARY KEY,
+      parent TEXT NOT NULL,
+      name TEXT NOT NULL,
+      name_key TEXT NOT NULL,
+      UNIQUE(parent, name_key)
+    );
+    "#,
 ];
 
 pub struct Db {
@@ -445,6 +456,18 @@ impl Db {
                     .map_err(|e| (format!("migrate tx: {e}"), classify_open(&e)))?;
                 tx.execute_batch(sql)
                     .map_err(|e| (format!("migrate v{v}: {e}"), classify_open(&e)))?;
+                if v == 12 {
+                    let has_folder: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_note_item') WHERE name='folder')",
+                        [], |r| r.get(0),
+                    ).map_err(|e| (format!("inspect note folder migration: {e}"), classify_open(&e)))?;
+                    if !has_folder {
+                        tx.execute_batch("ALTER TABLE local_note_item ADD COLUMN folder TEXT NOT NULL DEFAULT '';")
+                            .map_err(|e| (format!("migrate note folder: {e}"), classify_open(&e)))?;
+                    }
+                    tx.execute_batch("CREATE INDEX IF NOT EXISTS idx_local_note_folder ON local_note_item(folder);")
+                        .map_err(|e| (format!("index note folder: {e}"), classify_open(&e)))?;
+                }
                 tx.pragma_update(None, "user_version", v)
                     .map_err(|e| (format!("set user_version: {e}"), classify_open(&e)))?;
                 tx.commit()
@@ -470,7 +493,7 @@ impl Db {
             .map_err(|e| format!("health integrity check: {e}"))?;
         let integrity_ok = integrity.eq_ignore_ascii_case("ok");
         let mut ok_tables = true;
-        for t in ["paired_desktop", "sync_cursor", "asset_cache", "note_cache", "capture_outbox", "capture_attachment", "local_inbox_item", "local_inbox_attachment", "local_note_item", "local_note_tag", "local_asset_item", "local_asset_tag", "content_note_operation", "content_note_attachment", "content_vault_cache", "content_response_cache"] {
+        for t in ["paired_desktop", "sync_cursor", "asset_cache", "note_cache", "capture_outbox", "capture_attachment", "local_inbox_item", "local_inbox_attachment", "local_note_item", "local_note_tag", "local_note_folder", "local_asset_item", "local_asset_tag", "content_note_operation", "content_note_attachment", "content_vault_cache", "content_response_cache"] {
             let n: i64 = self
                 .conn
                 .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", params![t], |r| r.get(0))
@@ -1811,6 +1834,56 @@ impl Db {
     // anywhere: independent from note_cache (which remains Desktop-authoritative cache),
     // asset_cache, capture_outbox and Protocol V1.
 
+    pub fn note_folders(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self.conn.prepare("SELECT path FROM local_note_folder ORDER BY path COLLATE NOCASE, path")
+            .map_err(|e| format!("prepare note folders: {e}"))?;
+        let rows = stmt.query_map([], |r| r.get(0)).map_err(|e| format!("query note folders: {e}"))?;
+        rows.collect::<Result<Vec<String>, _>>().map_err(|e| format!("read note folders: {e}"))
+    }
+
+    fn note_require_folder(&self, folder: &str) -> Result<(), String> {
+        if folder.is_empty() { return Ok(()); }
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_note_folder WHERE path=?1)",
+            params![folder], |r| r.get(0),
+        ).map_err(|e| format!("check note folder: {e}"))?;
+        if exists { Ok(()) } else { Err("local note folder not found".into()) }
+    }
+
+    pub fn note_create_folder(&self, name: &str, parent: &str) -> Result<String, String> {
+        if name.chars().any(char::is_control) {
+            return Err("folder name cannot contain control characters".into());
+        }
+        let name = name.trim();
+        if name.is_empty() || name == "." || name == ".." || name.chars().count() > 120
+            || name.chars().any(|c| c == '/' || c == '\\' || c == ':' || c.is_control()) {
+            return Err("folder name must be one segment, 1–120 characters, without slashes, colons or control characters".into());
+        }
+        self.note_require_folder(parent)?;
+        let path = if parent.is_empty() { name.to_string() } else { format!("{parent}/{name}") };
+        if path.len() > 1024 {
+            return Err("folder path cannot exceed 1024 UTF-8 bytes".into());
+        }
+        self.conn.execute(
+            "INSERT INTO local_note_folder(path,parent,name,name_key) VALUES (?1,?2,?3,?4)",
+            params![path, parent, name, name.to_lowercase()],
+        ).map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(ref error, _) if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+                "a folder with this name already exists here".to_string(),
+            _ => format!("create note folder: {e}"),
+        })?;
+        Ok(path)
+    }
+
+    pub fn note_set_folder(&self, note_id: &str, folder: &str) -> Result<(), String> {
+        self.note_require_folder(folder)?;
+        let changed = self.conn.execute(
+            "UPDATE local_note_item SET folder=?2, updated_at=datetime('now') WHERE note_id=?1",
+            params![note_id, folder],
+        ).map_err(|e| format!("move note to folder: {e}"))?;
+        if changed == 1 { Ok(()) } else { Err("local note not found".into()) }
+    }
+
     pub fn note_insert(
         &mut self,
         note_id: &str,
@@ -1819,6 +1892,14 @@ impl Db {
         tags: &[String],
         source_inbox_id: Option<&str>,
     ) -> Result<(), String> {
+        self.note_insert_in_folder(note_id, title, content, tags, source_inbox_id, "")
+    }
+
+    pub fn note_insert_in_folder(
+        &mut self, note_id: &str, title: &str, content: &str, tags: &[String],
+        source_inbox_id: Option<&str>, folder: &str,
+    ) -> Result<(), String> {
+        self.note_require_folder(folder)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -1826,9 +1907,9 @@ impl Db {
         let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO local_note_item
-                 (note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 0, 0, 0, datetime('now'), datetime('now'))",
-                params![note_id, title, content, source_inbox_id],
+                 (note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at, folder)
+                 VALUES (?1, ?2, ?3, ?4, 0, 0, 0, datetime('now'), datetime('now'), ?5)",
+                params![note_id, title, content, source_inbox_id, folder],
             )
             .map_err(|e| format!("note insert item: {e}"))?;
         if inserted == 1 {
@@ -1886,10 +1967,10 @@ impl Db {
     }
 
     pub fn note_get(&self, note_id: &str) -> Result<Option<LocalNoteItem>, String> {
-        let item: Option<(String, String, String, Option<String>, bool, bool, bool, String, String)> = self
+        let item: Option<(String, String, String, Option<String>, bool, bool, bool, String, String, String)> = self
             .conn
             .query_row(
-                "SELECT note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at
+                "SELECT note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at, folder
                  FROM local_note_item WHERE note_id=?1",
                 params![note_id],
                 |r| {
@@ -1903,13 +1984,14 @@ impl Db {
                         r.get::<_, i64>(6)? != 0,
                         r.get(7)?,
                         r.get(8)?,
+                        r.get(9)?,
                     ))
                 },
             )
             .optional()
             .map_err(|e| format!("note get: {e}"))?;
 
-        let Some((note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at)) = item else {
+        let Some((note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at, folder)) = item else {
             return Ok(None);
         };
 
@@ -1926,6 +2008,7 @@ impl Db {
             created_at,
             updated_at,
             tags,
+            folder,
         }))
     }
 
@@ -1982,9 +2065,21 @@ impl Db {
         limit: i64,
         sort: Option<&str>,
     ) -> Result<(Vec<LocalNoteItem>, i64), String> {
+        self.note_query_in_folder(q, tag, pinned, favorite, archived, page, limit, sort, None)
+    }
+
+    pub fn note_query_in_folder(
+        &self, q: Option<&str>, tag: Option<&str>, pinned: Option<bool>,
+        favorite: Option<bool>, archived: Option<bool>, page: i64, limit: i64,
+        sort: Option<&str>, folder: Option<&str>,
+    ) -> Result<(Vec<LocalNoteItem>, i64), String> {
         let mut conditions = Vec::<String>::new();
         let mut args = Vec::<rusqlite::types::Value>::new();
 
+        if let Some(folder) = folder {
+            conditions.push(format!("n.folder = ?{}", args.len() + 1));
+            args.push(folder.to_string().into());
+        }
         if let Some(pinned) = pinned {
             conditions.push(format!("n.pinned = ?{}", args.len() + 1));
             args.push((if pinned { 1 } else { 0 }).into());
@@ -2053,7 +2148,7 @@ impl Db {
         let mut stmt = self
             .conn
             .prepare(&format!(
-                "SELECT n.note_id, n.title, n.content, n.source_inbox_id, n.archived, n.favorite, n.pinned, n.created_at, n.updated_at
+                "SELECT n.note_id, n.title, n.content, n.source_inbox_id, n.archived, n.favorite, n.pinned, n.created_at, n.updated_at, n.folder
                  FROM local_note_item n
                  {where_sql}
                  {order_sql}
@@ -2073,13 +2168,14 @@ impl Db {
                     r.get::<_, i64>(6)? != 0,
                     r.get::<_, String>(7)?,
                     r.get::<_, String>(8)?,
+                    r.get::<_, String>(9)?,
                 ))
             })
             .map_err(|e| format!("query notes: {e}"))?;
 
         let mut notes = Vec::new();
         for r in note_tuples {
-            let (note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at) =
+            let (note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at, folder) =
                 r.map_err(|e| format!("note row: {e}"))?;
             let tags = self.note_tags(&note_id)?;
             notes.push(LocalNoteItem {
@@ -2093,6 +2189,7 @@ impl Db {
                 created_at,
                 updated_at,
                 tags,
+                folder,
             });
         }
 
@@ -2190,7 +2287,7 @@ impl Db {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("note erase transaction: {e}"))?;
-        for table in ["local_note_tag", "local_note_item"] {
+        for table in ["local_note_tag", "local_note_item", "local_note_folder"] {
             tx.execute(&format!("DELETE FROM {table}"), [])
                 .map_err(|e| format!("note erase {table}: {e}"))?;
         }
@@ -2307,7 +2404,7 @@ impl Db {
                              SELECT 1 FROM local_note_tag t
                              WHERE t.note_id = n.note_id AND LOWER(t.tag) LIKE ?1 ESCAPE '\\'
                            ) THEN 30 ELSE 0 END
-                         + CASE WHEN LOWER(n.content) LIKE ?1 ESCAPE '\\' THEN 10 ELSE 0 END) AS score
+                         + CASE WHEN LOWER(n.content) LIKE ?1 ESCAPE '\\' THEN 10 ELSE 0 END) AS score, n.folder
                  FROM local_note_item n
                  WHERE LOWER(n.title) LIKE ?1 ESCAPE '\\'
                     OR LOWER(n.content) LIKE ?1 ESCAPE '\\'
@@ -2330,13 +2427,14 @@ impl Db {
                     r.get::<_, String>(7)?,
                     r.get::<_, String>(8)?,
                     r.get::<_, i64>(9)?,
+                    r.get::<_, String>(10)?,
                 ))
             })
             .map_err(|e| format!("query note search rows: {e}"))?;
 
         let mut candidates = Vec::new();
         for r in note_tuples {
-            let (note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at, score) =
+            let (note_id, title, content, source_inbox_id, archived, favorite, pinned, created_at, updated_at, score, folder) =
                 r.map_err(|e| format!("note search row: {e}"))?;
             let tags = self.note_tags(&note_id)?;
             candidates.push((
@@ -2351,6 +2449,7 @@ impl Db {
                     created_at,
                     updated_at,
                     tags,
+                    folder,
                 },
                 score,
             ));
@@ -3621,6 +3720,8 @@ pub struct InboxDetail {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalNoteItem {
+    #[serde(default)]
+    pub folder: String,
     pub note_id: String,
     pub title: String,
     pub content: String,
@@ -3724,7 +3825,7 @@ mod tests {
         db.conn.execute_batch("DROP TABLE content_offline_note").unwrap(); // only the test collision
         db.migrate_kind().unwrap();
         db.migrate_kind().unwrap(); // restart/reentry
-        assert_eq!(db.health().unwrap()["schemaVersion"], 11);
+        assert_eq!(db.health().unwrap()["schemaVersion"], SCHEMA_VERSION);
         for (table, rows) in tables.iter().zip(&before) { assert_eq!(dump_table(&db.conn,table),*rows); }
         assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM content_offline_vault", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         db.content_vault_remember("inst", "v", "Existing library").unwrap();
@@ -3736,7 +3837,7 @@ mod tests {
         let retained: Vec<_> = retained_tables.iter().map(|table| dump_table(&db.conn, table)).collect();
         drop(db);
         let mut db = Db::open(&path).unwrap();
-        assert_eq!(db.health().unwrap()["schemaVersion"], 11);
+        assert_eq!(db.health().unwrap()["schemaVersion"], SCHEMA_VERSION);
         assert_eq!(db.health().unwrap()["ok"], true);
         db.content_resnapshot("inst", "v").unwrap();
         assert!(db.content_prepare_operations("inst", "v").unwrap().is_empty(), "the old paused operation must not resume");
@@ -4471,6 +4572,91 @@ mod tests {
         let note = db.note_get("note-v4").unwrap().unwrap();
         assert_eq!(note.title, "v4 note");
         assert_eq!(note.tags, vec!["tag1"]);
+    }
+
+    #[test]
+    fn local_note_folders_validate_and_preserve_empty_nested_folders() {
+        let db = temp_db();
+        assert_eq!(db.note_create_folder(" Work ", "").unwrap(), "Work");
+        assert_eq!(db.note_create_folder("Ideas", "Work").unwrap(), "Work/Ideas");
+        assert_eq!(db.note_folders().unwrap(), vec!["Work", "Work/Ideas"]);
+        for name in ["", " ", ".", "..", "a/b", "a\\b", "a:b", "bad\nname", "\tbad"] {
+            assert!(db.note_create_folder(name, "").is_err(), "invalid name: {name:?}");
+        }
+        assert!(db.note_create_folder(&"x".repeat(121), "").is_err());
+        assert!(db.note_create_folder("work", "").is_err());
+        db.note_create_folder("École", "").unwrap();
+        assert!(db.note_create_folder("éCOLE", "").is_err());
+        assert!(db.note_create_folder("Child", "Missing").is_err());
+        db.note_create_folder("Ideas", "").unwrap(); // same name, different parent
+        // Path limits are bytes, while each segment's limit is characters.
+        let segment = "界".repeat(100); // 300 UTF-8 bytes
+        let mut parent = String::new();
+        for _ in 0..3 {
+            parent = db.note_create_folder(&segment, &parent).unwrap();
+        }
+        assert_eq!(parent.len(), 902);
+        assert!(db.note_create_folder(&"界".repeat(41), &parent).is_err()); // 1026 bytes
+        let boundary = db.note_create_folder(&"x".repeat(120), &parent).unwrap();
+        assert_eq!(boundary.len(), 1023);
+        let exact_limit = db.note_create_folder(&format!("{}界", "x".repeat(118)), &parent).unwrap();
+        assert_eq!(exact_limit.len(), 1024);
+        assert!(db.note_create_folder("x", &boundary).is_err()); // 1025 bytes
+    }
+
+    #[test]
+    fn local_note_folder_membership_is_direct_and_survives_edits_reset_reopen() {
+        let (mut db, path) = temp_db_at();
+        db.note_create_folder("Work", "").unwrap();
+        db.note_create_folder("Ideas", "Work").unwrap();
+        db.note_insert("root", "Root", "body", &[], None).unwrap();
+        db.note_insert_in_folder("direct", "Direct", "body", &[], None, "Work").unwrap();
+        db.note_insert_in_folder("nested", "Nested", "body", &[], None, "Work/Ideas").unwrap();
+        assert!(db.note_insert_in_folder("bad", "Bad", "", &[], None, "Missing").is_err());
+        assert!(db.note_get("bad").unwrap().is_none());
+        let (all, total) = db.note_query_in_folder(None, None, None, None, None, 1, 50, None, None).unwrap();
+        assert_eq!((all.len(), total), (3, 3));
+        let (direct, total) = db.note_query_in_folder(None, None, None, None, None, 1, 50, None, Some("Work")).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(direct[0].note_id, "direct");
+        assert_eq!(direct[0].folder, "Work");
+        let (root, total) = db.note_query_in_folder(None, None, None, None, None, 1, 50, None, Some("")).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(root[0].note_id, "root");
+        db.note_update("direct", "Edited", "edited", &["tag".into()]).unwrap();
+        assert_eq!(db.note_get("direct").unwrap().unwrap().folder, "Work");
+        assert!(db.note_set_folder("direct", "Missing").is_err());
+        assert!(db.note_set_folder("absent", "Work").is_err());
+        db.note_set_folder("root", "Work/Ideas").unwrap();
+        db.note_set_folder("nested", "").unwrap();
+        db.reset_full().unwrap();
+        assert_eq!(db.note_get("direct").unwrap().unwrap().folder, "Work");
+        assert_eq!(db.note_folders().unwrap(), vec!["Work", "Work/Ideas"]);
+        drop(db);
+        let mut db = Db::open(&path).unwrap();
+        assert_eq!(db.note_get("root").unwrap().unwrap().folder, "Work/Ideas");
+        assert_eq!(db.note_get("nested").unwrap().unwrap().folder, "");
+        db.note_erase_all().unwrap();
+        assert!(db.note_folders().unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn local_note_folder_migration_preserves_schema_11_note_content() {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in MIGRATIONS.iter().take(11) { conn.execute_batch(sql).unwrap(); }
+        conn.pragma_update(None, "user_version", 11).unwrap();
+        conn.execute("INSERT INTO local_note_item(note_id,title,content,created_at,updated_at) VALUES('old','Title','Content','time','time')", []).unwrap();
+        let mut db = Db { conn };
+        db.migrate_kind().unwrap();
+        db.migrate_kind().unwrap();
+        let note = db.note_get("old").unwrap().unwrap();
+        assert_eq!(note.title, "Title");
+        assert_eq!(note.content, "Content");
+        assert_eq!(note.folder, "");
+        assert!(db.note_folders().unwrap().is_empty());
+        assert_eq!(db.health().unwrap()["ok"], true);
     }
 
     #[test]

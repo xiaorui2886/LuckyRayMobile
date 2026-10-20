@@ -256,6 +256,7 @@ export function createKnowledgeSession(deps: KnowledgeSessionDeps): KnowledgeSes
     (f) =>
       api.localNoteList({
         q: f.q,
+        folder: f.folder,
         tag: f.tag,
         pinned: f.pinned,
         favorite: f.favorite,

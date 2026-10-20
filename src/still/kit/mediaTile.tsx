@@ -124,6 +124,7 @@ export function MediaTile({ title, src, kind, meta, onRetry, onVisible, onClick,
       className={"st-media-tile" + (selecting ? " is-selecting" : "") + (selected ? " is-selected" : "")}
       ref={hostRef as never}
       aria-pressed={selecting ? selected : undefined}
+      aria-label={`${title}，${meta}`}
       data-asset-id={assetId}
       {...press.handlers}
     >
@@ -176,8 +177,6 @@ export function MediaTile({ title, src, kind, meta, onRetry, onVisible, onClick,
           </span>
         ) : null}
       </div>
-      <strong>{title}</strong>
-      <small>{meta}</small>
     </button>
   );
 }

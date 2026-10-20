@@ -180,6 +180,8 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
       navTimer.current = setTimeout(finishBack, reduce ? 1 : 340);
       return true;
     }
+    // Only root pages may consume directory Back; pushed editors retain their guarded exit.
+    if (!window.dispatchEvent(new Event("luckyray:directory-back", { cancelable: true }))) return true;
     return navigation.goBack();
   }
 

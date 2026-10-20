@@ -175,7 +175,9 @@ test("R2-1b — the page passes the slots and drops the trailing blocks", () => 
   assert.match(statusSlot, /directoryActive[\s\S]*?<DirectoryStatusLine quiet snapshot=\{directorySnap\}/u,
     "the directory status is inside the status slot alongside folder navigation");
   assert.match(statusSlot, /<DesktopKnowledgeStatus quiet snapshot=\{desktop\}/u, "and the all-notes status too");
-  assert.match(statusSlot, /<FolderBreadcrumbs/u, "folder breadcrumbs remain inside the scroll slot");
+  const toolbarSlot = raw.slice(raw.indexOf("toolbarSlot="), raw.indexOf("disableNew="));
+  assert.match(toolbarSlot, /<FolderBreadcrumbs/u, "folder breadcrumbs share the compact in-scroll toolbar");
+  assert.ok(VIEWS().indexOf("{p.toolbarSlot}") < VIEWS().indexOf("{p.statusSlot}"), "toolbar precedes folder rows/status");
   assert.match(statusSlot, /<FolderRows/u, "folder rows remain inside the scroll slot");
   assert.match(raw, /loadMoreSlot=\{directoryActive[\s\S]{0,600}?directoryCtrl\.loadMore\(\)/u, "the directory load-more is a slot");
   assert.match(raw, /desktopCtrl\.loadMore\(\)/u, "and the all-notes load-more stays a slot");

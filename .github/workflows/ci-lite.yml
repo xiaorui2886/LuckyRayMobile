@@ -146,13 +146,19 @@ jobs:
           tests/webviewCompatibility.test.ts
           tests/wikiCompletion.test.ts
           tests/wikiCompletionLayout.test.ts
+          tests/mobileMediaDetailR6.test.ts
+          tests/mobileR6KnowledgeNavigation.test.ts
+      - name: Real CodeMirror attachment and viewport DOM regressions
+        run: |
+          npm install --prefix "$RUNNER_TEMP/lr-dom" --no-package-lock --ignore-scripts jsdom@30.1.3
+          LR_JSDOM_MODULE="$RUNNER_TEMP/lr-dom/node_modules/jsdom" node scripts/qa/mobileR6Editor.dom.cjs
       - name: Build production web assets
         run: pnpm build
       - name: Verify dependency lockfiles unchanged
         run: git diff --exit-code -- pnpm-lock.yaml src-tauri/Cargo.lock
 
   pinning-tests:
-    name: Focused Rust TLS pinning tests
+    name: Rust TLS pinning and SQLite migration tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -165,6 +171,8 @@ jobs:
           rustup default stable
       - name: Test actual pinning module with locked dependencies
         run: python3 scripts/check-pinning-public.py
+      - name: Test actual SQLite module and local folder migration
+        run: python3 scripts/check-database-public.py
       - name: Verify application lockfile unchanged
         run: git diff --exit-code -- src-tauri/Cargo.lock
 

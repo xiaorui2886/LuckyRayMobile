@@ -77,6 +77,25 @@ pub(crate) async fn content_video_play(state: State<'_, SharedState>, app: tauri
     media::play(grant, title, start_position_ms, dark_mode.unwrap_or(false), cancelled, started).await
 }
 
+/// Both inline and native playback accept only a DB-owned, healthy local asset.
+fn local_video_source(state: &SharedState, asset_id: &str) -> Result<(std::path::PathBuf, String), String> {
+    public_id(asset_id)?;
+    let asset=with_db(state,|db|db.asset_get(&asset_id))?.ok_or("CONTENT_NOT_CACHED")?;
+    if asset.kind!="video" || !asset.mime.starts_with("video/") {return Err("MEDIA_TYPE_UNSUPPORTED".into());}
+    if local_asset::check_integrity(&asset.local_path,asset.size_bytes,&asset.content_hash,false)?.status!="healthy" {return Err("CONTENT_NOT_CACHED".into());}
+    let source=std::path::PathBuf::from(&asset.local_path).canonicalize().map_err(|_|"CONTENT_NOT_CACHED")?;
+    let root=local_asset::asset_root()?.join("originals").canonicalize().map_err(|_|"CONTENT_NOT_CACHED")?;
+    if source.parent()!=Some(root.as_path()) || !source.file_name().and_then(|s|s.to_str()).is_some_and(|s|s.starts_with("asset-")) {return Err("CONTENT_NOT_CACHED".into());}
+    Ok((source, asset.mime))
+}
+
+/// Range-capable inline playback without opening another native screen.
+#[tauri::command]
+pub(crate) async fn local_asset_media_source(state: State<'_, SharedState>, asset_id: String) -> Result<Value, String> {
+    let (source, mime) = local_video_source(&state, &asset_id)?;
+    media::issue(source, mime).await
+}
+
 /// Local-owned video uses the SAME private player and lease. JavaScript names
 /// the DB asset, never a URL or private path; Desktop pairing is not consulted.
 #[tauri::command]
@@ -85,12 +104,7 @@ pub(crate) async fn local_asset_video_play(state: State<'_, SharedState>, asset_
     media::supported()?;
     public_id(&asset_id)?; public_id(&job_id)?;
     if title.len()>4096 || start_position_ms>i64::MAX as u64 {return Err("CONTENT_ID_INVALID".into());}
-    let asset=with_db(&state,|db|db.asset_get(&asset_id))?.ok_or("CONTENT_NOT_CACHED")?;
-    if asset.kind!="video" || !asset.mime.starts_with("video/") {return Err("MEDIA_TYPE_UNSUPPORTED".into());}
-    if local_asset::check_integrity(&asset.local_path,asset.size_bytes,&asset.content_hash,false)?.status!="healthy" {return Err("CONTENT_NOT_CACHED".into());}
-    let source=std::path::PathBuf::from(&asset.local_path).canonicalize().map_err(|_|"CONTENT_NOT_CACHED")?;
-    let root=local_asset::asset_root()?.join("originals").canonicalize().map_err(|_|"CONTENT_NOT_CACHED")?;
-    if source.parent()!=Some(root.as_path()) || !source.file_name().and_then(|s|s.to_str()).is_some_and(|s|s.starts_with("asset-")) {return Err("CONTENT_NOT_CACHED".into());}
+    let (source, mime) = local_video_source(&state, &asset_id)?;
     let started=std::time::Instant::now();
     let cancelled=Arc::new(AtomicBool::new(false));
     {
@@ -99,7 +113,7 @@ pub(crate) async fn local_asset_video_play(state: State<'_, SharedState>, asset_
         jobs.insert(job_id.clone(),cancelled.clone());
     }
     let _job=DownloadJob{id:job_id,cancelled:cancelled.clone()};
-    let grant=media::issue(source,asset.mime).await?;
+    let grant=media::issue(source,mime).await?;
     media::play(grant,title,start_position_ms,dark_mode.unwrap_or(false),cancelled,started).await
 }
 

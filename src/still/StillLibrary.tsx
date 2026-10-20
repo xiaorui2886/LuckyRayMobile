@@ -629,7 +629,7 @@ export function StillLibrary({ conn, active = true }: Props) {
     && desktopSnapshot.settled && desktopItems.length === 0
     && !desktopSnapshot.refreshing && !desktopSnapshot.cold;
 
-  const filterLabel = domain !== "local" ? `${desktopKind ? DESKTOP_KINDS.find(k=>k.value===desktopKind)?.label+" · " : ""}${desktopItems.length} 项${desktopSnapshot.hasMore ? " · 可继续加载" : ""}` : (() => {
+  const filterLabel = domain !== "local" ? `${desktopKind ? DESKTOP_KINDS.find(k=>k.value===desktopKind)?.label+" · " : ""}${desktopItems.length} 项` : (() => {
     const parts = [
       applied.kind !== "全部" ? applied.kind : "",
       applied.favoriteOnly ? "仅收藏" : "",

@@ -61,3 +61,19 @@
 .st-app .st-note-navigation>.st-note-nav-button{display:flex;align-items:center;justify-content:center;min-width:44px;height:48px;color:var(--st-ink)}
 .st-app .st-note-navigation .st-note-action-icon{stroke-width:1.8}
 .st-app .st-option>.st-note-action-icon{flex:0 0 23px;width:23px;height:23px;margin-right:14px;color:var(--st-secondary);stroke-width:1.8}
+
+/* R6: floating controls leave the paper visible around them. Native insets
+   still own keyboard geometry; content padding makes the final line reachable. */
+.st-app .st-note-surface{position:relative}
+.st-app .st-note-surface>.st-reader-bottom{position:absolute;left:0;right:0;bottom:0;z-index:4;padding:6px 20px calc(var(--st-safe-bottom) + 8px);background:transparent;pointer-events:none}
+.st-app .st-reader-bottom>.st-reader-tools{pointer-events:auto;min-height:48px;background:var(--st-surface);background:color-mix(in srgb,var(--st-surface) 88%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-radius:26px;box-shadow:0 3px 18px #0000000c}
+.st-app .st-note-surface .st-note-navigation>.st-note-nav-button{height:44px}
+.st-app .st-note-surface>.st-note-paper{padding-bottom:calc(80px + var(--st-safe-bottom));scroll-padding-bottom:80px}
+.st-app .st-note-paper.is-editing{display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}
+.st-app .st-note-paper.is-editing>.st-note-title{flex:none;margin-bottom:18px!important}
+.st-app .st-note-paper.is-editing>.st-note-editor.is-cm{flex:1;height:auto;min-height:0}
+.st-app .st-note-editor.is-cm .cm-scroller{height:100%;min-height:0;overscroll-behavior-y:contain}
+.st-app .st-note-editor.is-cm .cm-content{padding-bottom:calc(84px + var(--st-safe-bottom));min-height:100px}
+.st-app .has-editor-tools>.st-reader-bottom{padding:4px 8px calc(var(--st-safe-bottom) + 4px)}
+.st-app .st-editor-image{padding:6px 0;box-sizing:border-box}
+.st-app .st-editor-image.is-inline{display:inline-block;vertical-align:middle;max-width:100%}

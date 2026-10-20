@@ -311,20 +311,20 @@ test("ux-r1 — an explicit user refresh keeps its own reload path", () => {
 test("ux-r1 — the bottom magnifier becomes Favorite through existing authorities", () => {
   // Local: the center action binds the real local flag authority.
   const localPart = ASSET.slice(ASSET.indexOf("function LocalAsset"), ASSET.indexOf("// --- 电脑素材"));
-  assert.match(localPart, /icon="heart" label=\{asset\.favorite \? "取消收藏" : "收藏素材"\}/);
+  assert.match(localPart, /icon="heart" label=\{asset\.favorite \? "取消收藏" : "收藏"\}/);
   assert.match(localPart, /onClick=\{\(\) => void toggleFavorite\(\)\}/, "uses the existing handler");
       const localActions = localPart.slice(localPart.indexOf('className="st-asset-actions"'));
   const barEnd = localActions.indexOf("</div>");
   assert.doesNotMatch(localActions.slice(0, barEnd), /icon="zoom"/, "the bottom magnifier button is gone");  // Desktop: guarded by the Wave A authority and truthfully disabled on owner mismatch.
   const desktopPart = ASSET.slice(ASSET.indexOf("function DesktopAsset"));
-  assert.match(desktopPart, /icon="heart" label=\{asset\?\.favorite \? "取消收藏" : "收藏素材"\}/);
-  assert.match(desktopPart, /disabled=\{ownerMismatch \|\| unavailable \|\| !asset\}/,
+  assert.match(desktopPart, /icon="heart" label=\{asset\?\.favorite \? "取消收藏" : "收藏"\}/);
+  assert.match(desktopPart, /disabled=\{ownerMismatch \|\| unavailable \|\| !asset \|\| orgSnapshot\.busy\}/,
     "wrong-owner, denied, and unread detail states cannot mutate favorites");
   assert.match(desktopPart, /org\.setFavorite\(assetId, !asset\?\.favorite, revalidate\)/, "uses the Wave A authority");
 });
 
 test("ux-r1 — the zoom gesture is retained; the redundant hint is gone", () => {
-  assert.match(ASSET, /onDoubleClick=\{\(\) => \{ setZoom\(\(z\) => \(z === 1 \? 2 : 1\)\)/, "double-tap zoom kept");
+  assert.match(ASSET, /onDoubleClick=\{\(\) => \{ if \(video\) return; setZoom\(\(z\) => \(z === 1 \? 2 : 1\)\)/, "double-tap zoom kept");
   assert.match(ASSET, /data-media-zoom-layer="true"/, "media zoom layer kept");
   assert.match(ASSET, /base\.current\.distance/, "pinch zoom kept");
   assert.doesNotMatch(ASSET, /双击图片可放大/, "the redundant hint is removed from both details");

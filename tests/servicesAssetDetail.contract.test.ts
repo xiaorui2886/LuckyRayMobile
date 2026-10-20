@@ -203,8 +203,8 @@ test("currentness — owner mismatch / disconnect fail closed without retargetin
   // The section disables the action while pending; the page gates owner mismatch.
   assert.match(src, /const sourceSectionProps = \{[\s\S]*?present, pendingPresent, copyState,/u,
     "shared source props carry the real pending state, not a constant");
-  assert.equal((src.match(/<ServicesSourceSection \{\.\.\.sourceSectionProps\}/gu) || []).length, 2,
-    "both the compact detail and original Info consume the guarded source props");
+  assert.equal((src.match(/<ServicesSourceSection \{\.\.\.sourceSectionProps\}/gu) || []).length, 1,
+    "immersive detail keeps the guarded source section in Info without covering the media");
   assert.match(src, /if \(pendingPresent\) return;[\s\S]*?setPendingPresent\(true\);[\s\S]*?presentCtrl\.open\(\)\.finally\(\(\) => setPendingPresent\(false\)\)/u,
     "pending presentation still coalesces repeated user actions and clears on settlement");
   const section = strip(read("src", "still", "kit", "servicesSourceSection.tsx"));

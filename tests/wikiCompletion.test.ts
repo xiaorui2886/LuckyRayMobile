@@ -5,7 +5,7 @@ test('open/closed token exact ranges with caret in middle',()=>{
  assert.deepEqual(wikiCompletionAt('[[]]',2),{from:0,to:4,query:'',token:'[[]]'});
  assert.deepEqual(wikiCompletionAt('[[笔记]]',3),{from:0,to:6,query:'笔',token:'[[笔记]]'});
 });
-for(const doc of ['`[[no`','```md\n[[no\n```','\\[[no','![[no','[[x|no','[[x#no','[label [[no]]](https://example.com)'])test('suppresses invalid/code/embed/alias context '+doc,()=>{
+for(const doc of ['`[[no`','```md\n[[no\n```','\\[[no','[[x|no','[[x#no','[label [[no]]](https://example.com)'])test('suppresses invalid/code/embed/alias context '+doc,()=>{
  const at=doc.includes('no')?doc.indexOf('no')+2:doc.length;assert.equal(wikiCompletionAt(doc,at),null);
 });
 test('stable local ID with label; unsafe syntax rejected',()=>{
@@ -16,4 +16,10 @@ test('stable local ID with label; unsafe syntax rejected',()=>{
 test('changed token/range rejected and large docs bounded',()=>{
  assert.equal(sameWikiCompletion(wikiCompletionAt('[[a',3),wikiCompletionAt('[[b',3)),false);
  assert.equal(wikiCompletionAt('x'.repeat(250001)+'[[',250003),null);
+});
+
+test('attachment completion keeps embed syntax and source range',()=>{
+ assert.deepEqual(wikiCompletionAt('![[im',5),{from:0,to:5,query:'im',token:'![[im',embed:true});
+ assert.equal(wikiInsertion({id:'image',title:'photo.png',target:'attachments/photo.png'},true),'![[attachments/photo.png]]');
+ assert.equal(wikiCompletionAt('\\![[no',6),null);
 });

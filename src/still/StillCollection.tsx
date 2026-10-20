@@ -25,6 +25,8 @@ import {
 import { DesktopKnowledgeStatus } from "./kit/desktopKnowledgeStatus";
 import { KnowledgeReplicaManagement } from "./kit/knowledgeReplicaManagement";
 import { sessionKnowledge } from "./kit/knowledgeSession";
+import "./kit/knowledgeNavigation.css";
+import { folderChildren } from "./kit/knowledgeFolderCatalog";
 import { FolderBreadcrumbs, FolderRows } from "./kit/knowledgeFolders";
 import { DirectorySheet } from "./kit/directorySheet";
 import { KnowledgeLibrarySheet } from "./kit/KnowledgeLibrarySheet";
@@ -49,6 +51,8 @@ import { failureCopy } from "../services/feedback";
 import { toast } from "../services/toast";
 import { localNoteItem, desktopMeta } from "./stillData";
 import { useStillNav } from "./StillShell";
+
+let rememberedLocalDirectory = "";
 
 let rememberedSource: "local" | "desktop" = "local";
 
@@ -193,12 +197,23 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
     () => session.projection.rowsFor(instanceId, desktop.vaultId),
   );
   const [sheet, setSheet] = useState<
-    "" | "filter" | "notebooks" | "vault" | "note-actions" | "confirm-delete"
+    "" | "filter" | "notebooks" | "vault" | "note-actions" | "confirm-delete" | "create-folder" | "move-local" | "desktop-filter" | "desktop-folder-info"
   >("");
   const [actionNote, setActionNote] = useState<any>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [mutating, setMutating] = useState(false);
-  const [directory, setDirectory] = useState("");
+  const [directory, setDirectoryState] = useState(rememberedLocalDirectory);
+  const setDirectory = (path: string) => {
+    rememberedLocalDirectory = path;
+    rememberedScroll.local = 0;
+    setDirectoryState(path);
+  };
+  const [localFolders, setLocalFolders] = useState<string[]>([]);
+  const [folderName, setFolderName] = useState("");
+  const [folderError, setFolderError] = useState("");
+  const folderBusy = useRef(false);
+  const [folderSaving, setFolderSaving] = useState(false);
+  const [localFolderError, setLocalFolderError] = useState("");
   const [busy, setBusy] = useState(false);
   // R1.5.3: the SYNCHRONOUS create-submit lock — React state cannot guard a
   // double invoke (both taps run before the re-render).
@@ -227,6 +242,30 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
   );
   useEffect(() => { rememberedSource = source; }, [source]);
 
+  useEffect(() => {
+    if (source !== "local") return;
+    let alive = true;
+    api.localNoteFolders().then(result => {
+      if (!alive) return;
+      setLocalFolders(result.paths);
+      setLocalFolderError("");
+    }).catch(e => { if (alive) setLocalFolderError(failureCopy(e, "读取本机文件夹失败。")); });
+    return () => { alive = false; };
+  }, [source, version, reloadKey]);
+  useEffect(() => {
+    const onDirectoryBack = (event: Event) => {
+      const path = source === "desktop" ? desktopDirectory : directory;
+      if (!path) return;
+      event.preventDefault();
+      // Search is a flat view. Restore the folder first, then climb one level.
+      if (query.trim()) { setQuery(""); return; }
+      if (source === "desktop") setDesktopDirectory(parentOf(path));
+      else setDirectory(parentOf(path));
+    };
+    window.addEventListener("luckyray:directory-back", onDirectoryBack);
+    return () => window.removeEventListener("luckyray:directory-back", onDirectoryBack);
+  }, [source, desktopDirectory, directory, query]);
+
   const applied = appliedRef.current;
   const mode: KnowledgeFilterState["mode"] = applied.mode;
 
@@ -247,6 +286,7 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
    *  same identity the active page-1 used. */
   const localFilters = (q: string = query): NoteFilters => ({
     q: q.trim() || undefined,
+    folder: q.trim() ? undefined : directory || undefined,
     tag: applied.tag || undefined,
     pinned: mode === "pinned" ? true : undefined,
     favorite: mode === "favorite" ? true : undefined,
@@ -277,7 +317,7 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
     const timer = setTimeout(() => pager.reload(identity), 200);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source, pager, query, mode, applied.tag, applied.sort]);
+  }, [source, pager, query, directory, mode, applied.tag, applied.sort]);
 
   // Local mutations (data-version events) refresh the SAME identity with the
   // rows-retained revalidate: the last-good page stays painted while the
@@ -989,12 +1029,43 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
     if (busy) return;
     setBusy(true);
     try {
-      const note = await api.localNoteAdd("新笔记", "", []);
+      const note = await api.localNoteAdd("新笔记", "", [], query.trim() ? "" : directory);
       localDataStore.publish("note");
       open("note", note.noteId, { edit: true });
     } catch (e: any) {
       toast.error(failureCopy(e, "新建笔记失败。"));
     } finally { setBusy(false); }
+  }
+
+  async function createLocalFolder() {
+    if (folderBusy.current) return;
+    const name = folderName.trim();
+    if (!name || name === "." || name === ".." || /[\\/:\u0000-\u001f\u007f]/.test(name) || [...name].length > 120) {
+      setFolderError("请输入 1–120 个字符的文件夹名称，不能包含斜杠、冒号或控制字符。");
+      return;
+    }
+    if (folderChildren(localFolders, directory).some(path => path.slice(path.lastIndexOf("/") + 1).toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      setFolderError("此目录下已存在同名文件夹。"); return;
+    }
+    folderBusy.current = true; setFolderSaving(true); setFolderError("");
+    try {
+      const result = await api.localNoteCreateFolder(name, directory);
+      setLocalFolders(paths => [...new Set([...paths, result.path])]);
+      localDataStore.publish("note");
+      setQuery(""); setDirectory(result.path); setSheet("");
+      toast.success("文件夹已创建");
+    } catch (e) { setFolderError(failureCopy(e, "新建文件夹失败，请重试。")); }
+    finally { folderBusy.current = false; setFolderSaving(false); }
+  }
+  async function moveLocalNote(path: string) {
+    if (!actionNote || folderBusy.current) return;
+    folderBusy.current = true; setFolderSaving(true);
+    try {
+      await api.localNoteSetFolder(actionNote.noteId, path);
+      localDataStore.publish("note"); setSheet(""); setActionNote(null);
+      toast.success("已移动笔记");
+    } catch (e) { toast.error(failureCopy(e, "移动失败，请重试。")); }
+    finally { folderBusy.current = false; setFolderSaving(false); }
   }
 
   // -------------------------------------------------------------------------
@@ -1207,13 +1278,19 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
           // full-height view, never off-screen.
           filterLabel={vaultLabel}
           hideContextLabel
+          toolbarSlot={<div className="st-compact-toolbar st-knowledge-toolbar">
+            <div className="st-knowledge-trail">
+              {desktopDirectory && !query.trim() ? <FolderBreadcrumbs current={desktopDirectory} onSelect={setDesktopDirectory} /> : <span>{query.trim() ? "搜索全部笔记" : "全部笔记"}</span>}
+            </div>
+            <IconButton icon="filter" label="筛选笔记" onClick={() => setSheet("desktop-filter")} />
+            <IconButton icon="folder" label="新建文件夹" className="st-folder-create" onClick={() => setSheet("desktop-folder-info")} />
+          </div>}
           disableNew={!(createAuthority?.usable === true && (desktop.replica ? desktop.replica.writeState === "granted" : connected)) || busy}
           hideFilter
           scrollTop={rememberedScroll[source]}
           onScroll={(top) => { rememberedScroll[source] = top; }}
           statusSlot={<>
             {!query.trim() && desktop.vaultId ? <>
-              <FolderBreadcrumbs current={desktopDirectory} onSelect={setDesktopDirectory} />
               <FolderRows showStatus={false} snapshot={folderSnapshot} current={desktopDirectory} online={connected} onSelect={setDesktopDirectory} />
             </> : null}
             {directoryActive
@@ -1239,6 +1316,15 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
             ) : null)}
         />
 
+        {sheet === "desktop-filter" ? <DirectorySheet
+          registerOverlay={registerOverlay} onClose={() => setSheet("")}
+          instanceId={instanceId} vaultId={desktop.vaultId} vaultName={desktop.vaultName || "LuckyRay 知识库"}
+          connected={connected} current={desktopDirectory} title="筛选笔记" rootLabel="全部笔记"
+          notice="按目录查看笔记。电脑接口暂不支持按置顶或收藏筛选。"
+          onSelect={path => { setQuery(""); setDesktopDirectory(path); setSheet(""); }} /> : null}
+        {sheet === "desktop-folder-info" ? <Sheet title="新建文件夹" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
+          <p className="st-sheet-copy">当前电脑知识库接口尚不支持从手机新建文件夹。请先在电脑端创建，再刷新此页。</p>
+        </Sheet> : null}
         {sheet === "filter" ? (
           <KnowledgeFilterSheet
             draft={draft.current.getDraft()}
@@ -1307,19 +1393,26 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
           }}
           onScroll={(e) => { rememberedScroll[source] = (e.target as HTMLElement).scrollTop; }}
         >
-          <div className="st-compact-toolbar">
-            <span>{localHeading || "我的笔记"}</span>
-            <IconButton
-              icon="filter"
-              label="筛选与排序"
-              onClick={() => { draft.current.begin(); bump((n) => n + 1); setSheet("filter"); }}
-              className={localHeading ? "st-filter-active" : ""}
-            />
+          <div className="st-compact-toolbar st-knowledge-toolbar">
+            <div className="st-knowledge-trail">
+              {directory && !query.trim() ? <FolderBreadcrumbs current={directory} onSelect={setDirectory} /> : <span>{query.trim() ? "搜索全部笔记" : localHeading || "全部笔记"}</span>}
+            </div>
+            <IconButton icon="filter" label="筛选与排序"
+              onClick={() => { draft.current.begin(); bump(n => n + 1); setSheet("filter"); }}
+              className={localHeading ? "st-filter-active" : ""} />
+            <IconButton icon="folder" label="新建文件夹" className="st-folder-create"
+              onClick={() => { setFolderName(""); setFolderError(""); setSheet("create-folder"); }} />
           </div>
+          {localFolderError ? <p className="st-sheet-copy" role="status">{localFolderError}<Button kind="quiet" onClick={() => setReloadKey(k => k + 1)}>重试</Button></p> : null}
+          {!query.trim() ? <section className="st-knowledge-folders" aria-label="本机文件夹">
+            {folderChildren(localFolders, directory).map(path => <button type="button" key={path} className="st-folder-row" onClick={() => setDirectory(path)}>
+              <span className="st-folder-symbol"><Icon name="folder" size={20} /></span><span className="st-folder-name">{path.slice(path.lastIndexOf("/") + 1)}</span><Icon name="right" size={14} />
+            </button>)}
+          </section> : null}
           {localRows.length ? (
             <div>
               {localRows.map((n) => (
-                <div key={n.id} style={{ display: "flex", alignItems: "stretch" }}>
+                <div key={n.id} className="st-local-note-entry">
                   <button className="st-note-row" style={{ flex: 1, minWidth: 0 }} onClick={() => open("note", n.id, { noteSearch: query.trim() ? { query: query.trim() } : undefined })}>
                     <span className="st-knowledge-note-symbol" aria-hidden="true"><Icon name="file" size={20} /></span>
                     <strong>{n.title}</strong>
@@ -1335,8 +1428,8 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
                         {n.tags?.length ? " · " + n.tags.join(" / ") : ""}
                       </span>
                       <span className="st-note-flags">
-                        {n.pinned ? <Icon name="pin" size={13} className="st-flag-pin" /> : null}
-                        {n.favorite ? <Icon name="heart" size={13} className="st-flag-fav is-on" /> : null}
+                        {n.pinned ? <span role="img" aria-label="已置顶"><Icon name="pin" size={12} className="st-flag-pin" /></span> : null}
+                        {n.favorite ? <span role="img" aria-label="已收藏"><Icon name="heart" size={12} className="st-flag-fav is-on" /></span> : null}
                       </span>
                     </small>
                   </button>
@@ -1362,8 +1455,8 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
             </div>
           ) : (
             <Empty
-              title={emptyState.title}
-              body={emptyState.body}
+              title={directory && !query.trim() ? "此文件夹还没有笔记" : emptyState.title}
+              body={directory && !query.trim() ? "在这里新建笔记，或从笔记操作中移入已有笔记。" : emptyState.body}
             >
               {emptyState.action === "new" ? (
                 <Button kind="quiet" onClick={() => void createNote()}>新建笔记</Button>
@@ -1413,11 +1506,25 @@ export function StillKnowledge({ conn }: { conn: ConnState | null }) {
               <Option label={actionNote.pinned ? "取消置顶" : "置顶"} icon="pin" onClick={() => void toggleNoteFlag("pinned")} />
               <Option label={actionNote.favorite ? "取消收藏" : "收藏"} onClick={() => void toggleNoteFlag("favorite")} />
               <Option label={actionNote.archived ? "取消归档" : "归档"} onClick={() => void toggleNoteFlag("archived")} />
+              <Option label="移动到文件夹" icon="folder" onClick={() => setSheet("move-local")} />
               <Option label="删除" danger onClick={() => setConfirmDelete(true)} />
             </>
           )}
         </Sheet>
       ) : null}
+      {sheet === "create-folder" ? <Sheet title="新建文件夹" registerDismiss={registerOverlay}
+        busy={folderSaving} onClose={() => { if (!folderBusy.current) setSheet(""); }}
+        footer={<><Button kind="quiet" disabled={folderSaving} onClick={() => setSheet("")}>取消</Button><Button disabled={folderSaving || !folderName.trim()} onClick={() => void createLocalFolder()}>{folderSaving ? "创建中…" : "创建"}</Button></>}>
+        <p className="st-sheet-caption">位置：{directory || "本机笔记"}</p>
+        <label className="st-folder-name-field">文件夹名称<input autoFocus value={folderName} maxLength={120} disabled={folderSaving}
+          onChange={e => { setFolderName(e.target.value); setFolderError(""); }} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void createLocalFolder(); } }} /></label>
+        {folderError ? <p className="st-folder-error" role="alert">{folderError}</p> : null}
+      </Sheet> : null}
+      {sheet === "move-local" ? <Sheet title="移动到文件夹" registerDismiss={registerOverlay} busy={folderSaving}
+        onClose={() => { if (!folderBusy.current) setSheet(""); }}>
+        <Option label="根目录" icon="folder" selected={!actionNote?.folder} onClick={() => void moveLocalNote("")} />
+        {localFolders.map(path => <Option key={path} label={path} icon="folder" selected={actionNote?.folder === path} onClick={() => void moveLocalNote(path)} />)}
+      </Sheet> : null}
       {sheet === "notebooks" ? (
         <Sheet title="知识库" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
           <Option label="本机笔记" icon="knowledge" selected onClick={() => { setSource("local"); setSheet(""); }} />

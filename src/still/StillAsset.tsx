@@ -5,12 +5,13 @@
 // blocker exempts exactly this layer.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Header, IconButton, Button, Sheet, Option, Empty, Icon } from "./kit/StillImports";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { api } from "../services/client";
 import { localDataStore } from "../services/localDataStore";
 import { dataStore } from "../services/dataStore";
 import { contentError } from "../components/DesktopLibrary";
-import CachedMedia from "../components/CachedMedia";
+import { openInlineMediaLease, type MediaGrant } from "./kit/inlineMediaLease";
+import "./assetDetail.css";
 import {
   classifyExportDestination,
   exportActionLabel,
@@ -61,12 +62,12 @@ export function StillAsset({ id, preview }: { id: string; preview?: AssetPreview
   const { back, registerOverlay } = useStillNav();
   const route = parseAssetRoute(id);
   if (route.kind === "local") {
-    return <LocalAsset localId={route.assetId} preview={preview} registerOverlay={registerOverlay} back={back} />;
+    return <LocalAsset key={route.assetId} localId={route.assetId} preview={preview} registerOverlay={registerOverlay} back={back} />;
   }
   if (route.kind === "desktop") {
     // The owner is proven by the route itself, so the page stays bound to one
     // Desktop for its whole lifetime.
-    return <DesktopAsset ownerInstanceId={route.owner} assetId={route.assetId} preview={preview} registerOverlay={registerOverlay} back={back} />;
+    return <DesktopAsset key={`${route.owner}:${route.assetId}`} ownerInstanceId={route.owner} assetId={route.assetId} preview={preview} registerOverlay={registerOverlay} back={back} />;
   }
   // A route with no provable owner fails closed; it is never resolved by
   // guessing the owner from the live connection.
@@ -86,11 +87,52 @@ function UnownedAssetRoute({ back }: { back: () => void }) {
   );
 }
 
+function AssetHeader({ title, back }: { title: string; back: () => void }) {
+  return <header className="st-asset-header"><IconButton icon="back" label="返回素材库" onClick={back} /><h1 title={title}>{title}</h1></header>;
+}
+
+function AssetAction({ icon, label, active, disabled, onClick }: { icon: string; label: string; active?: boolean; disabled?: boolean; onClick: () => void }) {
+  return <button type="button" className={"st-asset-action" + (active ? " is-active" : "")} aria-label={label} aria-pressed={active} disabled={disabled} onClick={onClick}><Icon name={icon} size={23} /><span>{label}</span></button>;
+}
+
+/** Inline playback reuses the same owner-bound private lease as the native player.
+ * A route/version/connection change unmounts it and retires pending grants. */
+function InlineAssetVideo({ localPath, owner, id, poster, onFallback }: { localPath?: string; owner?: string; id: string; poster?: string; onFallback?: () => void }) {
+  const [url, setUrl] = useState("");
+  const [error, setError] = useState("");
+  const player = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const element = player.current;
+    setError("");
+    setUrl("");
+    const jobId = `inline-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const retire = openInlineMediaLease({
+      cached: () => owner ? api.contentMediaSource(owner, id) : api.localAssetMediaSource(id),
+      stream: () => owner ? invoke<MediaGrant>("content_media_stream", { instance: owner, id, jobId }) : Promise.reject(new Error("CONTENT_NOT_CACHED")),
+      release: api.contentMediaRelease,
+      cancel: () => api.contentCancel(jobId),
+      ready: setUrl,
+      failed: (failure) => setError(videoFailureCopy(failure)),
+    });
+    return () => {
+      element?.pause();
+      element?.removeAttribute("src");
+      element?.load();
+      retire?.();
+    };
+  }, [owner, id, localPath]);
+  return <div className="st-inline-video">
+    <video ref={player} src={url || undefined} poster={poster} controls playsInline preload="metadata" aria-label="视频播放器" onError={() => setError("内嵌播放器暂不支持这段视频，可使用本机播放器。")} />
+    {!url && !error ? <p role="status">正在准备视频…</p> : null}
+    {error ? <div className="st-inline-video-error" role="status"><p>{error}</p>{onFallback ? <Button kind="quiet" onClick={onFallback}>使用本机播放器</Button> : null}</div> : null}
+  </div>;
+}
+
 // --- shared zoomable media stage ---------------------------------------------
 
 function ZoomStage({ src, alt, poster, video, onNeedOriginal, playLabel = "获取视频", playBusy = false, playMessage = "", notice = "", toggleSignal = 0 }: {
   src: string; alt: string;
-  poster?: string; video?: { instance: string; id: string; path: string; mime: string } | null;
+  poster?: string; video?: { instance?: string; id: string; path: string; localPath?: string; epoch?: string } | null;
   onNeedOriginal?: () => void;
   playLabel?: string; playBusy?: boolean; playMessage?: string;
   notice?: string;
@@ -132,9 +174,9 @@ function ZoomStage({ src, alt, poster, video, onNeedOriginal, playLabel = "获�
       ref={area}
       className="st-asset-area"
       data-media-zoom-layer="true"
-      onDoubleClick={() => { setZoom((z) => (z === 1 ? 2 : 1)); setOffset({ x: 0, y: 0 }); }}
+      onDoubleClick={() => { if (video) return; setZoom((z) => (z === 1 ? 2 : 1)); setOffset({ x: 0, y: 0 }); }}
       onPointerDown={(e) => {
-        if (!src) return;
+        if (!src || video) return;
         pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
         e.currentTarget.setPointerCapture(e.pointerId);
         const pts = Array.from(pointers.current.values());
@@ -163,7 +205,7 @@ function ZoomStage({ src, alt, poster, video, onNeedOriginal, playLabel = "获�
       onPointerCancel={(e) => pointers.current.delete(e.pointerId)}
     >
       {video ? (
-        <CachedMedia instance={video.instance} id={video.id} version={video.path} mime={video.mime} poster={poster} />
+        <InlineAssetVideo key={`${video.instance || "local"}:${video.id}:${video.path}:${video.epoch || ""}`} owner={video.instance} id={video.id} localPath={video.localPath} poster={poster} onFallback={onNeedOriginal} />
       ) : readySrc && src ? (
         <img src={readySrc} alt={alt} style={{ transform: `translate(${offset.x}px,${offset.y}px) scale(${zoom})` }} />
       ) : poster ? (
@@ -185,6 +227,8 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
 }) {
   const { mode } = useStillNav();
   const [asset, setAsset] = useState<any>(null);
+  const [favoriteBusy, setFavoriteBusy] = useState(false);
+  const favoritePending = useRef(false);
   const [integrity, setIntegrity] = useState<any>(null);
   const [loadError, setLoadError] = useState("");
   const [sheet, setSheet] = useState<SheetName>("");
@@ -231,10 +275,9 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
   if (!asset) {
     return (
       <div className="st-asset-view">
-        <Header title="本机素材" left={<IconButton icon="back" label="返回素材库" onClick={back} />} />
-        <ZoomStage src="" poster={loadError ? "" : preview?.thumbnail} alt={preview?.title || "素材"} />
-        <div className="st-asset-caption"><strong>{preview?.title || "正在读取素材…"}</strong><small role="status">{loadError || "正在读取本机文件…"}</small></div>
-        <div className="st-asset-actions"><IconButton icon="share" label="分享素材" disabled onClick={()=>{}} /><IconButton icon="heart" label="收藏素材" disabled onClick={()=>{}} /><IconButton icon="info" label="素材信息" disabled onClick={()=>{}} /></div>
+        <AssetHeader title={preview?.title || "正在读取素材…"} back={back} />
+        <ZoomStage src="" poster={loadError ? "" : preview?.thumbnail} alt={preview?.title || "素材"} notice={loadError || "正在读取本机文件…"} />
+        <div className="st-asset-actions" role="toolbar" aria-label="素材操作">{[["share", "分享"], ["heart", "收藏"], ["info", "信息"], ["trash", "删除"], ["more", "更多"]].map(([icon, label]) => <AssetAction key={icon} icon={icon} label={label} disabled onClick={() => {}} />)}</div>
       </div>
     );
   }
@@ -249,11 +292,14 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
   };
 
   async function toggleFavorite() {
+    if (favoritePending.current) return;
+    favoritePending.current = true; setFavoriteBusy(true);
     try {
       await api.localAssetSetFlags(localId, { favorite: !asset.favorite });
       setAsset({ ...asset, favorite: !asset.favorite });
       localDataStore.publish("asset");
     } catch (e: any) { toast.error(failureCopy(e, "操作失败。")); }
+    finally { favoritePending.current = false; setFavoriteBusy(false); }
   }
 
   // A4 (LOCAL-LIBRARY-USABILITY-R1): archive/unarchive through the existing
@@ -343,25 +389,19 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
 
   return (
     <>
-      <div className="st-asset-view">
-        <Header title="本机素材" left={<IconButton icon="back" label="返回素材库" onClick={() => { back(); }} />}
-          right={<IconButton icon="more" label="素材更多操作" onClick={() => setSheet("more")} />} />
+      <div className={"st-asset-view" + (asset.kind === "image" ? " is-image" : "")}>
+        <AssetHeader title={asset.name} back={back} />
         <ZoomStage src={previewSrc} poster={!integrityError ? preview?.thumbnail : ""} alt={asset.name}
+          video={asset.kind === "video" && healthy ? { id: localId, path: asset.contentHash || asset.localPath, localPath: asset.localPath } : null}
           onNeedOriginal={asset.kind==="video" && healthy ? ()=>void playVideo() : undefined}
           playLabel="播放视频" playBusy={playBusy} playMessage={playMessage}
           notice={integrityError ? `${integrityText[integrityError] || "文件异常"} — 仅保留元数据。` : loadError} />
-        <div className="st-asset-caption">
-          <strong>{asset.name}</strong>
-          <small>{kindText} · {fmtBytes(asset.sizeBytes)}{asset.favorite ? " · 已收藏" : ""}{asset.archived ? " · 已归档" : ""}</small>
-        </div>
-        {/* UX-POLISH-R1 4.1: the center action is Favorite through the EXISTING
-            local flag authority. Zoom stays a media-layer gesture (double-tap /
-            pinch) — the redundant magnifier button is gone. */}
-        <div className="st-asset-actions">
-          <IconButton icon="share" label="分享素材" disabled={!healthy} onClick={() => void share()} />
-          <IconButton icon="heart" label={asset.favorite ? "取消收藏" : "收藏素材"}
-            className={asset.favorite ? "is-active" : ""} onClick={() => void toggleFavorite()} />
-          <IconButton icon="info" label="素材信息" onClick={() => setSheet("info")} />
+        <div className="st-asset-actions" role="toolbar" aria-label="素材操作">
+          <AssetAction icon="share" label="分享" disabled={!healthy || busy} onClick={() => void share()} />
+          <AssetAction icon="heart" label={asset.favorite ? "取消收藏" : "收藏"} active={Boolean(asset.favorite)} disabled={favoriteBusy} onClick={() => void toggleFavorite()} />
+          <AssetAction icon="info" label="信息" onClick={() => setSheet("info")} />
+          <AssetAction icon="trash" label="删除" onClick={() => setSheet("delete")} />
+          <AssetAction icon="more" label="更多" onClick={() => setSheet("more")} />
         </div>
       </div>
       {sheet === "info" ? (
@@ -369,18 +409,16 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
           <div className="st-metadata-row"><span>名称</span><b>{asset.name}</b></div>
           <div className="st-metadata-row"><span>来源</span><b>本机素材</b></div>
           <div className="st-metadata-row"><span>类型</span><b>{kindText}</b></div>
+          <div className="st-metadata-row"><span>大小</span><b>{fmtBytes(asset.sizeBytes || 0)}</b></div>
         </Sheet>
       ) : null}
       {sheet === "more" ? (
         <Sheet title="素材操作" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
-          <Option label={asset.favorite ? "取消收藏" : "收藏"} icon="pin" onClick={() => { void toggleFavorite(); setSheet(""); }} />
           <Option label={asset.archived ? "取消归档" : "归档"} icon="archive" onClick={() => { void toggleArchive(); setSheet(""); }} />
           <Option label={healthy ? exportActionLabel(asset.kind) : "文件异常，无法导出"} icon="image" onClick={() => { if (healthy) { setSheet(""); void exportToSystem(); } }} />
-          <Option label="分享" icon="share" onClick={() => { if (healthy) { setSheet(""); void share(); } }} />
           {asset.kind === "image" ? <Option label="查看原图" icon="zoom" onClick={() => { if (healthy) { setSheet(""); void openOriginal(); } }} /> : <Option label="打开原文件" icon="file" onClick={() => { if (healthy) { setSheet(""); void openOriginal(); } }} />}
           {asset.kind==="image" && healthy ? <Option label="重试清晰预览" icon="refresh" onClick={()=>{setSheet("");setPreviewRetry(v=>v+1);}} /> : null}
           <Option label="重命名与标签" icon="edit" onClick={() => { setName(asset.name); setTagInput(""); setSheet("rename"); }} />
-          <Option label="删除这条素材" icon="trash" danger onClick={() => setSheet("delete")} />
         </Sheet>
       ) : null}
       {sheet === "rename" ? (
@@ -456,6 +494,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     batch: (i, input) => api.contentMaterialBatch(i, input),
   })).current;
   const [orgSnapshot, setOrgSnapshot] = useState(org.snapshot());
+  useEffect(() => org.subscribe(setOrgSnapshot), [org]);
   // The REAL detail generation. It is bumped on mount, on route/owner change,
   // and on unmount, so an in-flight detail read or revalidation whose page is
   // gone can never commit.
@@ -745,40 +784,27 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
 
   return (
     <>
-      <div className="st-asset-view">
-        <Header title="电脑素材" left={<IconButton icon="back" label="返回素材库" onClick={back} />}
-          right={<IconButton icon="more" label="素材更多操作" onClick={() => setSheet("more")} />} />
+      <div className={"st-asset-view" + ((asset?.kind || preview?.kind) === "image" ? " is-image" : "")}>
+        <AssetHeader title={unavailable ? "素材暂不可用" : asset?.name || preview?.title || "正在读取素材…"} back={back} />
         <ZoomStage
           src={source && !isVideo ? source : ""}
           alt={asset?.name || preview?.title || "素材"}
           poster={!unavailable && !ownerMismatch ? thumb : ""}
-          video={null}
+          video={!unavailable && !ownerMismatch && asset?.kind === "video" ? { instance: owner, id: assetId, path: materialImageVersion(asset), epoch: wsState } : null}
           onNeedOriginal={!unavailable && !ownerMismatch && (asset?.kind || preview?.kind) === "video" ? () => void playVideo() : undefined}
           playLabel="播放视频" playBusy={playBusy} playMessage={playMessage}
-          notice={ownerMismatch ? "当前电脑已更换，请返回素材库重新打开。" : message || (busy && !source ? "正在从电脑获取原文件…" : "")}
+          notice={ownerMismatch ? "当前电脑已更换，请返回素材库重新打开。" : orgSnapshot.error || (orgSnapshot.busy ? "正在同步收藏与整理状态…" : "") || message || (busy && !source ? "正在从电脑获取原文件…" : "")}
         />
-        <div className="st-asset-caption">
-          <strong>{unavailable ? "素材暂不可用" : asset?.name || preview?.title || "正在读取素材…"}</strong>
-          <small>{asset ? `${kindText} · ${fmtBytes(asset.sizeBytes || 0)}` : ""}</small>
-        </div>
-        {/* SERVICES-ASSET-DETAIL-R1 / REPAIR-R1: the REAL product component
-            (shared with the visual-QA fixture). Content V1 remains the primary
-            authority above; this section only adds canonical source truth +
-            "在电脑打开" + explicit 「重试来源」 recovery. */}
-        <div className="st-asset-source-slot"><ServicesSourceSection {...sourceSectionProps} compact /></div>
-        {/* UX-POLISH-R1 4.1: Favorite through the EXISTING Wave A organization
-            authority. Truthfully disabled while this asset's Desktop is not the
-            currently connected one — never a fake optimistic toggle. */}
-        <div className="st-asset-actions">
-          <IconButton icon="share" label="素材更多操作" onClick={() => setSheet("more")} />
-          <IconButton icon="heart" label={asset?.favorite ? "取消收藏" : "收藏素材"}
-            className={asset?.favorite ? "is-active" : ""}
-            disabled={ownerMismatch || unavailable || !asset}
+        <div className="st-asset-actions" role="toolbar" aria-label="素材操作">
+          <AssetAction icon="heart" label={asset?.favorite ? "取消收藏" : "收藏"} active={Boolean(asset?.favorite)}
+            disabled={ownerMismatch || unavailable || !asset || orgSnapshot.busy}
             onClick={() => {
               if (!guardOrganization()) return;
               void org.setFavorite(assetId, !asset?.favorite, revalidate);
             }} />
-          <IconButton icon="info" label="素材信息" onClick={() => setSheet("info")} />
+          <AssetAction icon="info" label="信息" onClick={() => setSheet("info")} />
+          <AssetAction icon="trash" label="删除" onClick={() => toast.info("请在电脑端删除这条素材，手机暂不支持删除电脑素材。")} />
+          <AssetAction icon="more" label="更多" onClick={() => setSheet("more")} />
         </div>
       </div>
       {sheet === "info" ? (
@@ -819,17 +845,8 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
               api.contentOpenResource(owner, assetId).catch(() => setMessage("未找到可打开此文件的应用。"));
             }} />
           ) : null}
-          <Option label="来源、缓存与电脑打开" icon="info" onClick={() => setSheet("info")} />
           {!ownerMismatch && !unavailable && asset ? (
             <>
-              <Option label={asset?.favorite ? "取消收藏" : "收藏"} icon="pin"
-                onClick={() => {
-                  if (!guardOrganization()) { setSheet(""); return; }
-                  // The label and the request both come from the authoritative
-                  // read state; there is no optimistic local favorite mirror.
-                  setSheet("");
-                  void org.setFavorite(assetId, !asset?.favorite, revalidate);
-                }} />
               <Option label="标签" icon="list"
                 onClick={() => { if (!guardOrganization()) { setSheet(""); return; } setSheet("tags"); }} />
               <Option label="移动到文件夹" icon="folder"

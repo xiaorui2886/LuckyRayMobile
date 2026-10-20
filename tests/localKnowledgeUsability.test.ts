@@ -303,9 +303,9 @@ test("usability wiring: the projection carries the favorite hint into rows", () 
   // UX-POLISH-R1 5: the title line starts clean; pin/favorite are quiet accent
   // flags on the RIGHT of the metadata line (no star character next to the title).
   assert.match(SCREEN, /className="st-note-meta"/, "the metadata text keeps its own slot");
-  assert.match(SCREEN, /n\.favorite \? <Icon name="heart" size=\{13\} className="st-flag-fav is-on" \/> : null/,
+  assert.match(SCREEN, /n\.favorite \? <span role="img" aria-label="已收藏"><Icon name="heart" size=\{12\} className="st-flag-fav is-on" \/><\/span> : null/,
     "D: favorite renders as the soft accent heart flag on the metadata line");
-  assert.match(SCREEN, /n\.pinned \? <Icon name="pin" size=\{13\} className="st-flag-pin" \/> : null/,
+  assert.match(SCREEN, /n\.pinned \? <span role="img" aria-label="已置顶"><Icon name="pin" size=\{12\} className="st-flag-pin" \/><\/span> : null/,
     "pinned stays visible on the metadata line");
   assert.doesNotMatch(SCREEN, /★/, "no star character beside the title");
   assert.match(SCREEN, /n\.tags\?\.length \? " · " \+ n\.tags\.join\(" \/ "\) : ""/, "tags stay visible");

@@ -1,3 +1,4 @@
+import { cmCaretVisibility } from './cmCaretVisibility';
 import { NoteActionIcon } from "./NoteActionIcon";
 // CM6-EDITOR-R1 — the Mobile CM6 body editor adapter.
 //
@@ -91,8 +92,8 @@ export type MobileCmEditorProps = {
 export function MobileCmEditor({
   scope, wikiLoader, imageScope, sourceMode = false, assistActive = true, value, onChange, placeholderText = "", ariaLabel = "笔记正文", focusRequest, handleRef, search, searchActive = true, onDismissSearch,
 }: MobileCmEditorProps) {
-  const assistRef = useRef({ wikiLoader, assistActive });
-  assistRef.current = { wikiLoader, assistActive };
+  const assistRef = useRef({ wikiLoader, assistActive, imageScope });
+  assistRef.current = { wikiLoader, assistActive, imageScope };
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   // onChange is read through a ref so the view is created ONCE per scope —
@@ -136,6 +137,7 @@ export function MobileCmEditor({
     if (!host) return;
     const extensions: Extension[] = [
       history(),
+      cmCaretVisibility,
       noteSearchField,
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.lineWrapping,
@@ -196,7 +198,14 @@ export function MobileCmEditor({
       if (retired || viewRef.current !== view) return;
       if (view.composing || view.compositionStarted) { frame = requestAnimationFrame(configure); return; }
       const extensions: Extension[] = [];
-      if (assistActive && wikiLoader) extensions.push(cmWikiCompletion(q => assistRef.current.wikiLoader!(q), () => assistRef.current.assistActive));
+      if (assistActive && wikiLoader) extensions.push(cmWikiCompletion(async (q,embed) => {
+        if(!embed)return assistRef.current.wikiLoader!(q);
+        const query=q.normalize('NFC').toLocaleLowerCase();
+        const seen=new Set<string>();
+        const items=(assistRef.current.imageScope?.resources||[]).filter(r=>r.status==='resolved' && !seen.has(r.target) && (seen.add(r.target),true) && r.target.normalize('NFC').toLocaleLowerCase().includes(query))
+          .map(r=>({id:r.resourceId,title:r.target.split('/').pop()||r.target,target:r.target,detail:r.target}));
+        return {items:items.slice(0,12),partial:items.length>12};
+      }, () => assistRef.current.assistActive));
       view.dispatch({effects:assistFeatures.reconfigure(extensions)});
     };
     configure(); return () => { retired = true; cancelAnimationFrame(frame); };
@@ -209,7 +218,7 @@ export function MobileCmEditor({
     const configure = () => {
       if (retired || viewRef.current !== view) return;
       if (view.composing || view.compositionStarted) { frame = requestAnimationFrame(configure); return; }
-      view.dispatch({effects:imageFeatures.reconfigure(imageScope && !sourceMode ? cmInlineImages(imageScope) : [])});
+      view.dispatch({effects:imageFeatures.reconfigure(imageScope && !sourceMode ? cmInlineImages(imageScope,view.hasFocus) : [])});
     };
     configure(); return () => { retired = true; cancelAnimationFrame(frame); };
   }, [scope, imageKey, sourceMode]);

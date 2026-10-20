@@ -126,6 +126,11 @@ test("still parity — authority copies preserve the staged design blobs", () =>
         .replace('</PageCurrentContext.Provider>', "");
     }
     if (file === "Views.tsx") {
+      // MOBILE-R6: one optional compact toolbar slot, strictly inside the scroll.
+      // Undo precisely these two additions, preserving the accepted baseline hash.
+      assert.equal(pinned.split("toolbarSlot?:ReactNode;").length, 2);
+      assert.equal(pinned.split("{p.toolbarSlot}").length, 2);
+      pinned = pinned.replace("toolbarSlot?:ReactNode;", "").replace("{p.toolbarSlot}", "");
       // UI R3: knowledge-only row layout scope and document symbols; library untouched.
       pinned = pinned.replace('className={"st-view"+(!library?" st-knowledge-view":"")}', 'className="st-view"')
         .replaceAll('<span className="st-knowledge-note-symbol" aria-hidden="true"><Icon name="file" size={20}/></span>', '');
