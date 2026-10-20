@@ -32,8 +32,9 @@ def main():
     allowed = {identity(p) for p in packages if "source" in p}
     source = ROOT / "src-tauri/src/db.rs"
     with tempfile.TemporaryDirectory(prefix="luckyray-database-") as temp:
-        work = Path(temp)
-        (work / "src").mkdir()
+        work = Path(temp) / "crate"
+        (work / "src").mkdir(parents=True)
+        shutil.copytree(ROOT / "shared/companion-content-v1", Path(temp) / "shared/companion-content-v1")
         shutil.copyfile(source, work / "src/lib.rs")
         for module in ("content_db.rs", "content_offline_db.rs"):
             shutil.copyfile(ROOT / "src-tauri/src" / module, work / "src" / module)
