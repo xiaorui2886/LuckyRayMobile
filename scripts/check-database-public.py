@@ -35,6 +35,8 @@ def main():
         work = Path(temp)
         (work / "src").mkdir()
         shutil.copyfile(source, work / "src/lib.rs")
+        for module in ("content_db.rs", "content_offline_db.rs"):
+            shutil.copyfile(ROOT / "src-tauri/src" / module, work / "src" / module)
         (work / "Cargo.lock").write_bytes(original_lock)
         (work / "Cargo.toml").write_text('''[package]
 name = "luckyray-database-check"
