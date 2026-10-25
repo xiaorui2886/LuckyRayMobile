@@ -8,32 +8,54 @@ if (process.env.GITHUB_ACTIONS !== 'true' || process.env.CI_GRAPH_QA_REVIEWED !=
 const adb = (...args) => execFileSync('adb', ['-s', process.env.ANDROID_SERIAL, ...args], {encoding:'utf8',timeout:30000}).trim();
 if (!adb('shell','dumpsys','package','com.luckyray.mobile').includes('DEBUGGABLE')) throw Error('debug package required for synthetic native seeding');
 const delay = ms => new Promise(r => setTimeout(r, ms));
+const startupObservation={pidHistory:[],webviewSocketNames:[]};
+const safeDiagnostic=lines=>lines.slice(-80).map(line=>/token|secret|password|authorization|credential|jwt|cookie/i.test(line)?'[credential-related line redacted]':line.slice(0,1000));
+const componentIdentity=line=>({field:line.match(/mResumedActivity|topResumedActivity|ResumedActivity|mFocusedApp|mCurrentFocus/)?.[0]||'unknown',components:line.match(/[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+/g)||[]});
 function startupFailure(reason) {
  let raw='';
  try { raw=adb('logcat','-b','crash','-d','-t','200'); } catch { /* bounded diagnostic best effort */ }
  const lines=raw.split('\n'),pids=new Set();
  for(const line of lines)if(line.includes('com.luckyray.mobile')){const m=line.match(/^\S+\s+\S+\s+(\d+)\s+\d+\s/);if(m)pids.add(m[1]);}
  const selected=lines.filter(line=>line.includes('com.luckyray.mobile')||[...pids].some(pid=>new RegExp('^\\S+\\s+\\S+\\s+'+pid+'\\s+').test(line))).slice(-60).map(line=>/token|secret|password|authorization|credential|jwt|cookie/i.test(line)?'[credential-related line redacted]':line.slice(0,1000));
- const evidence={reason,package:'com.luckyray.mobile',crashLines:selected,scope:'isolated synthetic AVD crash buffer, package-matched PID only'};
+ let activityLines=[],windowLines=[],nativeLines=[];
+ try{activityLines=adb('shell','dumpsys','activity','activities').split('\n').filter(l=>/mResumedActivity|topResumedActivity|ResumedActivity|mFocusedApp/.test(l)).slice(-12).map(componentIdentity);}catch{/* bounded */}
+ try{windowLines=adb('shell','dumpsys','window','windows').split('\n').filter(l=>/mCurrentFocus|mFocusedApp/.test(l)).slice(-12).map(componentIdentity);}catch{/* bounded */}
+ const lastPid=[...startupObservation.pidHistory].reverse().find(p=>/^\d+$/.test(p.pid))?.pid;
+ if(lastPid)try{nativeLines=safeDiagnostic(adb('logcat','-d','-t','200','--pid='+lastPid).split('\n'));}catch{/* bounded package PID only */}
+ const evidence={reason,package:'com.luckyray.mobile',...startupObservation,activityLines,windowLines,nativeLines,crashLines:selected,scope:'isolated synthetic AVD; package PID native logs and allowlisted Activity/window fields only'};
  writeFileSync(join(out,'app-startup-failure.json'),JSON.stringify(evidence,null,2));
  console.log('GRAPH_QA_APP_STARTUP_FAILURE '+JSON.stringify(evidence));
  try{const png=execFileSync('adb',['-s',process.env.ANDROID_SERIAL,'exec-out','screencap','-p'],{timeout:15000,maxBuffer:4*1024*1024});writeFileSync(join(out,'app-startup-failure.png'),png);if(png.length<225000)console.log('GRAPH_QA_PNG_BEGIN app-startup-failure\n'+png.toString('base64')+'\nGRAPH_QA_PNG_END app-startup-failure');}catch{/* original failure remains */}
  return Error(reason);
 }
 let socket;
-const startupDeadline=Date.now()+60000;
+const startupStarted=Date.now(),startupDeadline=startupStarted+180000;
+let lastStartupProgress=0;
 console.log('GRAPH_QA_PHASE_START_webview_cdp_wait');
 while(Date.now()<startupDeadline) {
  let pid='';
  try { pid=adb('shell','pidof','-s','com.luckyray.mobile'); } catch(error) { if(error.status!==1)throw startupFailure('ADB pid lookup failed before app connection'); }
+ if(!startupObservation.pidHistory.length||startupObservation.pidHistory.at(-1).pid!==pid){
+   if(startupObservation.pidHistory.length<20)startupObservation.pidHistory.push({pid,atMs:Date.now()});
+ }
  if(pid){
-   socket=adb('shell','cat','/proc/net/unix').split('\n').map(l=>l.split(/\s+/).at(-1)).find(s=>s===`@webview_devtools_remote_${pid}`);
+   const names=adb('shell','cat','/proc/net/unix').split('\n').map(l=>l.split(/\s+/).at(-1)).filter(s=>/^@webview_devtools_remote(?:_[A-Za-z0-9_.-]{1,80})?$/.test(s));
+   startupObservation.webviewSocketNames=[...new Set([...startupObservation.webviewSocketNames,...names])].slice(0,20);
+   socket=names.find(s=>s===`@webview_devtools_remote_${pid}`);
    if(socket)break;
+ }
+ if(Date.now()-lastStartupProgress>=15000){
+   lastStartupProgress=Date.now();
+   console.log('GRAPH_QA_NATIVE_STARTUP_PROGRESS '+JSON.stringify({elapsedMs:Date.now()-startupStarted,pid,webviewSocketNames:startupObservation.webviewSocketNames,limitMs:180000,physicalPerformanceClaim:false}));
  }
  await delay(1000);
 }
-if(!socket)throw startupFailure('APP_BOOT_FAILED: debug WebView CDP missing within 60 seconds; no seeding and no browser fallback');
-console.log('GRAPH_QA_PHASE_PASS_webview_cdp_wait');
+startupObservation.elapsedMs=Date.now()-startupStarted;
+startupObservation.limitMs=180000;
+startupObservation.physicalPerformanceClaim=false;
+writeFileSync(join(out,'native-startup-timing.json'),JSON.stringify(startupObservation,null,2));
+if(!socket)throw startupFailure('APP_BOOT_FAILED: debug WebView CDP missing within 180 seconds; no seeding and no browser fallback');
+console.log('GRAPH_QA_PHASE_PASS_webview_cdp_wait elapsedMs='+startupObservation.elapsedMs+' physicalPerformanceClaim=false');
 adb('forward','tcp:9222',`localabstract:${socket.slice(1)}`);
 const targets=await (await fetch('http://127.0.0.1:9222/json')).json();
 const page=targets.find(t=>t.type==='page' && /^(https?:\/\/tauri\.localhost(?:[/:]|$)|tauri:\/\/)/.test(t.url));

@@ -1,12 +1,13 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type { GraphSeed, GraphViewState } from './core/graphTypes';
-import { fitGraphCamera, wheelCamera, type Camera } from './core/graphCamera';
+import { fitGraphCamera, wheelCamera, wheelZoomPoint, type Camera } from './core/graphCamera';
 import { filteredGraph, normalizeGraphView, graphForceParameters, isMissingGraphNode, graphNodeRadiusForLinks } from './core/graphSemantics';
 import { graphSeedPositions, graphScreenRadius } from './core/graphSpatial';
 import { graphLabelDetail, graphLabelFocusAlpha, updateGraphLabels, type GraphLabelState } from './core/graphPresentation';
 import { packGraphPhysicsState, updateGraphPhysicsState, type GraphPhysicsNode, type GraphPhysicsStepRequest, type GraphPhysicsStepResponse } from './core/graphPhysics';
 import { buildGraphPlaybackPlan, graphPlaybackNodeVisual, graphPlaybackEdgeProgress, graphPlaybackEdgeKey, type GraphPlaybackPlan } from './core/graphPlayback';
 import { graphNodeFill, graphEdgePaint, graphArrowTriangle, graphPlaybackCameraTarget } from './core/graphRenderer';
+import {sampleGraphPanVelocity,releaseGraphPanVelocity,stepGraphCameraMotion,type GraphCameraMotion} from './mobileGraphCameraMotion';
 import { graphCameraSignature, graphActivationTransition } from './mobileGraphLifecycle';
 import { pinchCamera, graphPoint, graphPixelRatio, graphTouchMoved, graphDraggedPosition, GRAPH_TOUCH_HOLD_MS, type TouchPoint } from './mobileGraphGestures';
 
@@ -37,19 +38,21 @@ export const MobileGraphCanvas = forwardRef<MobileGraphCanvasHandle,MobileGraphC
   const pointers=new Map<number,TouchPoint>();let gesture:{start:TouchPoint;last:TouchPoint;key:string|null;moved:boolean}|null=null,lastTap:{key:string;time:number}|null=null;
   let holdTimer:ReturnType<typeof setTimeout>|null=null,dragOffset:TouchPoint={x:0,y:0};
   const clearHold=()=>{if(holdTimer!==null){clearTimeout(holdTimer);holdTimer=null;}};
+  let cameraMotion:GraphCameraMotion|null=null,motionAt=0,panSample:{velocity:{panX:number;panY:number};lastAt:number}|null=null;
+  const stopCameraMotion=()=>{cameraMotion=null;motionAt=0;};
   let hits:Array<{key:string;id:number;x:number;y:number;r:number}>=[];
   const wake=()=>{dirty=true;if(!raf&&!disposed&&!document.hidden&&!latest.current.paused)raf=requestAnimationFrame(frame);};
   const persistCamera=()=>{latest.current.onCameraChange?.({...camera});};
-  const notifyCamera=()=>{cameraFollow=false;persistCamera();wake();};
+  const notifyCamera=()=>{stopCameraMotion();cameraFollow=false;persistCamera();wake();};
   const reduced=()=>!!latest.current.reducedMotion||canvas.closest('.st-app')?.getAttribute('data-reduced')==='true'||(typeof matchMedia==='function'&&matchMedia('(prefers-reduced-motion: reduce)').matches);
-  const cancelGesture=()=>{clearHold();const ids=[...pointers.keys()];pointers.clear();gesture=null;lastTap=null;dragId=null;hoverId=null;mutation++;for(const id of ids)try{if(canvas.hasPointerCapture?.(id))canvas.releasePointerCapture(id);}catch{/* Released by WebView already. */}};
+  const cancelGesture=()=>{clearHold();stopCameraMotion();panSample=null;const ids=[...pointers.keys()];pointers.clear();gesture=null;lastTap=null;dragId=null;hoverId=null;mutation++;for(const id of ids)try{if(canvas.hasPointerCapture?.(id))canvas.releasePointerCapture(id);}catch{/* Released by WebView already. */}};
   const selectScene=()=>{const selected=latest.current.seed.nodes.find(n=>n.key===latest.current.selectedKey)?.id??null;scene=filteredGraph(latest.current.seed,settings,{nodeColor:getComputedStyle(canvas).getPropertyValue('--mg-graph-foreground').trim()||'#e7e9ee',scopeKeys:latest.current.scopeKeys,selectedId:selected,hoveredId:hoverId,draggingId:dragId});};
   const fit=()=>{const fitted=fitGraphCamera(scene.renderedNodes.map(n=>byId.get(n.id)).filter((n):n is GraphPhysicsNode=>!!n),width,height);if(fitted){camera=fitted;explicitCamera=true;notifyCamera();}};
   const zoomBy=(factor:number)=>{if(!(factor>0&&Number.isFinite(factor)))return;camera=wheelCamera(camera,camera,{x:width/2,y:height/2},-Math.log(factor)/.0025);explicitCamera=true;notifyCamera();};
   function update(){
    const p=latest.current;settings=normalizeGraphView(p.settings);selectScene();
    if(p.paused){cancelGesture();selectScene();lastFrame=0;if(raf)cancelAnimationFrame(raf);raf=0;}
-   if(graphCameraSignature(p.camera)!==externalCamera&&p.camera){externalCamera=graphCameraSignature(p.camera);const normalized=normalizeGraphView(p.camera);camera={scale:normalized.scale,panX:normalized.panX,panY:normalized.panY};explicitCamera=true;}
+   if(graphCameraSignature(p.camera)!==externalCamera&&p.camera){externalCamera=graphCameraSignature(p.camera);if(graphCameraSignature(p.camera)!==graphCameraSignature(camera))stopCameraMotion();const normalized=normalizeGraphView(p.camera);camera={scale:normalized.scale,panX:normalized.panX,panY:normalized.panY};explicitCamera=true;}
    const activeKey=scene.renderedNodes.map(n=>n.id).join(',');if(activeKey!==oldActive){oldActive=activeKey;alpha=1;mutation++;timeline=null;}
    const forceKey=JSON.stringify(graphForceParameters(settings));
    if(oldSeed!==p.seed){
@@ -63,7 +66,7 @@ export const MobileGraphCanvas = forwardRef<MobileGraphCanvasHandle,MobileGraphC
    if(forceKey!==oldPhysics){oldPhysics=forceKey;alpha=1;mutation++;}
    let radiusChanged=false;for(const n of scene.nodes){const body=byId.get(n.id);if(body&&body.r!==n.r*settings.nodeSize/6){body.r=n.r*settings.nodeSize/6;radiusChanged=true;}}
    if(radiusChanged){revision++;sendTopology=true;alpha=1;}
-   if(p.playback?.playing&&(!playing||!timeline)){timeline=buildGraphPlaybackPlan({nodes:scene.renderedNodes.map(n=>({...n,...byId.get(n.id)!})),edges:scene.renderedEdges.map(e=>({a:e.a.id,b:e.b.id})),startedAt:performance.now()});elapsed=0;finished=false;cameraFollow=!reduced();alpha=1;}
+   if(p.playback?.playing&&(!playing||!timeline)){stopCameraMotion();panSample=null;timeline=buildGraphPlaybackPlan({nodes:scene.renderedNodes.map(n=>({...n,...byId.get(n.id)!})),edges:scene.renderedEdges.map(e=>({a:e.a.id,b:e.b.id})),startedAt:performance.now()});elapsed=0;finished=false;cameraFollow=!reduced();alpha=1;}
    if(playing&&!p.playback?.playing){persistCamera();alpha=1;mutation++;}
    playing=!!p.playback?.playing;
    if(!playing){timeline=null;finished=false;}
@@ -88,8 +91,9 @@ export const MobileGraphCanvas = forwardRef<MobileGraphCanvasHandle,MobileGraphC
   function frame(now:number){
    raf=0;if(disposed||document.hidden||latest.current.paused){lastFrame=0;return;}
    if(timeline&&!finished){elapsed+=lastFrame?Math.min(64,now-lastFrame):0;const progress=Math.min(1,elapsed/timeline.totalDuration);if(now-lastProgress>100||progress===1){lastProgress=now;latest.current.onPlaybackProgress?.(progress);}if(progress===1){finished=true;}dirty=true;}
+   if(cameraMotion){const result=stepGraphCameraMotion(camera,cameraMotion,motionAt?now-motionAt:16,reduced());camera=result.camera;cameraMotion=result.active?result.motion:null;motionAt=result.active?now:0;dirty=true;persistCamera();}
    lastFrame=now;if(timeline&&cameraFollow&&!reduced()){const target=graphPlaybackCameraTarget(timeline,elapsed,scene.renderedNodes.map(n=>byId.get(n.id)!).filter(Boolean),width,height,1,camera);if(target)camera=target;}if(timeline&&finished&&dirty)persistCamera();if(dirty){draw();dirty=false;}requestStep();
-   if(timeline&&!finished)raf=requestAnimationFrame(frame);
+   if((timeline&&!finished)||cameraMotion)if(!raf)raf=requestAnimationFrame(frame);
   }
   function draw(){
    if(!ctx)return;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.globalAlpha=1;
@@ -119,21 +123,22 @@ export const MobileGraphCanvas = forwardRef<MobileGraphCanvasHandle,MobileGraphC
   }
   const point=(event:PointerEvent|WheelEvent):TouchPoint=>{const r=canvas.getBoundingClientRect();return{x:event.clientX-r.left,y:event.clientY-r.top};};
   const hit=(p:TouchPoint)=>{let closest:typeof hits[number]|null=null,best=Infinity;for(const node of hits){const distance=Math.hypot(node.x-p.x,node.y-p.y);if(distance<=node.r&&distance<best){closest=node;best=distance;}}return closest;};
-  function down(e:PointerEvent){if(latest.current.paused||e.button!==0)return;e.preventDefault();const p=point(e);pointers.set(e.pointerId,p);try{canvas.setPointerCapture(e.pointerId);}catch{/* Some older WebViews lack capture. */}
-   if(pointers.size===1){const node=hit(p);gesture={start:p,last:p,key:node?.key??null,moved:false};dragId=null;clearHold();
-    const activateDrag=()=>{const body=node&&byId.get(node.id),pointer=pointers.get(e.pointerId);if(disposed||latest.current.paused||pointers.size!==1||!body||!pointer||!gesture)return;const world=graphPoint(camera,pointer);dragOffset={x:body.x-world.x,y:body.y-world.y};dragId=body.id;mutation++;cameraFollow=false;selectScene();wake();};
+  function down(e:PointerEvent){if(latest.current.paused||e.button!==0)return;e.preventDefault();stopCameraMotion();const p=point(e);pointers.set(e.pointerId,p);try{canvas.setPointerCapture(e.pointerId);}catch{/* Some older WebViews lack capture. */}
+   if(pointers.size===1){panSample=e.pointerType==='touch'?{velocity:{panX:0,panY:0},lastAt:performance.now()}:null;const node=hit(p);gesture={start:p,last:p,key:node?.key??null,moved:false};dragId=null;clearHold();
+    const activateDrag=()=>{const body=node&&byId.get(node.id),pointer=pointers.get(e.pointerId);if(disposed||latest.current.paused||pointers.size!==1||!body||!pointer||!gesture)return;const world=graphPoint(camera,pointer);dragOffset={x:body.x-world.x,y:body.y-world.y};dragId=body.id;panSample=null;mutation++;cameraFollow=false;selectScene();wake();};
     if(e.pointerType==='touch'&&node){holdTimer=setTimeout(()=>{holdTimer=null;if(!gesture||gesture.moved)return;activateDrag();if(dragId!==null){gesture.moved=true;lastTap=null;latest.current.onSelect(node.key);}},GRAPH_TOUCH_HOLD_MS);}else activateDrag();
-    mutation++;hoverId=null;selectScene();}else{clearHold();dragId=null;mutation++;if(gesture)gesture.moved=true;}wake();}
+    mutation++;hoverId=null;selectScene();}else{clearHold();panSample=null;dragId=null;mutation++;if(gesture)gesture.moved=true;}wake();}
   function move(e:PointerEvent){const p=point(e);if(!pointers.has(e.pointerId)){if(e.pointerType==='mouse'){const id=hit(p)?.id??null;if(id!==hoverId){hoverId=id;selectScene();wake();}}return;}
    e.preventDefault();const previous=[...pointers.values()];pointers.set(e.pointerId,p);const current=[...pointers.values()];
    if(current.length>=2){camera=pinchCamera(camera,[previous[0],previous[1]],[current[0],current[1]]);explicitCamera=true;notifyCamera();}
-   else if(gesture){if(graphTouchMoved(gesture.start,p)){gesture.moved=true;clearHold();}if(gesture.moved){if(dragId!==null){const n=byId.get(dragId);if(n){Object.assign(n,graphDraggedPosition(camera,p,dragOffset),{vx:0,vy:0});mutation++;alpha=.4;}}else{camera={...camera,panX:camera.panX+p.x-gesture.last.x,panY:camera.panY+p.y-gesture.last.y};explicitCamera=true;notifyCamera();}}gesture.last=p;}wake();}
+   else if(gesture){if(graphTouchMoved(gesture.start,p)){gesture.moved=true;clearHold();}if(gesture.moved){if(dragId!==null){const n=byId.get(dragId);if(n){Object.assign(n,graphDraggedPosition(camera,p,dragOffset),{vx:0,vy:0});mutation++;alpha=.4;}}else{if(panSample){const now=performance.now();panSample.velocity=sampleGraphPanVelocity(panSample.velocity,p.x-gesture.last.x,p.y-gesture.last.y,now-panSample.lastAt);panSample.lastAt=now;}camera={...camera,panX:camera.panX+p.x-gesture.last.x,panY:camera.panY+p.y-gesture.last.y};explicitCamera=true;notifyCamera();}}gesture.last=p;}wake();}
   function up(e:PointerEvent){if(!pointers.has(e.pointerId))return;clearHold();const cancelled=e.type!=='pointerup';const wasMulti=pointers.size>1;pointers.delete(e.pointerId);
    if(!cancelled&&!wasMulti&&gesture&&!gesture.moved){const key=gesture.key;latest.current.onSelect(key);if(key&&lastTap?.key===key&&performance.now()-lastTap.time<350){latest.current.onOpen(key);lastTap=null;}else lastTap=key?{key,time:performance.now()}:null;}
+   if(!cancelled&&!wasMulti&&!pointers.size&&dragId===null&&gesture?.moved&&panSample){const velocity=releaseGraphPanVelocity(panSample.velocity,e.pointerType,reduced());if(Math.hypot(velocity.panX,velocity.panY)>0){cameraMotion={target:{...camera},velocity,anchor:null};motionAt=0;}}else if(cancelled)stopCameraMotion();panSample=null;
    dragId=null;mutation++;if(pointers.size===1){const p=[...pointers.values()][0];gesture={start:p,last:p,key:null,moved:true};}else gesture=null;selectScene();wake();}
-  function wheel(e:WheelEvent){e.preventDefault();camera=wheelCamera(camera,camera,point(e),e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?height:1));explicitCamera=true;notifyCamera();}
+  function wheel(e:WheelEvent){e.preventDefault();if(latest.current.paused)return;const p=point(e),node=hit(p),body=node?byId.get(node.id):null;const anchor=wheelZoomPoint(camera,p,body);const target=wheelCamera(camera,cameraMotion?.target??camera,anchor,e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?height:1));cameraMotion={target,velocity:{panX:0,panY:0},anchor};motionAt=0;cameraFollow=false;explicitCamera=true;wake();}
   function keydown(e:KeyboardEvent){if(e.key==='+'||e.key==='='){e.preventDefault();zoomBy(1.25);}else if(e.key==='-'){e.preventDefault();zoomBy(.8);}else if(e.key==='0'){e.preventDefault();fit();}else if(e.key==='Enter'&&latest.current.selectedKey){e.preventDefault();latest.current.onOpen(latest.current.selectedKey);}else if(e.key.startsWith('Arrow')){e.preventDefault();camera={...camera,panX:camera.panX+(e.key==='ArrowLeft'?40:e.key==='ArrowRight'?-40:0),panY:camera.panY+(e.key==='ArrowUp'?40:e.key==='ArrowDown'?-40:0)};notifyCamera();}}
-  function resize(){const rect=canvas.getBoundingClientRect();const w=Math.max(1,rect.width),h=Math.max(1,rect.height);if(width>1&&height>1){camera={...camera,panX:camera.panX+(w-width)/2,panY:camera.panY+(h-height)/2};persistCamera();}width=w;height=h;dpr=graphPixelRatio(window.devicePixelRatio,width,height);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);alpha=Math.max(alpha,.15);mutation++;wake();}
+  function resize(){stopCameraMotion();const rect=canvas.getBoundingClientRect();const w=Math.max(1,rect.width),h=Math.max(1,rect.height);if(width>1&&height>1){camera={...camera,panX:camera.panX+(w-width)/2,panY:camera.panY+(h-height)/2};persistCamera();}width=w;height=h;dpr=graphPixelRatio(window.devicePixelRatio,width,height);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);alpha=Math.max(alpha,.15);mutation++;wake();}
   function visibility(){if(document.hidden){if(raf)cancelAnimationFrame(raf);raf=0;lastFrame=0;cancelGesture();selectScene();}else wake();}
   const leave=()=>{if(!pointers.size&&hoverId!==null){hoverId=null;selectScene();wake();}};canvas.addEventListener('pointerleave',leave);
   canvas.addEventListener('pointerdown',down);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerup',up);canvas.addEventListener('pointercancel',up);canvas.addEventListener('lostpointercapture',up);canvas.addEventListener('wheel',wheel,{passive:false});canvas.addEventListener('keydown',keydown);

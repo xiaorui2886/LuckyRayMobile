@@ -8,8 +8,32 @@ mkdir -p "$GRAPH_QA_EVIDENCE"
 apk="$RUNNER_TEMP/graph-qa/app-debug.apk"
 test -f "$apk"
 # Brand-new AVD only; production application ID retained to exercise real JNI bridges.
+python3 scripts/graph-qa/deadline.py 15 adb shell df /data > "$GRAPH_QA_EVIDENCE/data-space-before-install.txt"
+echo GRAPH_QA_DATA_SPACE_BEGIN
+cat "$GRAPH_QA_EVIDENCE/data-space-before-install.txt"
+echo GRAPH_QA_DATA_SPACE_END
 echo GRAPH_QA_PHASE_START_apk_install
-python3 scripts/graph-qa/deadline.py 300 adb install "$apk"
+# Official adb no-streaming mode separates transport and Package Manager install.
+# Fresh AVD first install only: no retry or verification/permission bypass.
+printf '%s\n' 'transport=no-streaming; retries=0' > "$GRAPH_QA_EVIDENCE/apk-install-mode.txt"
+cat "$GRAPH_QA_EVIDENCE/apk-install-mode.txt"
+echo GRAPH_QA_APK_METADATA_BEGIN
+cat "$GRAPH_QA_EVIDENCE/apk-metadata.json"
+echo GRAPH_QA_APK_METADATA_END
+install_status=0
+python3 scripts/graph-qa/deadline.py 300 adb install --no-streaming "$apk" || install_status=$?
+if [[ "$install_status" != 0 ]]; then
+  {
+    echo "install-exit=$install_status"
+    python3 scripts/graph-qa/deadline.py 15 adb shell service check package || true
+    python3 scripts/graph-qa/deadline.py 15 adb shell df /data || true
+    python3 scripts/graph-qa/deadline.py 15 adb shell cat /proc/meminfo | grep -E '^(MemTotal|MemAvailable):' || true
+  } > "$GRAPH_QA_EVIDENCE/install-failure-state.txt" 2>&1
+  echo GRAPH_QA_INSTALL_FAILURE_BEGIN
+  cat "$GRAPH_QA_EVIDENCE/install-failure-state.txt"
+  echo GRAPH_QA_INSTALL_FAILURE_END
+  exit "$install_status"
+fi
 echo GRAPH_QA_PHASE_PASS_apk_install
 # All subsequent adb commands are individually bounded, including diagnostics.
 adb() { python3 scripts/graph-qa/deadline.py 30 "${ANDROID_HOME:?}/platform-tools/adb" "$@"; }

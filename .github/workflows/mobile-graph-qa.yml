@@ -100,7 +100,7 @@ jobs:
       - name: Deterministic graph data Desktop parity and gestures
         run: |
           node scripts/run-ci-lite-local.mjs
-          node --experimental-strip-types --test tests/mobileGraphData.test.ts tests/mobileGraphDesktopParity.test.ts tests/graph-core/*.test.ts tests/graphCanvas/mobileGraphGestures.test.mjs tests/graphCanvas/mobileGraphLifecycle.test.mjs
+          node --experimental-strip-types --test tests/mobileGraphData.test.ts tests/mobileGraphDesktopParity.test.ts tests/graph-core/*.test.ts tests/graphCanvas/mobileGraphGestures.test.mjs tests/graphCanvas/mobileGraphLifecycle.test.mjs tests/graphCanvas/mobileGraphCameraMotion.test.mjs
           pnpm build
       - name: Validate synthetic native command payloads and Markdown
         run: node --test scripts/graph-qa/seed-expressions.test.mjs

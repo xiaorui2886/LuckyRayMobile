@@ -37,7 +37,7 @@ else
   accel=off; export GRAPH_EMULATION_MODE=software-functional-only; boot_limit=900
   echo 'Existing KVM unavailable: software CPU emulation, functional-only evidence (no performance claim).'
 fi
-printf '{"mode":"%s","accelArgument":"%s","bootLimitSeconds":%s,"gpuArgument":"software","memoryMiB":3072,"performanceClaimsAllowed":false}\n' "$GRAPH_EMULATION_MODE" "$accel" "$boot_limit" > "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
+printf '{"mode":"%s","accelArgument":"%s","bootLimitSeconds":%s,"gpuArgument":"software","memoryMiB":3072,"partitionMiB":4096,"performanceClaimsAllowed":false}\n' "$GRAPH_EMULATION_MODE" "$accel" "$boot_limit" > "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
 echo GRAPH_QA_EMULATION_MODE_BEGIN
 cat "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
 echo GRAPH_QA_EMULATION_MODE_END
@@ -66,11 +66,12 @@ for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
     key,sep,value=line.partition('=')
     if sep and key.strip() in allowed:values[key.strip()]=value.strip()
 values['commandLineMemoryMiB']=3072
+values['commandLinePartitionMiB']=4096
 pathlib.Path(sys.argv[2]).write_text(json.dumps(values,indent=2))
 print('GRAPH_QA_AVD_RESOURCES '+json.dumps(values))
 PY_RESOURCES
 echo GRAPH_QA_PHASE_START_emulator_boot
-"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot -wipe-data -gpu software -memory 3072 -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
+"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot -wipe-data -gpu software -memory 3072 -partition-size 4096 -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
 pid=$!
 report_boot_failure() {
   # Only pre-install synthetic emulator startup diagnostics, no app logcat/environment.
