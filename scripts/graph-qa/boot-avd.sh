@@ -4,8 +4,8 @@
 set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == true && "${CI_GRAPH_QA_REVIEWED:-}" == yes ]] || { echo 'Reviewed disposable GitHub CI required' >&2; exit 2; }
 : "${ANDROID_HOME:?}"
-: "${GRAPH_API:?29 or 35}"
-[[ "$GRAPH_API" == 29 || "$GRAPH_API" == 35 ]] || exit 2
+: "${GRAPH_API:?29, 30 or 35}"
+[[ "$GRAPH_API" == 29 || "$GRAPH_API" == 30 || "$GRAPH_API" == 35 ]] || exit 2
 # CPU emulation fallback does not change permissions, OS security or sandbox settings.
 : "${RUNNER_TEMP:?}"
 mkdir -p "$RUNNER_TEMP/graph-qa/evidence"
@@ -34,10 +34,10 @@ if [[ "$(uname -s)" == Darwin ]]; then
 elif [[ -r /dev/kvm && -w /dev/kvm && "$accel_check_status" == 0 ]]; then
   accel=on; export GRAPH_EMULATION_MODE=kvm; boot_limit=900
 else
-  accel=off; export GRAPH_EMULATION_MODE=software-functional-only; boot_limit=600
+  accel=off; export GRAPH_EMULATION_MODE=software-functional-only; boot_limit=900
   echo 'Existing KVM unavailable: software CPU emulation, functional-only evidence (no performance claim).'
 fi
-printf '{"mode":"%s","accelArgument":"%s","bootLimitSeconds":%s,"gpuArgument":"software","performanceClaimsAllowed":false}\n' "$GRAPH_EMULATION_MODE" "$accel" "$boot_limit" > "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
+printf '{"mode":"%s","accelArgument":"%s","bootLimitSeconds":%s,"gpuArgument":"software","memoryMiB":3072,"performanceClaimsAllowed":false}\n' "$GRAPH_EMULATION_MODE" "$accel" "$boot_limit" > "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
 echo GRAPH_QA_EMULATION_MODE_BEGIN
 cat "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
 echo GRAPH_QA_EMULATION_MODE_END
@@ -59,8 +59,18 @@ echo GRAPH_QA_PHASE_PASS_avd_create
 python3 "$(dirname "$0")/deadline.py" 30 "$ANDROID_HOME/emulator/emulator" -list-avds > "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt"
 cat "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt"
 grep -Fxq "$name" "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt" || { echo 'Emulator cannot discover freshly-created isolated AVD; refusing launch' >&2; exit 3; }
+python3 - "$ANDROID_AVD_HOME/$name.avd/config.ini" "$RUNNER_TEMP/graph-qa/evidence/avd-resources.json" <<'PY_RESOURCES'
+import pathlib,json,sys
+allowed={'hw.ramSize','hw.cpu.ncore','disk.dataPartition.size'}; values={}
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    key,sep,value=line.partition('=')
+    if sep and key.strip() in allowed:values[key.strip()]=value.strip()
+values['commandLineMemoryMiB']=3072
+pathlib.Path(sys.argv[2]).write_text(json.dumps(values,indent=2))
+print('GRAPH_QA_AVD_RESOURCES '+json.dumps(values))
+PY_RESOURCES
 echo GRAPH_QA_PHASE_START_emulator_boot
-"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot -wipe-data -gpu software -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
+"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot -wipe-data -gpu software -memory 3072 -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
 pid=$!
 report_boot_failure() {
   # Only pre-install synthetic emulator startup diagnostics, no app logcat/environment.
@@ -74,6 +84,7 @@ report_boot_failure() {
       python3 "$(dirname "$0")/deadline.py" 8 adb -s emulator-5554 shell getprop "$property" 2>/dev/null | tr -d '\r' || true
       printf '\n'
     done
+    python3 "$(dirname "$0")/deadline.py" 8 adb -s emulator-5554 shell cat /proc/meminfo 2>/dev/null | grep -E '^(MemTotal|MemAvailable):' || true
   } > "$diagnostic_file"
   echo GRAPH_QA_BOOT_STATE_BEGIN; cat "$diagnostic_file"; echo GRAPH_QA_BOOT_STATE_END
   python3 - "$RUNNER_TEMP/graph-emulator.log" "$RUNNER_TEMP/graph-qa/evidence/emulator-startup-diagnostic.txt" <<'PY_DIAGNOSTIC'

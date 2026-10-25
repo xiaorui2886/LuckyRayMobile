@@ -19,4 +19,5 @@ cat "$out/preflight.json"
 head -c 8000 "$out/preflight-webview.txt"
 echo GRAPH_QA_PREFLIGHT_END
 
+python3 "$driver_dir/webview-baseline.py" "$out/preflight-webview.txt" "$out/webview-baseline.json"
 echo GRAPH_QA_PHASE_PASS_preflight_identity

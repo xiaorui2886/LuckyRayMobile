@@ -19,7 +19,19 @@ adb shell pm clear com.luckyray.mobile
 activity=$(adb shell cmd package resolve-activity --brief com.luckyray.mobile | tr -d '\r' | tail -1)
 [[ "$activity" == com.luckyray.mobile/* ]] || exit 3
 adb shell svc wifi disable
-adb shell svc data disable
+phone_state=$(adb shell service check phone | tr -d '\r')
+if [[ "$phone_state" == *'not found'* ]]; then
+  echo 'GRAPH_QA_NETWORK no phone service on this image; cellular disable not applicable'
+  printf '%s\n' 'phone-service=absent; cellular-disable=not-applicable' > "$GRAPH_QA_EVIDENCE/network-setup.txt"
+else
+  adb shell svc data disable
+  printf '%s\n' 'phone-service=present; cellular-disable=success' > "$GRAPH_QA_EVIDENCE/network-setup.txt"
+fi
+printf 'wifi_on=' >> "$GRAPH_QA_EVIDENCE/network-setup.txt"
+adb shell settings get global wifi_on >> "$GRAPH_QA_EVIDENCE/network-setup.txt"
+printf 'mobile_data=' >> "$GRAPH_QA_EVIDENCE/network-setup.txt"
+adb shell settings get global mobile_data >> "$GRAPH_QA_EVIDENCE/network-setup.txt"
+cat "$GRAPH_QA_EVIDENCE/network-setup.txt"
 adb shell am start -n "$activity"
 echo GRAPH_QA_PHASE_PASS_app_launch
 adb shell dumpsys webviewupdate > "$GRAPH_QA_EVIDENCE/webview.txt"
