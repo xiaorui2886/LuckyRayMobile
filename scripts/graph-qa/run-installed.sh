@@ -12,6 +12,7 @@ python3 scripts/graph-qa/deadline.py 15 adb shell df /data > "$GRAPH_QA_EVIDENCE
 echo GRAPH_QA_DATA_SPACE_BEGIN
 cat "$GRAPH_QA_EVIDENCE/data-space-before-install.txt"
 echo GRAPH_QA_DATA_SPACE_END
+python3 scripts/graph-qa/preinstall-stability.py before-install
 python3 scripts/graph-qa/install-system-state.py before-install
 echo GRAPH_QA_PHASE_START_apk_install
 # Official adb no-streaming mode separates transport and Package Manager install.

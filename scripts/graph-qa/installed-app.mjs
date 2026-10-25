@@ -92,8 +92,9 @@ ws.addEventListener('message',e=>{const m=JSON.parse(e.data);
  if(m.method==='Runtime.exceptionThrown')captureRuntimeError('uncaught',m.params.exceptionDetails?.exception?.description||m.params.exceptionDetails?.text);
  if(m.method==='Log.entryAdded'&&m.params.entry?.level==='error')captureRuntimeError('log-error',m.params.entry.text);
  if(m.method==='Runtime.consoleAPICalled'&&m.params.type==='error')captureRuntimeError('console-error',m.params.args.map(a=>a.description||a.value||'').join(' '));if(m.method==='Network.requestWillBeSent'){try{const u=new URL(m.params.request.url);if(/^https?:$/.test(u.protocol)&&!['tauri.localhost','ipc.localhost','127.0.0.1'].includes(u.hostname))unexpectedOrigins.add(u.origin);}catch{}}if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(Error(m.error.message)):p.resolve(m.result);}});
-function send(method,params={}) {return new Promise((resolve,reject)=>{const key=++id; const timer=setTimeout(()=>{pending.delete(key);reject(Error(`CDP timeout: ${method}`));},600000);pending.set(key,{resolve,reject,timer});ws.send(JSON.stringify({id:key,method,params}));});}
-async function evaluate(expression) {const r=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error('WebView evaluation failed: '+(r.exceptionDetails.exception?.description||r.exceptionDetails.text));return r.result.value;}
+let controlChannelFailed=false;
+function send(method,params={},timeoutMs=30000) {return new Promise((resolve,reject)=>{const key=++id; const timer=setTimeout(()=>{pending.delete(key);if(method!=='Runtime.evaluate')controlChannelFailed=true;reject(Error(`CDP timeout: ${method}`));},timeoutMs);pending.set(key,{resolve,reject,timer});ws.send(JSON.stringify({id:key,method,params}));});}
+async function evaluate(expression,timeoutMs=30000) {const r=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true},timeoutMs);if(r.exceptionDetails)throw Error('WebView evaluation failed: '+(r.exceptionDetails.exception?.description||r.exceptionDetails.text));return r.result.value;}
 async function check(name, fn) {const started=Date.now();console.log('GRAPH_QA_CHECK_START '+name);await fn();console.log('GRAPH_QA_CHECK_PASS '+name+' elapsedMs='+(Date.now()-started));results.push({name,status:'passed',elapsedMs:Date.now()-started});writeFileSync(join(out,'checks.json'),JSON.stringify({source:process.env.GITHUB_SHA,emulationMode:process.env.GRAPH_EMULATION_MODE,results,limitations:['Not physical Xiaomi hardware','Runtime WebView version recorded separately','Pinch injected via CDP into real WebView, not OS-wide multitouch instrumentation','No multi-vault switching yet','No exact WebView83 claim','No physical ARM64 or MIUI coverage','No full5000-note load or native profiler trace','1001-note stress is separate from100-note functional smoke; see coverage.json']},null,2));}
 async function poll(expr,timeout=30000) {const deadline=Date.now()+timeout;do{if(await evaluate(expr))return;await delay(250);}while(Date.now()<deadline);throw Error('UI condition deadline');}
 async function clickSelector(selector) {
@@ -138,7 +139,7 @@ function nativeScreenshot(name){
 }
 async function assertSystemHealthy(name){
  try{console.log(execFileSync('python3',['scripts/graph-qa/system-ui-gate.py',name],{encoding:'utf8',timeout:50000,stdio:['ignore','pipe','pipe']}).trim());}
- catch(error){try{nativeScreenshot('system-blocked-'+name);}catch{}throw Error('INFRASTRUCTURE_SYSTEM_UI_BLOCKED_OR_UNOBSERVABLE: '+name+'; see system-ui evidence');}
+ catch(error){try{nativeScreenshot('system-blocked-'+name);}catch{}try{console.log(execFileSync('python3',['scripts/graph-qa/app-anr-evidence.py',name],{encoding:'utf8',timeout:45000,maxBuffer:256*1024}).trim());}catch{}throw Error('ANDROID_UI_BLOCKED_OR_UNOBSERVABLE: '+name+'; inspect app versus system ANR evidence; no automatic infrastructure attribution');}
 }
 const identityExpression=`(async()=>{const invoke=window.__TAURI_INTERNALS__.invoke;const items=[];let total=0;for(let page=1;page<=3;page++){const r=await invoke('managed_vault_note_list',{query:{localVaultId:'local',page,limit:100,sort:'name'}});total=r.total;items.push(...r.items.map(n=>({noteId:n.noteId,title:n.title})));if(!r.hasMore)break;}return {total,items};})()`;
 async function settledSession(){let previous='',stable=0,value;for(let n=0;n<24;n++){value=await evaluate(sessionExpression);const next=JSON.stringify(value);stable=next===previous?stable+1:0;previous=next;if(stable>=2)break;await delay(250);}assert.ok(stable>=2&&value?.id&&value?.settings&&value?.camera,'settled persistent graph session required');return value;}
@@ -152,13 +153,13 @@ try {
  await assertSystemHealthy('before-native-ui');
  if(phase==='initial'){
  await check('empty-native-vault-preflight',async()=>{
- const value=await evaluate(initializeExpression());
+ const value=await evaluate(initializeExpression(),600000);
  if(value.state!=='ready')throw Error('synthetic empty migration not ready');
  });
  await check('native-seed-100-notes',async()=>{
  const started=Date.now();
  for(let start=0;start<100;start+=25){
-   const count=await evaluate(seedChunkExpression(100,start,25));
+   const count=await evaluate(seedChunkExpression(100,start,25),600000);
    if(count!==start+25)throw Error('native synthetic chunk count mismatch; no retry');
    console.log('GRAPH_QA_NATIVE_SEED_PROGRESS '+count+'/100 elapsedMs='+(Date.now()-started));
  }
@@ -255,7 +256,7 @@ try {
  await assertSystemHealthy('before-1001-note-stress');
  await check('separate-native-1001-note-stress',async()=>{
    const started=Date.now();
-   for(let start=0;start<900;start+=25){const count=await evaluate(stressChunkExpression(start));assert.equal(count,101+start+25);console.log('GRAPH_QA_STRESS_PROGRESS '+count+'/1001 elapsedMs='+(Date.now()-started));}
+   for(let start=0;start<900;start+=25){const count=await evaluate(stressChunkExpression(start),600000);assert.equal(count,101+start+25);console.log('GRAPH_QA_STRESS_PROGRESS '+count+'/1001 elapsedMs='+(Date.now()-started));}
    await clickText('刷新图谱');
    await poll(`Boolean(document.querySelector('.mg-canvas canvas')) && !document.querySelector('.mg-status') && !document.querySelector('.mg-canvas-warning') && !document.querySelector('.mg-notice[role="alert"]')`,120000);
    assert.equal(await evaluate(`window.__TAURI_INTERNALS__.invoke('managed_vault_note_list',{query:{localVaultId:'local',page:1,limit:1}}).then(r=>r.total)`),1001);
@@ -278,8 +279,9 @@ try {
  if(runtimeErrors.some(e=>e.kind==='uncaught'||/worker|mobileGraph|graphLayout/i.test(e.text)))throw Error('Graph runtime error during native checks');
  console.log('Graph QA phase '+phase+' passed; see coverage.json for exactly executed stages and limitations');
 } catch(error) {
- try { await screenshot('failure-synthetic',true); } catch { /* preserve original failure */ }
- coverage.failure={phase,message:String(error)};saveCoverage();
+ try { nativeScreenshot('failure-'+phase); } catch { /* preserve original failure; no second CDP wait */ }
+ try { console.log(execFileSync('python3',['scripts/graph-qa/app-anr-evidence.py','failure-'+phase],{encoding:'utf8',timeout:45000,maxBuffer:256*1024}).trim()); } catch {}
+ coverage.failure={phase,message:String(error),controlChannelFailed};saveCoverage();
  results.push({name:'failure',status:'failed',message:String(error)});
  writeFileSync(join(out,'checks.json'),JSON.stringify({source:process.env.GITHUB_SHA,emulationMode:process.env.GRAPH_EMULATION_MODE,results},null,2));
  throw error;

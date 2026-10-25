@@ -36,4 +36,5 @@ if [[ "$provider_status" != 0 ]]; then
   echo "Actual WebView provider unavailable or unsupported; app tests NOT_RUN (classification exit $provider_status)."
   exit "$provider_status"
 fi
+GRAPH_QA_EVIDENCE="$out" python3 "$driver_dir/preinstall-stability.py" preflight
 echo GRAPH_QA_PHASE_PASS_preflight_identity
