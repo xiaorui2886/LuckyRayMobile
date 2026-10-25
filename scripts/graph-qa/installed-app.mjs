@@ -1,10 +1,18 @@
 // Runs ONLY against a brand-new disposable emulator/debug APK. No product code hook.
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync,readFileSync,existsSync } from 'node:fs';
+import assert from 'node:assert/strict';
+import {nativeSavePng,nativeRotation,nativeGraphWriteRoundTrip} from './native-functional.mjs';
 import { join } from 'node:path';
-import {initializeExpression,seedChunkExpression} from './seed-expressions.mjs';
+import {initializeExpression,seedChunkExpression,stressChunkExpression} from './seed-expressions.mjs';
 const out = process.env.GRAPH_QA_EVIDENCE;
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.CI_GRAPH_QA_REVIEWED !== 'yes' || process.env.ANDROID_SERIAL !== 'emulator-5554' || !out) throw Error('isolated QA guard');
+const phase=process.env.GRAPH_QA_TEST_PHASE||'initial';
+if(!['initial','resume'].includes(phase))throw Error('unknown isolated test phase');
+const phaseFile=join(out,'functional-reopen-baseline.json');
+if(phase==='resume'&&!existsSync(phaseFile))throw Error('No completed synthetic functional baseline; resume cannot seed');
+const coverage=phase==='resume'?JSON.parse(readFileSync(join(out,'coverage.json'),'utf8')):{base100:'NOT_RUN',nativeSave:'NOT_RUN',nativeRotation:'NOT_RUN',nativeWrite:'NOT_RUN',processDeath:'NOT_RUN',stress1001:'NOT_RUN'};
+const saveCoverage=()=>writeFileSync(join(out,'coverage.json'),JSON.stringify(coverage,null,2));saveCoverage();
 const adb = (...args) => execFileSync('adb', ['-s', process.env.ANDROID_SERIAL, ...args], {encoding:'utf8',timeout:30000}).trim();
 if (!adb('shell','dumpsys','package','com.luckyray.mobile').includes('DEBUGGABLE')) throw Error('debug package required for synthetic native seeding');
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -53,20 +61,32 @@ while(Date.now()<startupDeadline) {
 startupObservation.elapsedMs=Date.now()-startupStarted;
 startupObservation.limitMs=180000;
 startupObservation.physicalPerformanceClaim=false;
-writeFileSync(join(out,'native-startup-timing.json'),JSON.stringify(startupObservation,null,2));
+writeFileSync(join(out,phase+'-native-startup-timing.json'),JSON.stringify(startupObservation,null,2));
 if(!socket)throw startupFailure('APP_BOOT_FAILED: debug WebView CDP missing within 180 seconds; no seeding and no browser fallback');
 console.log('GRAPH_QA_PHASE_PASS_webview_cdp_wait elapsedMs='+startupObservation.elapsedMs+' physicalPerformanceClaim=false');
 adb('forward','tcp:9222',`localabstract:${socket.slice(1)}`);
-const targets=await (await fetch('http://127.0.0.1:9222/json')).json();
-const page=targets.find(t=>t.type==='page' && /^(https?:\/\/tauri\.localhost(?:[/:]|$)|tauri:\/\/)/.test(t.url));
-if(!page) throw startupFailure('APP_BOOT_FAILED: packaged app WebView page missing');
+let page,lastTargetSignature='';
+startupObservation.targetHistory=[];
+while(Date.now()<startupDeadline){
+ let targets=[];
+ try { const response=await fetch('http://127.0.0.1:9222/json',{signal:AbortSignal.timeout(5000)});if(response.ok)targets=await response.json(); } catch { /* same-package socket may still initialize; original total deadline holds */ }
+ const summaries=Array.isArray(targets)?targets.slice(0,12).map(t=>{let url='';try{const u=new URL(t.url);url=u.origin==='null'?u.protocol+u.pathname:u.origin+u.pathname;}catch{url='unavailable';}return {type:String(t.type||'').slice(0,30),url:url.slice(0,300)};}):[];
+ const signature=JSON.stringify(summaries);
+ if(signature!==lastTargetSignature){lastTargetSignature=signature;const sample={elapsedMs:Date.now()-startupStarted,targets:summaries};if(startupObservation.targetHistory.length<20)startupObservation.targetHistory.push(sample);console.log('GRAPH_QA_PACKAGE_WEBVIEW_TARGETS '+JSON.stringify(sample));}
+ page=Array.isArray(targets)?targets.find(t=>t.type==='page' && /^(https?:\/\/tauri\.localhost(?:[/:]|$)|tauri:\/\/)/.test(t.url)):undefined;
+ if(page)break;
+ await delay(500);
+}
+startupObservation.elapsedMs=Date.now()-startupStarted;
+writeFileSync(join(out,phase+'-native-startup-timing.json'),JSON.stringify(startupObservation,null,2));
+if(!page) throw startupFailure('APP_BOOT_FAILED: packaged app WebView page missing within original 180-second startup window');
 const ws=new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((r,j)=>{ws.addEventListener('open',r,{once:true});ws.addEventListener('error',j,{once:true});});
-let id=0; const pending=new Map(); const results=[]; const unexpectedOrigins=new Set(); const runtimeErrors=[];
+let id=0; const pending=new Map(); const results=phase==='resume'?JSON.parse(readFileSync(join(out,'checks.json'),'utf8')).results:[]; const unexpectedOrigins=new Set(); const runtimeErrors=[];
 function captureRuntimeError(kind, raw) {
  const text=String(raw || '').slice(0,1200).replace(/(?:token|secret|password|authorization|credential|jwt|cookie)\s*[:=]\s*[^\s,;]+/gi,'[redacted]');
  if(runtimeErrors.length<30)runtimeErrors.push({kind,text});
- writeFileSync(join(out,'webview-runtime-errors.json'),JSON.stringify(runtimeErrors,null,2));
+ writeFileSync(join(out,phase+'-webview-runtime-errors.json'),JSON.stringify(runtimeErrors,null,2));
 }
 ws.addEventListener('message',e=>{const m=JSON.parse(e.data);
  if(m.method==='Runtime.exceptionThrown')captureRuntimeError('uncaught',m.params.exceptionDetails?.exception?.description||m.params.exceptionDetails?.text);
@@ -74,7 +94,7 @@ ws.addEventListener('message',e=>{const m=JSON.parse(e.data);
  if(m.method==='Runtime.consoleAPICalled'&&m.params.type==='error')captureRuntimeError('console-error',m.params.args.map(a=>a.description||a.value||'').join(' '));if(m.method==='Network.requestWillBeSent'){try{const u=new URL(m.params.request.url);if(/^https?:$/.test(u.protocol)&&!['tauri.localhost','ipc.localhost','127.0.0.1'].includes(u.hostname))unexpectedOrigins.add(u.origin);}catch{}}if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(Error(m.error.message)):p.resolve(m.result);}});
 function send(method,params={}) {return new Promise((resolve,reject)=>{const key=++id; const timer=setTimeout(()=>{pending.delete(key);reject(Error(`CDP timeout: ${method}`));},600000);pending.set(key,{resolve,reject,timer});ws.send(JSON.stringify({id:key,method,params}));});}
 async function evaluate(expression) {const r=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error('WebView evaluation failed: '+(r.exceptionDetails.exception?.description||r.exceptionDetails.text));return r.result.value;}
-async function check(name, fn) {const started=Date.now();console.log('GRAPH_QA_CHECK_START '+name);await fn();console.log('GRAPH_QA_CHECK_PASS '+name+' elapsedMs='+(Date.now()-started));results.push({name,status:'passed',elapsedMs:Date.now()-started});writeFileSync(join(out,'checks.json'),JSON.stringify({source:process.env.GITHUB_SHA,emulationMode:process.env.GRAPH_EMULATION_MODE,results,limitations:['Not physical Xiaomi hardware','Runtime WebView version recorded separately','Pinch injected via CDP into real WebView, not OS-wide multitouch instrumentation','No multi-vault switching yet','No OS process-death persistence test; reload and tab reentry only','No exact WebView83 claim','No physical ARM64 or MIUI coverage','No full5000-note load or native profiler trace']},null,2));}
+async function check(name, fn) {const started=Date.now();console.log('GRAPH_QA_CHECK_START '+name);await fn();console.log('GRAPH_QA_CHECK_PASS '+name+' elapsedMs='+(Date.now()-started));results.push({name,status:'passed',elapsedMs:Date.now()-started});writeFileSync(join(out,'checks.json'),JSON.stringify({source:process.env.GITHUB_SHA,emulationMode:process.env.GRAPH_EMULATION_MODE,results,limitations:['Not physical Xiaomi hardware','Runtime WebView version recorded separately','Pinch injected via CDP into real WebView, not OS-wide multitouch instrumentation','No multi-vault switching yet','No exact WebView83 claim','No physical ARM64 or MIUI coverage','No full5000-note load or native profiler trace','1001-note stress is separate from100-note functional smoke; see coverage.json']},null,2));}
 async function poll(expr,timeout=30000) {const deadline=Date.now()+timeout;do{if(await evaluate(expr))return;await delay(250);}while(Date.now()<deadline);throw Error('UI condition deadline');}
 async function clickSelector(selector) {
  const rect=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
@@ -94,6 +114,34 @@ async function clickText(text) {
 }
 const sessionExpression = `(()=>{const id=document.querySelector('[aria-label="图谱知识库"]')?.value;const s=JSON.parse(localStorage.getItem('luckyray.mobile.graph.v1:'+id)||'null');return s?.tabs.find(t=>t.id===s.activeId);})()`;
 async function screenshot(name,logProof=false) {const metrics=await send('Page.getLayoutMetrics'); const s=metrics.cssVisualViewport||metrics.visualViewport;const shot=await send('Page.captureScreenshot',{format:'png',clip:{x:0,y:0,width:s.clientWidth,height:s.clientHeight,scale:1}});writeFileSync(join(out,`${name}.png`),Buffer.from(shot.data,'base64'));if(logProof){const proof=shot.data.length<=300000?shot:await send('Page.captureScreenshot',{format:'png',clip:{x:0,y:0,width:s.clientWidth,height:s.clientHeight,scale:0.5}});if(proof.data.length<=300000)console.log(`GRAPH_QA_PNG_BEGIN ${name}\n${proof.data}\nGRAPH_QA_PNG_END ${name}`);}}
+async function adbTapKnowledge(){
+ await assertSystemHealthy('before-adb-navigation');
+ adb('shell','uiautomator','dump','--compressed','/data/local/tmp/graph-qa-window.xml');
+ const xml=adb('exec-out','cat','/data/local/tmp/graph-qa-window.xml');
+ const bounds=JSON.parse(execFileSync('python3',['-c',`import sys,json,xml.etree.ElementTree as E,re
+r=E.fromstring(sys.stdin.read());n=next((n for n in r.iter('node') if n.get('class')=='android.webkit.WebView' and n.get('package')=='com.luckyray.mobile'),None)
+if n is None:raise SystemExit('No package WebView UI bounds')
+v=list(map(int,re.findall(r'\\d+',n.get('bounds',''))));assert len(v)==4;print(json.dumps(v))`],{input:xml,encoding:'utf8',timeout:5000}));
+ const point=await evaluate(`(()=>{const e=document.querySelector('nav[aria-label="主要导航"] button[aria-label="知识"]');const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,w:innerWidth,h:innerHeight};})()`);
+ const x=Math.round(bounds[0]+point.x*(bounds[2]-bounds[0])/point.w),y=Math.round(bounds[1]+point.y*(bounds[3]-bounds[1])/point.h);
+ assert.ok(x>bounds[0]&&x<bounds[2]&&y>bounds[1]&&y<bounds[3]);
+ adb('shell','input','tap',String(x),String(y));
+ await poll(`document.querySelector('nav[aria-label="主要导航"] button[aria-label="知识"]')?.getAttribute('aria-current')==='page'`,15000);
+ recordNative('adb-real-navigation',{action:'Android input tap',bounds,derivedScreenPoint:{x,y},confirmed:'knowledge nav aria-current page'});
+}
+function recordNative(name,value){if(!/^[a-z0-9-]+$/.test(name))throw Error('invalid evidence name');writeFileSync(join(out,name+'.json'),JSON.stringify(value,null,2));}
+function nativeScreenshot(name){
+ const png=execFileSync('adb',['-s','emulator-5554','exec-out','screencap','-p'],{timeout:15000,maxBuffer:8*1024*1024});
+ assert.equal(png.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
+ writeFileSync(join(out,'android-fullscreen-'+name+'.png'),png);
+ if(png.length<225000)console.log('GRAPH_QA_PNG_BEGIN android-'+name+'\n'+png.toString('base64')+'\nGRAPH_QA_PNG_END android-'+name);
+}
+async function assertSystemHealthy(name){
+ try{console.log(execFileSync('python3',['scripts/graph-qa/system-ui-gate.py',name],{encoding:'utf8',timeout:50000,stdio:['ignore','pipe','pipe']}).trim());}
+ catch(error){try{nativeScreenshot('system-blocked-'+name);}catch{}throw Error('INFRASTRUCTURE_SYSTEM_UI_BLOCKED_OR_UNOBSERVABLE: '+name+'; see system-ui evidence');}
+}
+const identityExpression=`(async()=>{const invoke=window.__TAURI_INTERNALS__.invoke;const items=[];let total=0;for(let page=1;page<=3;page++){const r=await invoke('managed_vault_note_list',{query:{localVaultId:'local',page,limit:100,sort:'name'}});total=r.total;items.push(...r.items.map(n=>({noteId:n.noteId,title:n.title})));if(!r.hasMore)break;}return {total,items};})()`;
+async function settledSession(){let previous='',stable=0,value;for(let n=0;n<24;n++){value=await evaluate(sessionExpression);const next=JSON.stringify(value);stable=next===previous?stable+1:0;previous=next;if(stable>=2)break;await delay(250);}assert.ok(stable>=2&&value?.id&&value?.settings&&value?.camera,'settled persistent graph session required');return value;}
 try {
  await send('Runtime.enable');await send('Network.enable');await send('Log.enable');
  await check('native-app-shell-ready-before-seed',async()=>{
@@ -101,20 +149,22 @@ try {
    catch { throw Error('APP_BOOT_FAILED: native shell/visible Knowledge navigation not ready within 30s; no synthetic notes seeded'); }
    if(runtimeErrors.some(e=>e.kind==='uncaught'))throw Error('APP_BOOT_FAILED: uncaught runtime exception before seed');
  });
+ await assertSystemHealthy('before-native-ui');
+ if(phase==='initial'){
  await check('empty-native-vault-preflight',async()=>{
  const value=await evaluate(initializeExpression());
  if(value.state!=='ready')throw Error('synthetic empty migration not ready');
  });
- await check('native-seed-1000-notes',async()=>{
+ await check('native-seed-100-notes',async()=>{
  const started=Date.now();
- for(let start=0;start<1000;start+=25){
-   const count=await evaluate(seedChunkExpression(1000,start,25));
+ for(let start=0;start<100;start+=25){
+   const count=await evaluate(seedChunkExpression(100,start,25));
    if(count!==start+25)throw Error('native synthetic chunk count mismatch; no retry');
-   console.log('GRAPH_QA_NATIVE_SEED_PROGRESS '+count+'/1000 elapsedMs='+(Date.now()-started));
+   console.log('GRAPH_QA_NATIVE_SEED_PROGRESS '+count+'/100 elapsedMs='+(Date.now()-started));
  }
- writeFileSync(join(out,'native-seed-setup.json'),JSON.stringify({count:1000,chunkSize:25,elapsedMs:Date.now()-started,retries:0}));
+ writeFileSync(join(out,'native-seed-setup.json'),JSON.stringify({count:100,chunkSize:25,elapsedMs:Date.now()-started,retries:0}));
  });
- await check('open-graph-real-ui',async()=>{await clickText('知识');await delay(300);await clickText('图谱');await poll(`Boolean(document.querySelector('.mg-canvas canvas')) && !document.querySelector('.mg-status') && !document.querySelector('.mg-notice[role="alert"]') && !document.querySelector('.mg-canvas-warning')`,120000);});
+ await check('open-graph-real-ui',async()=>{await adbTapKnowledge();await delay(300);await clickText('图谱');await poll(`Boolean(document.querySelector('.mg-canvas canvas')) && !document.querySelector('.mg-status') && !document.querySelector('.mg-notice[role="alert"]') && !document.querySelector('.mg-canvas-warning')`,120000);});
  await delay(800);
  await check('native-worker-no-fallback-warning',async()=>{
    if(await evaluate(`Boolean(document.querySelector('.mg-canvas-warning'))`))throw Error('Native graph worker fallback warning visible');
@@ -171,9 +221,65 @@ try {
    await clickSelector('.mg-node-list button');await clickText('打开笔记');
    await poll(`document.body.textContent.includes('Synthetic graph fixture only.')`,30000);
  });
- console.log('Graph QA installed-app subset passed; see explicit limitations in checks.json');
+ await assertSystemHealthy('before-native-functional');
+ coverage.base100='PASS';saveCoverage();
+ // Dismiss only a positively observed IME, then real Android Back leaves note.
+ const ime=adb('shell','dumpsys','input_method');
+ if(/mInputShown=true|isInputViewShown=true/.test(ime)){adb('shell','input','keyevent','4');await delay(300);}
+ adb('shell','input','keyevent','4');
+ await poll(`Boolean(document.querySelector('.mg-canvas canvas')) && !document.querySelector('.mg-status') && !document.querySelector('.mg-canvas-warning')`,30000);
+ const ctx={adb,evaluate,poll,clickText,clickSelector,send,delay,screenshot,sessionExpression,record:recordNative,assertSystemHealthy,syntheticFixtureVerified:true};
+ await check('native-rotation-100-note-functional',()=>nativeRotation(ctx));coverage.nativeRotation='PASS';saveCoverage();
+ await check('native-save-real-png-to-mediastore',()=>nativeSavePng(ctx));coverage.nativeSave='PASS';saveCoverage();
+ await check('native-graph-ui-write-roundtrip',()=>nativeGraphWriteRoundTrip(ctx));coverage.nativeWrite='PASS';saveCoverage();
+ const session=await settledSession();const notes=await evaluate(identityExpression);
+ assert.equal(notes.total,101);assert.equal(notes.items.length,101);
+ await assertSystemHealthy('before-process-death');
+ writeFileSync(phaseFile,JSON.stringify({source:process.env.GITHUB_SHA,session,notes,phaseComplete:true},null,2));
+ console.log('GRAPH_QA_FUNCTIONAL_COMPLETE 100 base notes plus1 real UI-created note; process death and1001 stress still pending');
+ } else {
+ const expected=JSON.parse(readFileSync(phaseFile,'utf8'));
+ assert.equal(expected.source,process.env.GITHUB_SHA);assert.equal(expected.phaseComplete,true);
+ await assertSystemHealthy('after-process-relaunch');
+ await check('process-death-reopen-native-persistence',async()=>{
+   const stored=await evaluate(`(()=>{const s=JSON.parse(localStorage.getItem('luckyray.mobile.graph.v1:local')||'null');return s?.tabs.find(t=>t.id===s.activeId);})()`);
+   assert.deepEqual(stored.settings,expected.session.settings);assert.deepEqual(stored.camera,expected.session.camera);assert.equal(stored.id,expected.session.id);
+   assert.deepEqual(await evaluate(identityExpression),expected.notes,'identities persist before UI can write session');
+   await clickText('知识');await clickText('图谱');
+   await poll(`Boolean(document.querySelector('.mg-canvas canvas')) && !document.querySelector('.mg-status') && !document.querySelector('.mg-canvas-warning')`,120000);
+   const session=await settledSession();
+   assert.deepEqual(session.settings,expected.session.settings);assert.deepEqual(session.camera,expected.session.camera);assert.equal(session.id,expected.session.id);
+   assert.deepEqual(await evaluate(identityExpression),expected.notes,'native note identities persist; no seed/migrate/clear');
+   await screenshot('native-process-reopened',true);
+ });await assertSystemHealthy('after-process-reopen');coverage.processDeath='PASS';saveCoverage();
+ await assertSystemHealthy('before-1001-note-stress');
+ await check('separate-native-1001-note-stress',async()=>{
+   const started=Date.now();
+   for(let start=0;start<900;start+=25){const count=await evaluate(stressChunkExpression(start));assert.equal(count,101+start+25);console.log('GRAPH_QA_STRESS_PROGRESS '+count+'/1001 elapsedMs='+(Date.now()-started));}
+   await clickText('刷新图谱');
+   await poll(`Boolean(document.querySelector('.mg-canvas canvas')) && !document.querySelector('.mg-status') && !document.querySelector('.mg-canvas-warning') && !document.querySelector('.mg-notice[role="alert"]')`,120000);
+   assert.equal(await evaluate(`window.__TAURI_INTERNALS__.invoke('managed_vault_note_list',{query:{localVaultId:'local',page:1,limit:1}}).then(r=>r.total)`),1001);
+   // Require a new stress node from the refreshed actual graph projection, not the old101-node canvas.
+   await clickText('更多图谱操作');await clickText('查找图谱节点');await clickSelector('[aria-label="查找节点名称"]');
+   await send('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});
+   await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Backspace',code:'Backspace',windowsVirtualKeyCode:8});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Backspace',code:'Backspace',windowsVirtualKeyCode:8});
+   await send('Input.insertText',{text:'Synthetic-Stress-0899'});
+   await poll(`(()=>{const b=document.querySelectorAll('.mg-node-list button');return b.length===1 && b[0].textContent.startsWith('Synthetic-Stress-0899');})()`,120000);
+   await clickSelector('.mg-node-list button');
+   await poll(`document.querySelector('.mg-selection-head strong')?.textContent==='Synthetic-Stress-0899' && !document.querySelector('[role="dialog"]')`,30000);
+   await assertSystemHealthy('after-1001-graph-projection');
+   recordNative('stress-1001',{count:1001,additionalNativeCreates:900,elapsedMs:Date.now()-started,physicalPerformanceClaim:false});
+   await screenshot('native-stress-1001',true);
+ });await assertSystemHealthy('after-stress');coverage.stress1001='PASS';saveCoverage();
+ }
+ await assertSystemHealthy('completed-'+phase);
+ nativeScreenshot('completed-'+phase);
+ if(unexpectedOrigins.size)throw Error('Unexpected external WebView request during native checks');
+ if(runtimeErrors.some(e=>e.kind==='uncaught'||/worker|mobileGraph|graphLayout/i.test(e.text)))throw Error('Graph runtime error during native checks');
+ console.log('Graph QA phase '+phase+' passed; see coverage.json for exactly executed stages and limitations');
 } catch(error) {
  try { await screenshot('failure-synthetic',true); } catch { /* preserve original failure */ }
+ coverage.failure={phase,message:String(error)};saveCoverage();
  results.push({name:'failure',status:'failed',message:String(error)});
  writeFileSync(join(out,'checks.json'),JSON.stringify({source:process.env.GITHUB_SHA,emulationMode:process.env.GRAPH_EMULATION_MODE,results},null,2));
  throw error;

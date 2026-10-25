@@ -38,3 +38,24 @@ export function seedChunkExpression(count, start, size = 25) {
   if (!Number.isInteger(count) || count < 20 || count > 5000 || !Number.isInteger(start) || start < 0 || start >= count || !Number.isInteger(size) || size < 1 || size > 50) throw Error('invalid synthetic chunk bounds');
   return `(${seedSyntheticNotes.toString()})(${count},${start},${Math.min(count,start+size)})`;
 }
+
+async function appendSyntheticStressChunk(start, size) {
+  const invoke=window.__TAURI_INTERNALS__.invoke;
+  const list=await invoke('managed_vault_list');
+  if(!list.items.some(v=>v.localVaultId==='local'&&!v.binding&&v.migrationState==='ready'))throw Error('unbound synthetic local vault required');
+  const query={localVaultId:'local',page:1,limit:1};
+  const before=await invoke('managed_vault_note_list',{query});
+  if(before.total!==101+start)throw Error('stress chunk boundary mismatch; no retry');
+  const end=Math.min(900,start+size);
+  for(let i=start;i<end;i++){
+    const title='Synthetic-Stress-'+String(i).padStart(4,'0');
+    const target=i===899?'Synthetic-0000':'Synthetic-Stress-'+String(i+1).padStart(4,'0');
+    await invoke('managed_vault_note_create',{localVaultId:'local',title,content:['# '+title,'','[['+target+']]','Synthetic graph fixture only.'].join(String.fromCharCode(10)),tags:['synthetic','stress'],folder:''});
+  }
+  if(end===900)window.dispatchEvent(new Event('luckyray:managed-vault-change'));
+  return (await invoke('managed_vault_note_list',{query})).total;
+}
+export function stressChunkExpression(start,size=25){
+  if(!Number.isInteger(start)||start<0||start>=900||!Number.isInteger(size)||size<1||size>50)throw Error('invalid stress chunk bounds');
+  return `(${appendSyntheticStressChunk.toString()})(${start},${size})`;
+}

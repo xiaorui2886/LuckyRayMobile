@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';
-import {initializeExpression,seedExpression,seedChunkExpression} from './seed-expressions.mjs';
+import {initializeExpression,seedExpression,seedChunkExpression,stressChunkExpression} from './seed-expressions.mjs';
 function runtime(overrides={}) {
  const notes=[],calls=[],events=[];
  const ready={items:[{localVaultId:'local',binding:null,migrationState:'ready'}],selectedVaultId:'local'};
@@ -38,4 +38,12 @@ test('40 chunks create the same 1000 native Markdown notes without duplicates; r
 test('invalid chunk or out-of-sequence chunk never writes',async()=>{
  for(const args of [[1000,-1,25],[1000,1000,25],[1000,0,51],[1000,0,0],[1000,1.5,25]])assert.throws(()=>seedChunkExpression(...args));
  const r=runtime();await assert.rejects(vm.runInContext(seedChunkExpression(1000,25,25),r.context),/chunk boundary/);assert.equal(r.notes.length,0);
+});
+
+test('small100 fixture plus one UI-created note extends to1001 via separate bounded stress',async()=>{
+ const r=runtime();await vm.runInContext(seedExpression(100),r.context);
+ r.notes.push({title:'Synthetic-QA-Graph-Created'}); // Represents UI write; stress never creates this note.
+ for(let n=0;n<900;n+=25)assert.equal(await vm.runInContext(stressChunkExpression(n),r.context),101+n+25);
+ assert.equal(r.notes.length,1001);assert.equal(r.notes[101].title,'Synthetic-Stress-0000');assert.match(r.notes.at(-1).content,/\[\[Synthetic-0000\]\]/);
+ await assert.rejects(vm.runInContext(stressChunkExpression(875),r.context),/boundary/);assert.equal(r.notes.length,1001);
 });

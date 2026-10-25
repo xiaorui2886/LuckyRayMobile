@@ -61,10 +61,16 @@ cat "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt"
 grep -Fxq "$name" "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt" || { echo 'Emulator cannot discover freshly-created isolated AVD; refusing launch' >&2; exit 3; }
 python3 - "$ANDROID_AVD_HOME/$name.avd/config.ini" "$RUNNER_TEMP/graph-qa/evidence/avd-resources.json" <<'PY_RESOURCES'
 import pathlib,json,sys
-allowed={'hw.ramSize','hw.cpu.ncore','disk.dataPartition.size'}; values={}
+allowed={'hw.ramSize','hw.cpu.ncore','disk.dataPartition.size','hw.lcd.width','hw.lcd.height','hw.lcd.density'}; values={}
 for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
     key,sep,value=line.partition('=')
     if sep and key.strip() in allowed:values[key.strip()]=value.strip()
+original={key:values.get(key) for key in ['hw.cpu.ncore','hw.lcd.width','hw.lcd.height','hw.lcd.density']}
+profile={'hw.cpu.ncore':'4','hw.lcd.width':'720','hw.lcd.height':'1280','hw.lcd.density':'320'}
+config=pathlib.Path(sys.argv[1]);lines=config.read_text().splitlines();keys=set(profile)
+lines=[line for line in lines if line.partition('=')[0].strip() not in keys]
+lines.extend(key+'='+value for key,value in profile.items());config.write_text('\n'.join(lines)+'\n')
+values['originalDisplayCpu']=original;values['functionalDisplayCpu']=profile;values['expectedCssWidth']=360
 values['commandLineMemoryMiB']=3072
 values['commandLinePartitionMiB']=4096
 pathlib.Path(sys.argv[2]).write_text(json.dumps(values,indent=2))
@@ -120,6 +126,14 @@ while (( SECONDS - start < boot_limit )); do
 done
 [[ "$booted" == yes ]] || { echo "$GRAPH_EMULATION_MODE boot deadline exceeded (${boot_limit}s); infrastructure blocked" >&2; report_boot_failure; exit 3; }
 echo GRAPH_QA_PHASE_PASS_emulator_boot
+{
+  python3 "$(dirname "$0")/deadline.py" 15 adb shell wm size
+  python3 "$(dirname "$0")/deadline.py" 15 adb shell wm density
+  python3 "$(dirname "$0")/deadline.py" 15 adb shell cat /sys/devices/system/cpu/present
+} > "$RUNNER_TEMP/graph-qa/evidence/actual-display-cpu.txt"
+echo GRAPH_QA_ACTUAL_DISPLAY_CPU_BEGIN
+cat "$RUNNER_TEMP/graph-qa/evidence/actual-display-cpu.txt"
+echo GRAPH_QA_ACTUAL_DISPLAY_CPU_END
 # Caller supplies a reviewed in-repository driver; no remote command strings.
 : "${GRAPH_TEST_DRIVER:?Path to reviewed executable local driver}"
 [[ -f "$GRAPH_TEST_DRIVER" && -x "$GRAPH_TEST_DRIVER" ]] || exit 2

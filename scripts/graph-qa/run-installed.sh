@@ -12,6 +12,7 @@ python3 scripts/graph-qa/deadline.py 15 adb shell df /data > "$GRAPH_QA_EVIDENCE
 echo GRAPH_QA_DATA_SPACE_BEGIN
 cat "$GRAPH_QA_EVIDENCE/data-space-before-install.txt"
 echo GRAPH_QA_DATA_SPACE_END
+python3 scripts/graph-qa/install-system-state.py before-install
 echo GRAPH_QA_PHASE_START_apk_install
 # Official adb no-streaming mode separates transport and Package Manager install.
 # Fresh AVD first install only: no retry or verification/permission bypass.
@@ -23,6 +24,7 @@ echo GRAPH_QA_APK_METADATA_END
 install_status=0
 python3 scripts/graph-qa/deadline.py 300 adb install --no-streaming "$apk" || install_status=$?
 if [[ "$install_status" != 0 ]]; then
+  python3 scripts/graph-qa/install-system-state.py install-failure || true
   {
     echo "install-exit=$install_status"
     python3 scripts/graph-qa/deadline.py 15 adb shell service check package || true
@@ -34,6 +36,7 @@ if [[ "$install_status" != 0 ]]; then
   echo GRAPH_QA_INSTALL_FAILURE_END
   exit "$install_status"
 fi
+python3 scripts/graph-qa/install-system-state.py after-install
 echo GRAPH_QA_PHASE_PASS_apk_install
 # All subsequent adb commands are individually bounded, including diagnostics.
 adb() { python3 scripts/graph-qa/deadline.py 30 "${ANDROID_HOME:?}/platform-tools/adb" "$@"; }
@@ -68,7 +71,33 @@ cat "$GRAPH_QA_EVIDENCE/webview.txt"
 echo GRAPH_QA_RUNTIME_END
 cp "$RUNNER_TEMP/graph-qa/apk.sha256" "$GRAPH_QA_EVIDENCE/apk-sha256.txt"
 echo GRAPH_QA_PHASE_START_webview_checks
-node scripts/graph-qa/installed-app.mjs
+GRAPH_QA_TEST_PHASE=initial node scripts/graph-qa/installed-app.mjs
+# New process and CDP connection: verify existing notes/session, never reseed or clear.
+test -s "$GRAPH_QA_EVIDENCE/functional-reopen-baseline.json"
+echo GRAPH_QA_PHASE_START_native_process_death
+old_pid=$(adb shell pidof -s com.luckyray.mobile | tr -d '\r')
+[[ "$old_pid" =~ ^[0-9]+$ ]] || { echo 'Process death needs an observed running app PID' >&2; exit 3; }
+adb shell am force-stop com.luckyray.mobile
+gone_status=0
+remaining_pid=$(adb shell pidof -s com.luckyray.mobile 2>/dev/null) || gone_status=$?
+[[ "$gone_status" == 1 && -z "$remaining_pid" ]] || { echo 'Force-stop did not prove original process absent' >&2; exit 3; }
+adb shell am start -n "$activity"
+new_pid='';restart_started=$SECONDS
+while (( SECONDS-restart_started < 60 )); do
+  query_status=0
+  new_pid=$(adb shell pidof -s com.luckyray.mobile 2>/dev/null | tr -d '\r') || query_status=$?
+  [[ "$query_status" == 0 || "$query_status" == 1 ]] || exit 3
+  [[ "$new_pid" =~ ^[0-9]+$ ]] && break
+  sleep 1
+done
+[[ "$new_pid" =~ ^[0-9]+$ && "$new_pid" != "$old_pid" ]] || { echo 'A distinct relaunched app PID was not established' >&2; exit 3; }
+python3 - "$old_pid" "$new_pid" "$GRAPH_QA_EVIDENCE/process-death-pids.json" <<'PY_PIDS'
+import json,pathlib,sys
+result={'oldPid':sys.argv[1],'absentAfterForceStop':True,'newPid':sys.argv[2],'reseed':False,'pmClearAfterStop':False}
+pathlib.Path(sys.argv[3]).write_text(json.dumps(result,indent=2));print('GRAPH_QA_PROCESS_DEATH '+json.dumps(result))
+PY_PIDS
+GRAPH_QA_TEST_PHASE=resume node scripts/graph-qa/installed-app.mjs
+echo GRAPH_QA_PHASE_PASS_native_process_death
 echo GRAPH_QA_PHASE_PASS_webview_checks
 adb shell dumpsys gfxinfo com.luckyray.mobile framestats > "$GRAPH_QA_EVIDENCE/frames.txt"
 adb shell dumpsys meminfo com.luckyray.mobile > "$GRAPH_QA_EVIDENCE/memory.txt"

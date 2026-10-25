@@ -12,5 +12,5 @@ if __name__=='__main__':
     pathlib.Path(sys.argv[2]).write_text(json.dumps(result,indent=2)+'\n')
     print('GRAPH_QA_WEBVIEW_BASELINE '+json.dumps(result))
     if result['status']!='supported-baseline':
-        print('App build/tests blocked: actual WebView below Chrome 83 baseline or provider unknown. This is NOT a product pass.')
-        raise SystemExit(4)
+        print('App build/tests blocked: '+('actual WebView below Chrome 83 baseline' if result['status']=='unsupported-baseline' else 'infrastructure provider unavailable during startup')+'. This is NOT a product pass.')
+        raise SystemExit(4 if result['status']=='unsupported-baseline' else 5)
