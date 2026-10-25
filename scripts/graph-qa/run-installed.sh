@@ -19,6 +19,11 @@ adb shell am start -n "$activity"
 adb shell dumpsys webviewupdate > "$GRAPH_QA_EVIDENCE/webview.txt"
 adb shell getprop ro.build.version.sdk > "$GRAPH_QA_EVIDENCE/api.txt"
 adb shell getprop ro.product.cpu.abi > "$GRAPH_QA_EVIDENCE/abi.txt"
+echo GRAPH_QA_RUNTIME_BEGIN
+printf 'API: '; cat "$GRAPH_QA_EVIDENCE/api.txt"
+printf 'ABI: '; cat "$GRAPH_QA_EVIDENCE/abi.txt"
+cat "$GRAPH_QA_EVIDENCE/webview.txt"
+echo GRAPH_QA_RUNTIME_END
 cp "$RUNNER_TEMP/graph-qa/apk.sha256" "$GRAPH_QA_EVIDENCE/apk-sha256.txt"
 node scripts/graph-qa/installed-app.mjs
 adb shell dumpsys gfxinfo com.luckyray.mobile framestats > "$GRAPH_QA_EVIDENCE/frames.txt"

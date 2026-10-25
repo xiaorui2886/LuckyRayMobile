@@ -9,31 +9,74 @@ set -euo pipefail
 # CPU emulation fallback does not change permissions, OS security or sandbox settings.
 : "${RUNNER_TEMP:?}"
 mkdir -p "$RUNNER_TEMP/graph-qa/evidence"
-if [[ -r /dev/kvm && -w /dev/kvm ]] && "$ANDROID_HOME/emulator/emulator" -accel-check >/dev/null 2>&1; then
+{ uname -sm; bash --version | head -n 1; python3 --version
+  if [[ "$(uname -s)" == Darwin ]]; then sw_vers; fi
+} > "$RUNNER_TEMP/graph-qa/evidence/host-platform.txt"
+cat "$RUNNER_TEMP/graph-qa/evidence/host-platform.txt"
+# Read-only host capability metadata; no chmod, sudo, group or namespace changes.
+"$ANDROID_HOME/emulator/emulator" -version > "$RUNNER_TEMP/graph-qa/evidence/emulator-version.txt" 2>&1 || true
+accel_check_status=0
+"$ANDROID_HOME/emulator/emulator" -accel-check > "$RUNNER_TEMP/graph-qa/evidence/emulator-accel-check.txt" 2>&1 || accel_check_status=$?
+{ if [[ -e /dev/kvm ]]; then ls -l /dev/kvm; else echo '/dev/kvm absent'; fi
+  [[ -r /dev/kvm ]] && echo 'kvm-readable=yes' || echo 'kvm-readable=no'
+  [[ -w /dev/kvm ]] && echo 'kvm-writable=yes' || echo 'kvm-writable=no'
+} > "$RUNNER_TEMP/graph-qa/evidence/kvm-metadata.txt"
+echo GRAPH_QA_HOST_CAPABILITY_BEGIN
+head -c 6000 "$RUNNER_TEMP/graph-qa/evidence/emulator-version.txt"
+head -c 6000 "$RUNNER_TEMP/graph-qa/evidence/emulator-accel-check.txt"
+cat "$RUNNER_TEMP/graph-qa/evidence/kvm-metadata.txt"
+echo GRAPH_QA_HOST_CAPABILITY_END
+if [[ "$(uname -s)" == Darwin ]]; then
+  sysctl kern.hv_support > "$RUNNER_TEMP/graph-qa/evidence/hypervisor-metadata.txt" 2>&1 || true
+  cat "$RUNNER_TEMP/graph-qa/evidence/hypervisor-metadata.txt"
+  [[ "$accel_check_status" == 0 ]] && grep -q 'Hypervisor.Framework' "$RUNNER_TEMP/graph-qa/evidence/emulator-accel-check.txt" || { echo 'macOS Hypervisor.Framework unavailable; no permission changes attempted' >&2; exit 3; }
+  accel=on; export GRAPH_EMULATION_MODE=hypervisor-framework; boot_limit=360
+elif [[ -r /dev/kvm && -w /dev/kvm && "$accel_check_status" == 0 ]]; then
   accel=on; export GRAPH_EMULATION_MODE=kvm; boot_limit=360
 else
   accel=off; export GRAPH_EMULATION_MODE=software-functional-only; boot_limit=600
   echo 'Existing KVM unavailable: software CPU emulation, functional-only evidence (no performance claim).'
 fi
-printf '{"mode":"%s","accelArgument":"%s","bootLimitSeconds":%s,"performanceClaimsAllowed":false}\n' "$GRAPH_EMULATION_MODE" "$accel" "$boot_limit" > "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
+printf '{"mode":"%s","accelArgument":"%s","bootLimitSeconds":%s,"gpuArgument":"software","performanceClaimsAllowed":false}\n' "$GRAPH_EMULATION_MODE" "$accel" "$boot_limit" > "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
+echo GRAPH_QA_EMULATION_MODE_BEGIN
+cat "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
+echo GRAPH_QA_EMULATION_MODE_END
 image="system-images;android-${GRAPH_API};google_apis;x86_64"
 [[ -d "$ANDROID_HOME/system-images/android-${GRAPH_API}/google_apis/x86_64" ]] || { echo "Preinstalled/licensed image required: $image" >&2; exit 3; }
-name="lr_graph_qa_${GRAPH_API}_${GITHUB_RUN_ID:?}_${GITHUB_RUN_ATTEMPT:?}"
+phase="${GRAPH_QA_PHASE:-installed}"
+[[ "$phase" == preflight || "$phase" == installed ]] || exit 2
+name="lr_graph_qa_${GRAPH_API}_${GITHUB_RUN_ID:?}_${GITHUB_RUN_ATTEMPT:?}_${phase}"
 [[ "$name" =~ ^[a-zA-Z0-9_]+$ ]] || exit 2
 printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --name "$name" --package "$image" --device pixel_2
-"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot -wipe-data -gpu swiftshader_indirect -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
+"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot -wipe-data -gpu software -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
 pid=$!
+report_boot_failure() {
+  # Only pre-install synthetic emulator startup diagnostics, no app logcat/environment.
+  python3 - "$RUNNER_TEMP/graph-emulator.log" "$RUNNER_TEMP/graph-qa/evidence/emulator-startup-diagnostic.txt" <<'PY_DIAGNOSTIC'
+import pathlib,re,sys
+source=pathlib.Path(sys.argv[1])
+lines=source.read_text(errors='replace').splitlines() if source.exists() else ['Emulator startup log unavailable']
+selected=[]
+for line in lines:
+    if re.search(r'error|fatal|panic|unsupported|invalid|accel|gpu|vulkan|library|qt|kvm|emulator version',line,re.I):
+        if re.search(r'token|secret|password|authorization|credential|jwt|cookie',line,re.I): line='[credential-related startup line redacted]'
+        selected.append(line[:1000])
+text='\n'.join(selected[-60:]) or 'No classified startup diagnostic; process exit is confirmed but cause remains unknown.'
+pathlib.Path(sys.argv[2]).write_text(text+'\n')
+print('GRAPH_QA_EMULATOR_DIAGNOSTIC_BEGIN\n'+text+'\nGRAPH_QA_EMULATOR_DIAGNOSTIC_END')
+PY_DIAGNOSTIC
+}
 trap '"$ANDROID_HOME/platform-tools/adb" -s emulator-5554 emu kill >/dev/null 2>&1 || kill "$pid" 2>/dev/null || true' EXIT
 export ANDROID_SERIAL=emulator-5554
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 booted=no
 start=$SECONDS
 while (( SECONDS - start < boot_limit )); do
-  kill -0 "$pid" 2>/dev/null || { echo "Emulator exited during $GRAPH_EMULATION_MODE boot; unsupported configuration or startup failure, not test success" >&2; exit 3; }
-  if [[ "$(timeout 8 adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == 1 ]]; then booted=yes; break; fi
+  kill -0 "$pid" 2>/dev/null || { echo "Emulator exited during $GRAPH_EMULATION_MODE boot; unsupported configuration or startup failure, not test success" >&2; report_boot_failure; exit 3; }
+  if [[ "$(python3 "$(dirname "$0")/deadline.py" 8 adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == 1 ]]; then booted=yes; break; fi
   sleep 2
 done
-[[ "$booted" == yes ]] || { echo "$GRAPH_EMULATION_MODE boot deadline exceeded (${boot_limit}s); infrastructure blocked" >&2; exit 3; }
+[[ "$booted" == yes ]] || { echo "$GRAPH_EMULATION_MODE boot deadline exceeded (${boot_limit}s); infrastructure blocked" >&2; report_boot_failure; exit 3; }
 # Caller supplies a reviewed in-repository driver; no remote command strings.
 : "${GRAPH_TEST_DRIVER:?Path to reviewed executable local driver}"
 [[ -f "$GRAPH_TEST_DRIVER" && -x "$GRAPH_TEST_DRIVER" ]] || exit 2

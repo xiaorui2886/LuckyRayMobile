@@ -23,7 +23,16 @@ for ((i=0;i<60;i++)); do
   sleep 1
 done
 [[ "$ready" == yes ]] || { echo 'Host browser/Vite startup deadline exceeded' >&2; exit 3; }
+# Independent suites must still produce evidence if the other suite fails.
+canvas_status=0
+set +e
 timeout 180 node tests/graphCanvas/MobileGraphCanvas.browser.test.mjs http://127.0.0.1:9222 http://127.0.0.1:1423 | tee "$GRAPH_QA_EVIDENCE/canvas-results.json"
-node scripts/graph-qa/capture-host.mjs http://127.0.0.1:9222 canvas-host
+canvas_status=${PIPESTATUS[0]}
+set -e
+capture_status=0
+node scripts/graph-qa/capture-host.mjs http://127.0.0.1:9222 canvas-host || capture_status=$?
 # UI worker owns this real-component/synthetic-data test, not the Android driver.
-timeout 240 node tests/graph-ui/browser-check.mjs http://127.0.0.1:9222 http://127.0.0.1:1423 "$GRAPH_QA_EVIDENCE"
+ui_status=0
+timeout 240 node tests/graph-ui/browser-check.mjs http://127.0.0.1:9222 http://127.0.0.1:1423 "$GRAPH_QA_EVIDENCE" || ui_status=$?
+printf '{"kind":"host-browser-not-Android","canvasExit":%s,"captureExit":%s,"uiExit":%s}\n' "$canvas_status" "$capture_status" "$ui_status" > "$GRAPH_QA_EVIDENCE/suite-exit-status.json"
+[[ "$canvas_status" == 0 && "$capture_status" == 0 && "$ui_status" == 0 ]]

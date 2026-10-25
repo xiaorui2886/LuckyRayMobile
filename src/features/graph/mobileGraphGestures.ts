@@ -11,3 +11,7 @@ export function graphPixelRatio(ratio:number,width:number,height:number):number 
  // A 4 MP ceiling avoids allocating huge backing surfaces on high-DPR phones.
  return Math.max(.5,Math.min(Number.isFinite(ratio)?ratio:1,2,Math.sqrt(4_000_000/Math.max(1,width*height))));
 }
+export const GRAPH_TOUCH_HOLD_MS=400;
+export function graphTouchMoved(start:TouchPoint,current:TouchPoint):boolean {return Math.hypot(current.x-start.x,current.y-start.y)>6;}
+/** Preserve the world-space grab offset instead of snapping an 18px hit target to its centre. */
+export function graphDraggedPosition(camera:Camera,pointer:TouchPoint,offset:TouchPoint):TouchPoint {const p=graphPoint(camera,pointer);return{x:p.x+offset.x,y:p.y+offset.y};}

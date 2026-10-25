@@ -15,12 +15,14 @@ concurrency:
   cancel-in-progress: true
 jobs:
   installed-app:
+    name: ${{ matrix.runner == 'ubuntu-24.04' && 'Linux boot diagnostic (no app install)' || 'Mac Intel installed app' }} API ${{ matrix.api }}
     if: (github.event_name == 'push' && github.ref == 'refs/heads/ray/mobile-graph-check-20261026') || (github.event_name == 'workflow_dispatch' && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
     strategy:
       fail-fast: false
       matrix:
         api: [29, 35]
-    runs-on: ubuntu-24.04
+        runner: [ubuntu-24.04, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
       CI_GRAPH_QA_REVIEWED: 'yes'
@@ -47,15 +49,24 @@ jobs:
           test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" platform-tools emulator 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018' "system-images;android-${GRAPH_API};google_apis;x86_64" < /dev/null
           test -d "$ANDROID_HOME/system-images/android-${GRAPH_API}/google_apis/x86_64"
+      - name: Basic emulator preflight before expensive APK build
+        env:
+          GRAPH_QA_PHASE: preflight
+        run: |
+          export GRAPH_TEST_DRIVER="$GITHUB_WORKSPACE/scripts/graph-qa/preflight-installed.sh"
+          bash scripts/graph-qa/boot-avd.sh
       - name: Install locked dependencies and Android Rust target
+        if: matrix.runner == 'macos-15-intel'
         run: |
           pnpm install --frozen-lockfile
           rustup toolchain install 1.95.0 --profile minimal
           rustup default 1.95.0
           rustup target add x86_64-linux-android
       - name: Build real Rust Kotlin debug APK (no production keys)
+        if: matrix.runner == 'macos-15-intel'
         run: bash scripts/graph-qa/build-debug.sh
       - name: Installed offline app checks
+        if: matrix.runner == 'macos-15-intel'
         run: |
           export GRAPH_TEST_DRIVER="$GITHUB_WORKSPACE/scripts/graph-qa/run-installed.sh"
           bash scripts/graph-qa/boot-avd.sh
@@ -63,7 +74,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: graph-qa-api${{ matrix.api }}-${{ github.sha }}
+          name: graph-qa-${{ matrix.runner }}-api${{ matrix.api }}-${{ github.sha }}
           path: |
             ${{ runner.temp }}/graph-qa/evidence/*.json
             ${{ runner.temp }}/graph-qa/evidence/*.png
@@ -90,7 +101,10 @@ jobs:
       - name: Locked frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Deterministic graph data Desktop parity and gestures
-        run: node --experimental-strip-types --test tests/mobileGraphData.test.ts tests/mobileGraphDesktopParity.test.ts tests/graph-core/*.test.ts tests/graphCanvas/mobileGraphGestures.test.mjs
+        run: |
+          node scripts/run-ci-lite-local.mjs
+          node --experimental-strip-types --test tests/mobileGraphData.test.ts tests/mobileGraphDesktopParity.test.ts tests/graph-core/*.test.ts tests/graphCanvas/mobileGraphGestures.test.mjs tests/graphCanvas/mobileGraphLifecycle.test.mjs
+          pnpm build
       - name: Validate synthetic native command payloads and Markdown
         run: node --test scripts/graph-qa/seed-expressions.test.mjs
       - name: Native production PNG module tests

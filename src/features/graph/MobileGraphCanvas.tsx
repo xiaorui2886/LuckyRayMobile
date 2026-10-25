@@ -8,7 +8,7 @@ import { packGraphPhysicsState, updateGraphPhysicsState, type GraphPhysicsNode, 
 import { buildGraphPlaybackPlan, graphPlaybackNodeVisual, graphPlaybackEdgeProgress, graphPlaybackEdgeKey, type GraphPlaybackPlan } from './core/graphPlayback';
 import { graphNodeFill, graphEdgePaint, graphArrowTriangle, graphPlaybackCameraTarget } from './core/graphRenderer';
 import { graphCameraSignature, graphActivationTransition } from './mobileGraphLifecycle';
-import { pinchCamera, graphPoint, graphPixelRatio, type TouchPoint } from './mobileGraphGestures';
+import { pinchCamera, graphPoint, graphPixelRatio, graphTouchMoved, graphDraggedPosition, GRAPH_TOUCH_HOLD_MS, type TouchPoint } from './mobileGraphGestures';
 
 export type MobileGraphCanvasHandle = {reset():void;fit():void;zoomBy(factor:number):void;capture():Promise<Blob>};
 export type MobileGraphCanvasProps = {
@@ -35,12 +35,14 @@ export const MobileGraphCanvas = forwardRef<MobileGraphCanvasHandle,MobileGraphC
   let timeline:GraphPlaybackPlan|null=null,playing=false,elapsed=0,lastFrame=0,lastProgress=0,finished=false,cameraFollow=true,lastSeek:number|undefined;
   const labelMemory=new Map<number,GraphLabelState>(),metrics=new Map<string,number>();
   const pointers=new Map<number,TouchPoint>();let gesture:{start:TouchPoint;last:TouchPoint;key:string|null;moved:boolean}|null=null,lastTap:{key:string;time:number}|null=null;
+  let holdTimer:ReturnType<typeof setTimeout>|null=null,dragOffset:TouchPoint={x:0,y:0};
+  const clearHold=()=>{if(holdTimer!==null){clearTimeout(holdTimer);holdTimer=null;}};
   let hits:Array<{key:string;id:number;x:number;y:number;r:number}>=[];
   const wake=()=>{dirty=true;if(!raf&&!disposed&&!document.hidden&&!latest.current.paused)raf=requestAnimationFrame(frame);};
   const persistCamera=()=>{latest.current.onCameraChange?.({...camera});};
   const notifyCamera=()=>{cameraFollow=false;persistCamera();wake();};
   const reduced=()=>!!latest.current.reducedMotion||canvas.closest('.st-app')?.getAttribute('data-reduced')==='true'||(typeof matchMedia==='function'&&matchMedia('(prefers-reduced-motion: reduce)').matches);
-  const cancelGesture=()=>{const ids=[...pointers.keys()];pointers.clear();gesture=null;lastTap=null;dragId=null;hoverId=null;mutation++;for(const id of ids)try{if(canvas.hasPointerCapture?.(id))canvas.releasePointerCapture(id);}catch{/* Released by WebView already. */}};
+  const cancelGesture=()=>{clearHold();const ids=[...pointers.keys()];pointers.clear();gesture=null;lastTap=null;dragId=null;hoverId=null;mutation++;for(const id of ids)try{if(canvas.hasPointerCapture?.(id))canvas.releasePointerCapture(id);}catch{/* Released by WebView already. */}};
   const selectScene=()=>{const selected=latest.current.seed.nodes.find(n=>n.key===latest.current.selectedKey)?.id??null;scene=filteredGraph(latest.current.seed,settings,{nodeColor:getComputedStyle(canvas).getPropertyValue('--mg-graph-foreground').trim()||'#e7e9ee',scopeKeys:latest.current.scopeKeys,selectedId:selected,hoveredId:hoverId,draggingId:dragId});};
   const fit=()=>{const fitted=fitGraphCamera(scene.renderedNodes.map(n=>byId.get(n.id)).filter((n):n is GraphPhysicsNode=>!!n),width,height);if(fitted){camera=fitted;explicitCamera=true;notifyCamera();}};
   const zoomBy=(factor:number)=>{if(!(factor>0&&Number.isFinite(factor)))return;camera=wheelCamera(camera,camera,{x:width/2,y:height/2},-Math.log(factor)/.0025);explicitCamera=true;notifyCamera();};
@@ -118,12 +120,15 @@ export const MobileGraphCanvas = forwardRef<MobileGraphCanvasHandle,MobileGraphC
   const point=(event:PointerEvent|WheelEvent):TouchPoint=>{const r=canvas.getBoundingClientRect();return{x:event.clientX-r.left,y:event.clientY-r.top};};
   const hit=(p:TouchPoint)=>{let closest:typeof hits[number]|null=null,best=Infinity;for(const node of hits){const distance=Math.hypot(node.x-p.x,node.y-p.y);if(distance<=node.r&&distance<best){closest=node;best=distance;}}return closest;};
   function down(e:PointerEvent){if(latest.current.paused||e.button!==0)return;e.preventDefault();const p=point(e);pointers.set(e.pointerId,p);try{canvas.setPointerCapture(e.pointerId);}catch{/* Some older WebViews lack capture. */}
-   if(pointers.size===1){const node=hit(p);gesture={start:p,last:p,key:node?.key??null,moved:false};dragId=node?.id??null;mutation++;hoverId=null;selectScene();}else{dragId=null;mutation++;if(gesture)gesture.moved=true;}wake();}
+   if(pointers.size===1){const node=hit(p);gesture={start:p,last:p,key:node?.key??null,moved:false};dragId=null;clearHold();
+    const activateDrag=()=>{const body=node&&byId.get(node.id),pointer=pointers.get(e.pointerId);if(disposed||latest.current.paused||pointers.size!==1||!body||!pointer||!gesture)return;const world=graphPoint(camera,pointer);dragOffset={x:body.x-world.x,y:body.y-world.y};dragId=body.id;mutation++;cameraFollow=false;selectScene();wake();};
+    if(e.pointerType==='touch'&&node){holdTimer=setTimeout(()=>{holdTimer=null;if(!gesture||gesture.moved)return;activateDrag();if(dragId!==null){gesture.moved=true;lastTap=null;latest.current.onSelect(node.key);}},GRAPH_TOUCH_HOLD_MS);}else activateDrag();
+    mutation++;hoverId=null;selectScene();}else{clearHold();dragId=null;mutation++;if(gesture)gesture.moved=true;}wake();}
   function move(e:PointerEvent){const p=point(e);if(!pointers.has(e.pointerId)){if(e.pointerType==='mouse'){const id=hit(p)?.id??null;if(id!==hoverId){hoverId=id;selectScene();wake();}}return;}
    e.preventDefault();const previous=[...pointers.values()];pointers.set(e.pointerId,p);const current=[...pointers.values()];
    if(current.length>=2){camera=pinchCamera(camera,[previous[0],previous[1]],[current[0],current[1]]);explicitCamera=true;notifyCamera();}
-   else if(gesture){if(Math.hypot(p.x-gesture.start.x,p.y-gesture.start.y)>5)gesture.moved=true;if(gesture.moved){if(dragId!==null){const n=byId.get(dragId);if(n){Object.assign(n,graphPoint(camera,p),{vx:0,vy:0});mutation++;alpha=.4;}}else{camera={...camera,panX:camera.panX+p.x-gesture.last.x,panY:camera.panY+p.y-gesture.last.y};explicitCamera=true;notifyCamera();}}gesture.last=p;}wake();}
-  function up(e:PointerEvent){if(!pointers.has(e.pointerId))return;const cancelled=e.type!=='pointerup';const wasMulti=pointers.size>1;pointers.delete(e.pointerId);
+   else if(gesture){if(graphTouchMoved(gesture.start,p)){gesture.moved=true;clearHold();}if(gesture.moved){if(dragId!==null){const n=byId.get(dragId);if(n){Object.assign(n,graphDraggedPosition(camera,p,dragOffset),{vx:0,vy:0});mutation++;alpha=.4;}}else{camera={...camera,panX:camera.panX+p.x-gesture.last.x,panY:camera.panY+p.y-gesture.last.y};explicitCamera=true;notifyCamera();}}gesture.last=p;}wake();}
+  function up(e:PointerEvent){if(!pointers.has(e.pointerId))return;clearHold();const cancelled=e.type!=='pointerup';const wasMulti=pointers.size>1;pointers.delete(e.pointerId);
    if(!cancelled&&!wasMulti&&gesture&&!gesture.moved){const key=gesture.key;latest.current.onSelect(key);if(key&&lastTap?.key===key&&performance.now()-lastTap.time<350){latest.current.onOpen(key);lastTap=null;}else lastTap=key?{key,time:performance.now()}:null;}
    dragId=null;mutation++;if(pointers.size===1){const p=[...pointers.values()][0];gesture={start:p,last:p,key:null,moved:true};}else gesture=null;selectScene();wake();}
   function wheel(e:WheelEvent){e.preventDefault();camera=wheelCamera(camera,camera,point(e),e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?height:1));explicitCamera=true;notifyCamera();}
@@ -138,7 +143,7 @@ export const MobileGraphCanvas = forwardRef<MobileGraphCanvasHandle,MobileGraphC
   const reset=()=>{cancelGesture();const initial=graphSeedPositions(latest.current.seed.nodes,latest.current.seed.edges,width,height);for(const node of nodes){const p=initial.get(node.id);if(p)Object.assign(node,p,{vx:0,vy:0});}generation++;mutation++;alpha=1;timeline=null;selectScene();fit();update();};
   runtime.current={update,reset,fit,zoomBy,capture:()=>new Promise((resolve,reject)=>{draw();canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('图谱导出失败')),'image/png');})};
   resize();update();latest.current.onReady?.();
-  return()=>{disposed=true;runtime.current=null;worker?.terminate();if(raf)cancelAnimationFrame(raf);observer?.disconnect();themeObserver?.disconnect();window.removeEventListener('resize',resize);document.removeEventListener('visibilitychange',visibility);canvas.removeEventListener('pointerleave',leave);canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',up);canvas.removeEventListener('lostpointercapture',up);canvas.removeEventListener('wheel',wheel);canvas.removeEventListener('keydown',keydown);};
+  return()=>{disposed=true;cancelGesture();runtime.current=null;worker?.terminate();if(raf)cancelAnimationFrame(raf);observer?.disconnect();themeObserver?.disconnect();window.removeEventListener('resize',resize);document.removeEventListener('visibilitychange',visibility);canvas.removeEventListener('pointerleave',leave);canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',up);canvas.removeEventListener('lostpointercapture',up);canvas.removeEventListener('wheel',wheel);canvas.removeEventListener('keydown',keydown);};
  },[]);
- return <div className="mg-canvas"><canvas ref={canvasRef} tabIndex={0} aria-label="本地图谱。拖动空白移动，双指缩放，点按选择节点，双击打开。键盘方向键平移，加减缩放，0 适应画面。" style={{width:'100%',height:'100%',display:'block',touchAction:'none'}} />{warning&&<div className="mg-canvas-warning" role="status">{warning}</div>}</div>;
+ return <div className="mg-canvas"><canvas ref={canvasRef} tabIndex={0} aria-label="本地图谱。拖动平移，双指缩放，长按拖动节点，点按选择节点，双击打开。键盘方向键平移，加减缩放，0 适应画面。" style={{width:'100%',height:'100%',display:'block',touchAction:'none'}} />{warning&&<div className="mg-canvas-warning" role="status">{warning}</div>}</div>;
 });

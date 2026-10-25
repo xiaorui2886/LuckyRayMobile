@@ -21,3 +21,13 @@ The same exact-branch/manual workflow also runs a host Chromium job. It uses the
 `cargo +1.95.0 test --locked --manifest-path tests/graph-export-native/Cargo.toml` exercises the production PNG export module. The browser job then runs the actual Canvas/Worker synthetic fixture via Vite and the production host/settings synthetic-data fixture. These are not Android/native-vault tests and remain separately named in results/artifacts. Screenshot logs/artifacts contain only generated synthetic content. `tests/graph-ui/browser-check.mjs` owns light/dark 360/430 UI coverage.
 
 Software-emulation option is documented by Android: https://developer.android.com/studio/run/emulator-commandline . Runtime compatibility/boot is still measured rather than assumed. `emulation-mode.json` records requested mode, explicit accelerator argument and deadline even on failure; successful APK tests establish it actually booted. Emulator measurements of either mode are not physical-device performance claims.
+
+## Boot-first infrastructure preflight
+
+Before JavaScript dependency installation and the expensive Rust/Kotlin APK build, the Android job now boots a separate fresh preflight AVD, verifies API/ABI, records its WebView provider, and asserts no LuckyRay APK is installed. Preflight success is **not** app-test success. It then shuts down; the installed-app stage uses a distinct AVD name to avoid stale user data/name collisions. Boot failure prints bounded classified startup diagnostics (credential-keyword lines redacted), emulator version/acceleration check and read-only `/dev/kvm` metadata. No permissions change or privileged process is used.
+
+## Reviewed Mac fallback execution matrix
+
+The next workflow matrix contains API29/API35 on both `ubuntu-24.04` and standard `macos-15-intel`. **Linux lanes are boot diagnostics only in this revision**; dependency/Rust build/install steps execute on Mac lanes after successful preflight. Host-browser remains Ubuntu and independently reports its result. All matrix jobs keep default OS security unchanged.
+
+Mac requires a successful `emulator -accel-check` reporting Hypervisor.Framework and records read-only `sysctl kern.hv_support`. No HAXM, sudo or permission edits. `-gpu software` replaces deprecated `swiftshader_indirect` (not asserted to be the first-run root cause). GNU tool absence is handled by small scoped CI adapters: Python deadline, Python APK enumeration/SHA256, and a fail-closed literal replacement adapter for exactly the 8 production Android patch expressions. The original production patch script is unchanged. A child-shell python alias selects existing python3. No package manager installs GNU toolsets. Actual OS/emulator/acceleration versions are recorded in evidence.

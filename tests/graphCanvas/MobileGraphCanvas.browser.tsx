@@ -1,5 +1,6 @@
 /** Synthetic local-only browser fixture; not imported by the application. */
 import React,{useRef,useState} from 'react';
+import '../../src/features/graph/mobileGraph.css';
 import {createRoot} from 'react-dom/client';
 import {MobileGraphCanvas,type MobileGraphCanvasHandle} from '../../src/features/graph/MobileGraphCanvas';
 import type {Camera} from '../../src/features/graph/core/graphCamera';

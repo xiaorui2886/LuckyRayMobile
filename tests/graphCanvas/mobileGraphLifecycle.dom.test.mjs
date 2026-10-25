@@ -31,7 +31,16 @@ const x=lastArcs[0][0],y=lastArcs[0][1];pointer('pointerdown',x,y);
 await act(async()=>root.render(React.createElement(MobileGraphCanvas,{...props,seed:{...seed,nodes:[{...seed.nodes[0],key:'different-key'}]}})));flush();pointer('pointerup',x,y);assert.deepEqual(selections,[],'seed replacement must cancel old held node gesture');
 const nx=lastArcs[0][0],ny=lastArcs[0][1];pointer('pointerdown',nx,ny);
 await act(async()=>root.render(React.createElement(MobileGraphCanvas,{...props,paused:true})));pointer('pointerup',nx,ny);assert.deepEqual(selections,[],'pause must cancel held node gesture');
-await act(async()=>root.unmount());dom.window.close();await rm(dir,{recursive:true,force:true});console.log('PASS actual Canvas: resize camera retained; seed and pause cancel held pointers (mocked rendering/worker, not device proof).');
+await act(async()=>root.unmount());
+const touchRoot=createRoot(document.getElementById('root')),cameras=[];
+await act(async()=>touchRoot.render(React.createElement(MobileGraphCanvas,{...props,onCameraChange:c=>cameras.push(c)})));flush();
+const touchCanvas=document.querySelector('canvas');
+const dispatch=(type,x,y)=>{const event=new dom.window.MouseEvent(type,{clientX:x,clientY:y,button:0,bubbles:true});Object.defineProperty(event,'pointerId',{value:3});Object.defineProperty(event,'pointerType',{value:'touch'});touchCanvas.dispatchEvent(event);};
+let center={x:lastArcs[0][0],y:lastArcs[0][1]};dispatch('pointerdown',center.x,center.y);dispatch('pointermove',center.x+60,center.y+40);flush();dispatch('pointerup',center.x+60,center.y+40);assert.equal(cameras.at(-1).panX,60,'short slide starting on node pans camera');assert.equal(cameras.at(-1).panY,40);
+flush();center={x:lastArcs[0][0],y:lastArcs[0][1]};const count=cameras.length;
+dispatch('pointerdown',center.x+10,center.y);await act(async()=>new Promise(r=>setTimeout(r,450)));flush();assert.equal(lastArcs[0][0],center.x,'hold must not snap offset hit to node centre');
+dispatch('pointermove',center.x+50,center.y+30);flush();assert.equal(cameras.length,count,'held-node drag must not pan camera');assert.ok(Math.abs(lastArcs[0][0]-(center.x+40))<.01,'held drag retains original 10px grab offset');assert.ok(Math.abs(lastArcs[0][1]-(center.y+30))<.01);dispatch('pointerup',center.x+50,center.y+30);
+await act(async()=>touchRoot.unmount());console.log('PASS actual Canvas: node-start short touch pans; hold drags node without camera movement or grab-offset snap.');dom.window.close();await rm(dir,{recursive:true,force:true});console.log('PASS actual Canvas: resize camera retained; seed and pause cancel held pointers (mocked rendering/worker, not device proof).');
 
 // D3 imports a browser scheduler; mocked RAF intentionally never runs its global queue.
 process.exit(0);
