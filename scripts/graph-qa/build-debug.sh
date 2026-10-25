@@ -36,11 +36,13 @@ grep -q "package: name='com.luckyray.mobile'" "$RUNNER_TEMP/graph-apk-badging.tx
 grep -q "native-code:.*'x86_64'" "$RUNNER_TEMP/graph-apk-badging.txt"
 grep -q application-debuggable "$RUNNER_TEMP/graph-apk-badging.txt"
 "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
-mkdir -p "$RUNNER_TEMP/graph-qa"
+mkdir -p "$RUNNER_TEMP/graph-qa/evidence"
 cp "$apk" "$RUNNER_TEMP/graph-qa/app-debug.apk"
 python3 - "$RUNNER_TEMP/graph-qa/app-debug.apk" > "$RUNNER_TEMP/graph-qa/apk.sha256" <<'PY_HASH'
-import hashlib,sys
+import hashlib,sys,json
 from pathlib import Path
-print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest()+'  app-debug.apk')
+p=Path(sys.argv[1]);digest=hashlib.sha256(p.read_bytes()).hexdigest()
+print(digest+'  app-debug.apk')
+(p.parent/'evidence/apk-metadata.json').write_text(json.dumps({'bytes':p.stat().st_size,'sha256':digest,'abi':'x86_64','debuggable':True,'package':'com.luckyray.mobile','signatureVerified':True},indent=2))
 PY_HASH
 git diff --exit-code -- pnpm-lock.yaml src-tauri/Cargo.lock

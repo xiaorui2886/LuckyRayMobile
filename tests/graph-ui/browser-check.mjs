@@ -19,7 +19,7 @@ const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++nextId;
 const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value;};
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const screenshots=[],checks=[];
-const shot=async(name,marker=false)=>{const response=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});await writeFile(path.join(out,name+'.png'),Buffer.from(response.data,'base64'));screenshots.push(name+'.png');if(marker){const small=await send('Page.captureScreenshot',{format:'png',clip:{x:0,y:0,width:await evaluate('innerWidth'),height:await evaluate('innerHeight'),scale:.5}});if(small.data.length<=300000)console.log(`GRAPH_QA_PNG_BEGIN ${name}\n${small.data}\nGRAPH_QA_PNG_END ${name}`);}};
+const shot=async(name,marker=false)=>{const response=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});await writeFile(path.join(out,name+'.png'),Buffer.from(response.data,'base64'));screenshots.push(name+'.png');if(marker){let markerData=response.data;if(markerData.length>300000){const small=await send('Page.captureScreenshot',{format:'png',clip:{x:0,y:0,width:await evaluate('innerWidth'),height:await evaluate('innerHeight'),scale:.5}});markerData=small.data;}if(markerData.length<=300000)console.log(`GRAPH_QA_PNG_BEGIN ${name}\n${markerData}\nGRAPH_QA_PNG_END ${name}`);}};
 try{
  await send('Page.enable');await send('Runtime.enable');
  for(const width of [360,430]){

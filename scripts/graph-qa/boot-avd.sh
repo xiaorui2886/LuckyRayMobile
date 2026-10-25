@@ -30,9 +30,9 @@ if [[ "$(uname -s)" == Darwin ]]; then
   sysctl kern.hv_support > "$RUNNER_TEMP/graph-qa/evidence/hypervisor-metadata.txt" 2>&1 || true
   cat "$RUNNER_TEMP/graph-qa/evidence/hypervisor-metadata.txt"
   [[ "$accel_check_status" == 0 ]] && grep -q 'Hypervisor.Framework' "$RUNNER_TEMP/graph-qa/evidence/emulator-accel-check.txt" || { echo 'macOS Hypervisor.Framework unavailable; no permission changes attempted' >&2; exit 3; }
-  accel=on; export GRAPH_EMULATION_MODE=hypervisor-framework; boot_limit=360
+  accel=on; export GRAPH_EMULATION_MODE=hypervisor-framework; boot_limit=900
 elif [[ -r /dev/kvm && -w /dev/kvm && "$accel_check_status" == 0 ]]; then
-  accel=on; export GRAPH_EMULATION_MODE=kvm; boot_limit=360
+  accel=on; export GRAPH_EMULATION_MODE=kvm; boot_limit=900
 else
   accel=off; export GRAPH_EMULATION_MODE=software-functional-only; boot_limit=600
   echo 'Existing KVM unavailable: software CPU emulation, functional-only evidence (no performance claim).'
@@ -47,11 +47,35 @@ phase="${GRAPH_QA_PHASE:-installed}"
 [[ "$phase" == preflight || "$phase" == installed ]] || exit 2
 name="lr_graph_qa_${GRAPH_API}_${GITHUB_RUN_ID:?}_${GITHUB_RUN_ATTEMPT:?}_${phase}"
 [[ "$name" =~ ^[a-zA-Z0-9_]+$ ]] || exit 2
-printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --name "$name" --package "$image" --device pixel_2
+# Android tools can disagree on legacy/default homes. Give both one explicit CI-only home.
+export ANDROID_USER_HOME="$RUNNER_TEMP/graph-android-user"
+export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+mkdir -p "$ANDROID_AVD_HOME"
+echo GRAPH_QA_PHASE_START_avd_create
+printf 'no\n' | python3 "$(dirname "$0")/deadline.py" 120 "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --name "$name" --package "$image" --device pixel_2 --path "$ANDROID_AVD_HOME/$name.avd"
+echo GRAPH_QA_PHASE_PASS_avd_create
+[[ -f "$ANDROID_AVD_HOME/$name.ini" && -f "$ANDROID_AVD_HOME/$name.avd/config.ini" ]] || { echo 'AVD creation did not publish expected isolated descriptor/config; refusing launch' >&2; exit 3; }
+python3 "$(dirname "$0")/deadline.py" 30 "$ANDROID_HOME/emulator/emulator" -list-avds > "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt"
+cat "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt"
+grep -Fxq "$name" "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt" || { echo 'Emulator cannot discover freshly-created isolated AVD; refusing launch' >&2; exit 3; }
+echo GRAPH_QA_PHASE_START_emulator_boot
 "$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot -wipe-data -gpu software -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
 pid=$!
 report_boot_failure() {
   # Only pre-install synthetic emulator startup diagnostics, no app logcat/environment.
+  # Fixed allowlist distinguishes adb absent/offline, Android boot and boot animation stalls.
+  local diagnostic_file="$RUNNER_TEMP/graph-qa/evidence/boot-state.txt"
+  {
+    printf 'emulator-process-alive='; if kill -0 "$pid" 2>/dev/null; then echo yes; else echo no; fi
+    printf 'adb-state='; python3 "$(dirname "$0")/deadline.py" 8 adb -s emulator-5554 get-state 2>/dev/null || true
+    for property in sys.boot_completed dev.bootcomplete init.svc.bootanim ro.build.version.sdk ro.product.cpu.abi; do
+      printf '%s=' "$property"
+      python3 "$(dirname "$0")/deadline.py" 8 adb -s emulator-5554 shell getprop "$property" 2>/dev/null | tr -d '\r' || true
+      printf '\n'
+    done
+  } > "$diagnostic_file"
+  echo GRAPH_QA_BOOT_STATE_BEGIN; cat "$diagnostic_file"; echo GRAPH_QA_BOOT_STATE_END
   python3 - "$RUNNER_TEMP/graph-emulator.log" "$RUNNER_TEMP/graph-qa/evidence/emulator-startup-diagnostic.txt" <<'PY_DIAGNOSTIC'
 import pathlib,re,sys
 source=pathlib.Path(sys.argv[1])
@@ -66,7 +90,13 @@ pathlib.Path(sys.argv[2]).write_text(text+'\n')
 print('GRAPH_QA_EMULATOR_DIAGNOSTIC_BEGIN\n'+text+'\nGRAPH_QA_EMULATOR_DIAGNOSTIC_END')
 PY_DIAGNOSTIC
 }
-trap '"$ANDROID_HOME/platform-tools/adb" -s emulator-5554 emu kill >/dev/null 2>&1 || kill "$pid" 2>/dev/null || true' EXIT
+cleanup() {
+  echo GRAPH_QA_PHASE_START_emulator_cleanup
+  python3 "$(dirname "$0")/deadline.py" 8 "$ANDROID_HOME/platform-tools/adb" -s emulator-5554 emu kill >/dev/null 2>&1 || true
+  if kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi
+  echo GRAPH_QA_PHASE_PASS_emulator_cleanup
+}
+trap cleanup EXIT
 export ANDROID_SERIAL=emulator-5554
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 booted=no
@@ -77,6 +107,7 @@ while (( SECONDS - start < boot_limit )); do
   sleep 2
 done
 [[ "$booted" == yes ]] || { echo "$GRAPH_EMULATION_MODE boot deadline exceeded (${boot_limit}s); infrastructure blocked" >&2; report_boot_failure; exit 3; }
+echo GRAPH_QA_PHASE_PASS_emulator_boot
 # Caller supplies a reviewed in-repository driver; no remote command strings.
 : "${GRAPH_TEST_DRIVER:?Path to reviewed executable local driver}"
 [[ -f "$GRAPH_TEST_DRIVER" && -x "$GRAPH_TEST_DRIVER" ]] || exit 2

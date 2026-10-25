@@ -3,6 +3,9 @@
 set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == true && "${CI_GRAPH_QA_REVIEWED:-}" == yes && "${ANDROID_SERIAL:-}" == emulator-5554 && "${GRAPH_QA_PHASE:-}" == preflight ]] || exit 2
 : "${RUNNER_TEMP:?}"
+driver_dir="$(cd "$(dirname "$0")" && pwd)"
+adb() { python3 "$driver_dir/deadline.py" 30 "${ANDROID_HOME:?}/platform-tools/adb" "$@"; }
+echo GRAPH_QA_PHASE_START_preflight_identity
 out="$RUNNER_TEMP/graph-qa/evidence"
 mkdir -p "$out"
 api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')
@@ -15,3 +18,5 @@ echo GRAPH_QA_PREFLIGHT_BEGIN
 cat "$out/preflight.json"
 head -c 8000 "$out/preflight-webview.txt"
 echo GRAPH_QA_PREFLIGHT_END
+
+echo GRAPH_QA_PHASE_PASS_preflight_identity

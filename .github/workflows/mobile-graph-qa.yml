@@ -11,8 +11,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: graph-qa-${{ github.ref }}
-  cancel-in-progress: true
+  group: graph-qa-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 jobs:
   installed-app:
     name: ${{ matrix.runner == 'ubuntu-24.04' && 'Linux boot diagnostic (no app install)' || 'Mac Intel installed app' }} API ${{ matrix.api }}
@@ -121,6 +121,6 @@ jobs:
           path: |
             ${{ runner.temp }}/graph-host-evidence/*.json
             ${{ runner.temp }}/graph-host-evidence/*.png
-            ${{ runner.temp }}/graph-host-evidence/browser-version.txt
+            ${{ runner.temp }}/graph-host-evidence/*.txt
           if-no-files-found: warn
           retention-days: 7

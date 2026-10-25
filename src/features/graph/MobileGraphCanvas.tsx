@@ -70,7 +70,7 @@ export const MobileGraphCanvas = forwardRef<MobileGraphCanvasHandle,MobileGraphC
    if(timeline&&p.playback?.progress!==undefined&&p.playback.progress!==lastSeek)elapsed=Math.max(0,Math.min(1,p.playback.progress))*timeline.totalDuration;
    lastSeek=p.playback?.progress;wake();
   }
-  function workerFailure(){if(disposed)return;worker?.terminate();worker=null;busy=false;setWarning('本机图谱布局线程不可用；已保留全部节点，可缩放、拖动和打开。请更新系统 WebView 后重试。');wake();}
+  function workerFailure(){if(disposed)return;worker?.terminate();worker=null;busy=false;setWarning('本机图谱布局暂不可用；已保留全部节点，可缩放、拖动和打开。重新打开图谱可重试。');wake();}
   try{worker=new Worker(new URL('./core/graphPhysics.worker.ts',import.meta.url),{type:'module'});worker.onerror=workerFailure;worker.onmessage=(event:MessageEvent<GraphPhysicsStepResponse>)=>{
    busy=false;const result=event.data;if(disposed)return;
    if(result.generation===generation&&result.topologyRevision===revision&&result.mutationRevision===mutation){updateGraphPhysicsState(nodes,result.state);alpha=result.alpha;}

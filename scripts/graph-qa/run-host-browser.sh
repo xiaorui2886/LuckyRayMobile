@@ -6,6 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 export GRAPH_QA_EVIDENCE="$RUNNER_TEMP/graph-host-evidence"
 mkdir -p "$GRAPH_QA_EVIDENCE"
+source scripts/graph-qa/host-fonts.sh
 chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
 [[ -n "$chrome" ]] || { echo 'Existing runner Chrome unavailable; no browser installation fallback' >&2; exit 3; }
 "$chrome" --version > "$GRAPH_QA_EVIDENCE/browser-version.txt"

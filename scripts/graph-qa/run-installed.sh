@@ -8,7 +8,12 @@ mkdir -p "$GRAPH_QA_EVIDENCE"
 apk="$RUNNER_TEMP/graph-qa/app-debug.apk"
 test -f "$apk"
 # Brand-new AVD only; production application ID retained to exercise real JNI bridges.
-adb install "$apk"
+echo GRAPH_QA_PHASE_START_apk_install
+python3 scripts/graph-qa/deadline.py 300 adb install "$apk"
+echo GRAPH_QA_PHASE_PASS_apk_install
+# All subsequent adb commands are individually bounded, including diagnostics.
+adb() { python3 scripts/graph-qa/deadline.py 30 "${ANDROID_HOME:?}/platform-tools/adb" "$@"; }
+echo GRAPH_QA_PHASE_START_app_launch
 adb shell dumpsys package com.luckyray.mobile | grep -q DEBUGGABLE
 adb shell pm clear com.luckyray.mobile
 activity=$(adb shell cmd package resolve-activity --brief com.luckyray.mobile | tr -d '\r' | tail -1)
@@ -16,6 +21,7 @@ activity=$(adb shell cmd package resolve-activity --brief com.luckyray.mobile | 
 adb shell svc wifi disable
 adb shell svc data disable
 adb shell am start -n "$activity"
+echo GRAPH_QA_PHASE_PASS_app_launch
 adb shell dumpsys webviewupdate > "$GRAPH_QA_EVIDENCE/webview.txt"
 adb shell getprop ro.build.version.sdk > "$GRAPH_QA_EVIDENCE/api.txt"
 adb shell getprop ro.product.cpu.abi > "$GRAPH_QA_EVIDENCE/abi.txt"
@@ -25,6 +31,8 @@ printf 'ABI: '; cat "$GRAPH_QA_EVIDENCE/abi.txt"
 cat "$GRAPH_QA_EVIDENCE/webview.txt"
 echo GRAPH_QA_RUNTIME_END
 cp "$RUNNER_TEMP/graph-qa/apk.sha256" "$GRAPH_QA_EVIDENCE/apk-sha256.txt"
+echo GRAPH_QA_PHASE_START_webview_checks
 node scripts/graph-qa/installed-app.mjs
+echo GRAPH_QA_PHASE_PASS_webview_checks
 adb shell dumpsys gfxinfo com.luckyray.mobile framestats > "$GRAPH_QA_EVIDENCE/frames.txt"
 adb shell dumpsys meminfo com.luckyray.mobile > "$GRAPH_QA_EVIDENCE/memory.txt"

@@ -2,10 +2,10 @@
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {initializeExpression,seedExpression} from './seed-expressions.mjs';
+import {initializeExpression,seedChunkExpression} from './seed-expressions.mjs';
 const out = process.env.GRAPH_QA_EVIDENCE;
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.CI_GRAPH_QA_REVIEWED !== 'yes' || process.env.ANDROID_SERIAL !== 'emulator-5554' || !out) throw Error('isolated QA guard');
-const adb = (...args) => execFileSync('adb', ['-s', process.env.ANDROID_SERIAL, ...args], {encoding:'utf8'}).trim();
+const adb = (...args) => execFileSync('adb', ['-s', process.env.ANDROID_SERIAL, ...args], {encoding:'utf8',timeout:30000}).trim();
 if (!adb('shell','dumpsys','package','com.luckyray.mobile').includes('DEBUGGABLE')) throw Error('debug package required for synthetic native seeding');
 const delay = ms => new Promise(r => setTimeout(r, ms));
 let socket;
@@ -22,11 +22,19 @@ const page=targets.find(t=>t.type==='page' && /^(https?:\/\/tauri\.localhost(?:[
 if(!page) throw Error('packaged app WebView page missing');
 const ws=new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((r,j)=>{ws.addEventListener('open',r,{once:true});ws.addEventListener('error',j,{once:true});});
-let id=0; const pending=new Map(); const results=[]; const unexpectedOrigins=new Set();
-ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(m.method==='Network.requestWillBeSent'){try{const u=new URL(m.params.request.url);if(/^https?:$/.test(u.protocol)&&!['tauri.localhost','ipc.localhost','127.0.0.1'].includes(u.hostname))unexpectedOrigins.add(u.origin);}catch{}}if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(Error(m.error.message)):p.resolve(m.result);}});
+let id=0; const pending=new Map(); const results=[]; const unexpectedOrigins=new Set(); const runtimeErrors=[];
+function captureRuntimeError(kind, raw) {
+ const text=String(raw || '').slice(0,1200).replace(/(?:token|secret|password|authorization|credential|jwt|cookie)\s*[:=]\s*[^\s,;]+/gi,'[redacted]');
+ if(runtimeErrors.length<30)runtimeErrors.push({kind,text});
+ writeFileSync(join(out,'webview-runtime-errors.json'),JSON.stringify(runtimeErrors,null,2));
+}
+ws.addEventListener('message',e=>{const m=JSON.parse(e.data);
+ if(m.method==='Runtime.exceptionThrown')captureRuntimeError('uncaught',m.params.exceptionDetails?.exception?.description||m.params.exceptionDetails?.text);
+ if(m.method==='Log.entryAdded'&&m.params.entry?.level==='error')captureRuntimeError('log-error',m.params.entry.text);
+ if(m.method==='Runtime.consoleAPICalled'&&m.params.type==='error')captureRuntimeError('console-error',m.params.args.map(a=>a.description||a.value||'').join(' '));if(m.method==='Network.requestWillBeSent'){try{const u=new URL(m.params.request.url);if(/^https?:$/.test(u.protocol)&&!['tauri.localhost','ipc.localhost','127.0.0.1'].includes(u.hostname))unexpectedOrigins.add(u.origin);}catch{}}if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(Error(m.error.message)):p.resolve(m.result);}});
 function send(method,params={}) {return new Promise((resolve,reject)=>{const key=++id; const timer=setTimeout(()=>{pending.delete(key);reject(Error(`CDP timeout: ${method}`));},600000);pending.set(key,{resolve,reject,timer});ws.send(JSON.stringify({id:key,method,params}));});}
 async function evaluate(expression) {const r=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error('WebView evaluation failed: '+(r.exceptionDetails.exception?.description||r.exceptionDetails.text));return r.result.value;}
-async function check(name, fn) {const started=Date.now();await fn();results.push({name,status:'passed',elapsedMs:Date.now()-started});writeFileSync(join(out,'checks.json'),JSON.stringify({source:process.env.GITHUB_SHA,emulationMode:process.env.GRAPH_EMULATION_MODE,results,limitations:['Not physical Xiaomi hardware','Runtime WebView version recorded separately','Pinch injected via CDP into real WebView, not OS-wide multitouch instrumentation','No multi-vault switching yet','No OS process-death persistence test; reload and tab reentry only','No exact WebView83 claim','No physical ARM64 or MIUI coverage','No full5000-note load or native profiler trace']},null,2));}
+async function check(name, fn) {const started=Date.now();console.log('GRAPH_QA_CHECK_START '+name);await fn();console.log('GRAPH_QA_CHECK_PASS '+name+' elapsedMs='+(Date.now()-started));results.push({name,status:'passed',elapsedMs:Date.now()-started});writeFileSync(join(out,'checks.json'),JSON.stringify({source:process.env.GITHUB_SHA,emulationMode:process.env.GRAPH_EMULATION_MODE,results,limitations:['Not physical Xiaomi hardware','Runtime WebView version recorded separately','Pinch injected via CDP into real WebView, not OS-wide multitouch instrumentation','No multi-vault switching yet','No OS process-death persistence test; reload and tab reentry only','No exact WebView83 claim','No physical ARM64 or MIUI coverage','No full5000-note load or native profiler trace']},null,2));}
 async function poll(expr,timeout=30000) {const deadline=Date.now()+timeout;do{if(await evaluate(expr))return;await delay(250);}while(Date.now()<deadline);throw Error('UI condition deadline');}
 async function clickSelector(selector) {
  const rect=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
@@ -45,20 +53,30 @@ async function clickText(text) {
  await delay(150);
 }
 const sessionExpression = `(()=>{const id=document.querySelector('[aria-label="图谱知识库"]')?.value;const s=JSON.parse(localStorage.getItem('luckyray.mobile.graph.v1:'+id)||'null');return s?.tabs.find(t=>t.id===s.activeId);})()`;
-async function screenshot(name,logProof=false) {const metrics=await send('Page.getLayoutMetrics'); const s=metrics.cssVisualViewport||metrics.visualViewport;const shot=await send('Page.captureScreenshot',{format:'png',clip:{x:0,y:0,width:s.clientWidth,height:s.clientHeight,scale:1}});writeFileSync(join(out,`${name}.png`),Buffer.from(shot.data,'base64'));if(logProof){const small=await send('Page.captureScreenshot',{format:'png',clip:{x:0,y:0,width:s.clientWidth,height:s.clientHeight,scale:0.5}});if(small.data.length<=300000)console.log(`GRAPH_QA_PNG_BEGIN ${name}\n${small.data}\nGRAPH_QA_PNG_END ${name}`);}}
+async function screenshot(name,logProof=false) {const metrics=await send('Page.getLayoutMetrics'); const s=metrics.cssVisualViewport||metrics.visualViewport;const shot=await send('Page.captureScreenshot',{format:'png',clip:{x:0,y:0,width:s.clientWidth,height:s.clientHeight,scale:1}});writeFileSync(join(out,`${name}.png`),Buffer.from(shot.data,'base64'));if(logProof){const proof=shot.data.length<=300000?shot:await send('Page.captureScreenshot',{format:'png',clip:{x:0,y:0,width:s.clientWidth,height:s.clientHeight,scale:0.5}});if(proof.data.length<=300000)console.log(`GRAPH_QA_PNG_BEGIN ${name}\n${proof.data}\nGRAPH_QA_PNG_END ${name}`);}}
 try {
- await send('Runtime.enable');await send('Network.enable');
+ await send('Runtime.enable');await send('Network.enable');await send('Log.enable');
  await check('native-bridge-ready',()=>poll(`Boolean(window.__TAURI_INTERNALS__ && document.querySelector('#root')?.children.length)`));
  await check('empty-native-vault-preflight',async()=>{
  const value=await evaluate(initializeExpression());
  if(value.state!=='ready')throw Error('synthetic empty migration not ready');
  });
  await check('native-seed-1000-notes',async()=>{
- const count=await evaluate(seedExpression(1000));
- if(count!==1000)throw Error('native note count mismatch');
+ const started=Date.now();
+ for(let start=0;start<1000;start+=25){
+   const count=await evaluate(seedChunkExpression(1000,start,25));
+   if(count!==start+25)throw Error('native synthetic chunk count mismatch; no retry');
+   console.log('GRAPH_QA_NATIVE_SEED_PROGRESS '+count+'/1000 elapsedMs='+(Date.now()-started));
+ }
+ writeFileSync(join(out,'native-seed-setup.json'),JSON.stringify({count:1000,chunkSize:25,elapsedMs:Date.now()-started,retries:0}));
  });
- await check('open-graph-real-ui',async()=>{await clickText('知识');await delay(300);await clickText('图谱');await poll(`Boolean(document.querySelector('.mg-canvas canvas')) && !document.querySelector('.mg-status') && !document.querySelector('.mg-notice[role="alert"]')`,120000);});
- await delay(800);await screenshot('graph-synthetic',true);
+ await check('open-graph-real-ui',async()=>{await clickText('知识');await delay(300);await clickText('图谱');await poll(`Boolean(document.querySelector('.mg-canvas canvas')) && !document.querySelector('.mg-status') && !document.querySelector('.mg-notice[role="alert"]') && !document.querySelector('.mg-canvas-warning')`,120000);});
+ await delay(800);
+ await check('native-worker-no-fallback-warning',async()=>{
+   if(await evaluate(`Boolean(document.querySelector('.mg-canvas-warning'))`))throw Error('Native graph worker fallback warning visible');
+   if(runtimeErrors.some(e=>e.kind==='uncaught'||/worker|mobileGraph|graphLayout/i.test(e.text)))throw Error('Native graph runtime error; see bounded diagnostic');
+ });
+ await screenshot('graph-synthetic',true);
  await check('pinch-zoom-real-webview-touch',async()=>{
    await clickText('适应画布');await poll(`(${sessionExpression})?.camera?.scale > 0`);
    const before=await evaluate(sessionExpression);

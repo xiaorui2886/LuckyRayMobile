@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';
-import {initializeExpression,seedExpression} from './seed-expressions.mjs';
+import {initializeExpression,seedExpression,seedChunkExpression} from './seed-expressions.mjs';
 function runtime(overrides={}) {
  const notes=[],calls=[],events=[];
  const ready={items:[{localVaultId:'local',binding:null,migrationState:'ready'}],selectedVaultId:'local'};
@@ -27,3 +27,15 @@ test('bound or nonempty native vault cannot be seeded',async()=>{
  const full=runtime({managed_vault_note_list:()=>({total:1})});await assert.rejects(vm.runInContext(seedExpression(20),full.context),/nonempty/);assert.equal(full.notes.length,0);
 });
 test('seeding expression rejects invalid or injected sizes',()=>{for(const n of [0,19,5001,1.5,'1000);evil()'])assert.throws(()=>seedExpression(n));});
+
+test('40 chunks create the same 1000 native Markdown notes without duplicates; replay rejected',async()=>{
+ const r=runtime();for(let start=0;start<1000;start+=25)assert.equal(await vm.runInContext(seedChunkExpression(1000,start,25),r.context),start+25);
+ const whole=runtime();await vm.runInContext(seedExpression(1000),whole.context);
+ assert.equal(JSON.stringify(r.notes),JSON.stringify(whole.notes));
+ await assert.rejects(vm.runInContext(seedChunkExpression(1000,975,25),r.context),/chunk boundary/);
+ assert.equal(r.notes.length,1000);
+});
+test('invalid chunk or out-of-sequence chunk never writes',async()=>{
+ for(const args of [[1000,-1,25],[1000,1000,25],[1000,0,51],[1000,0,0],[1000,1.5,25]])assert.throws(()=>seedChunkExpression(...args));
+ const r=runtime();await assert.rejects(vm.runInContext(seedChunkExpression(1000,25,25),r.context),/chunk boundary/);assert.equal(r.notes.length,0);
+});
