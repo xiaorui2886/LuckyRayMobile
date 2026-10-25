@@ -109,3 +109,24 @@ the existing matching key, verify the final certificate and APK checksum, and
 only then update in place. Back up the installed APK first. A mismatch must
 stop installation; do not uninstall or clear data to work around it. The
 release build mode does not imply stable-release acceptance or store signing.
+
+
+## Managed local-vault React DOM validation (optional local tools)
+
+The explicit CI Lite unit/contract list includes the managed-vault, import-intent,
+resource, wiki identity and multi-vault scheduler tests. The React DOM suites are
+separate: the production lockfile does not include jsdom, and CI does not silently
+install or run it.
+
+To run these suites with an existing, pinned jsdom 26.1.0 test-tools installation:
+
+```sh
+LR_DOM_TEST_TOOLS=/absolute/path/to/test-tools/node_modules node scripts/check-managed-dom.mjs
+# Or include them after the complete CI Lite equivalent:
+LR_DOM_TEST_TOOLS=/absolute/path/to/test-tools/node_modules node scripts/run-ci-lite-local.mjs --with-managed-dom
+```
+
+The scripts fail explicitly if the requested DOM tools are absent or have a
+different version. They do not download packages. They use real React and actual
+production UI components with synthetic native/API seams. Passing them does not
+prove Android lifecycle behavior, device rendering, or real data migration.

@@ -1,3 +1,4 @@
+import { withLocalNoteAttachments, type LocalNoteAttachment } from './localNoteAttachments.ts';
 // Cached-body provenance helpers (STABILITY-FIX-R1 Finding A).
 //
 // A Desktop change/summary page may carry a revision WITHOUT `content`. The
@@ -18,6 +19,7 @@
 
 /** Shape of a cached Desktop note as returned by the Mobile local API. */
 export type CachedNote = {
+  localAttachments?: LocalNoteAttachment[];
   content?: string;
   revision?: string;
   dirty?: boolean;
@@ -128,7 +130,7 @@ export function noteStatusClass(status: NoteStatus): string {
  * blank out attachments that are still legitimately cached.
  */
 export function cachedResources(note: CachedNote | null): any[] {
-  return note?.cachedDocument?.resources ?? [];
+  return withLocalNoteAttachments(note?.cachedDocument?.resources ?? [], note?.localAttachments);
 }
 
 /** The revision the cached body corresponds to (the edit baseline). */

@@ -6,6 +6,7 @@ use crate::{build_pair_request_body, companion_error_note};
 use crate::pinning::build_pinned_client_config;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
+pub(crate) mod response_policy;
 
 pub const ERROR_REVISION_CONFLICT: &str = "REVISION_CONFLICT";
 pub const ERROR_CURSOR_TOO_OLD: &str = "CURSOR_TOO_OLD";
@@ -42,11 +43,68 @@ pub struct GatewayClient {
     fp: String,
     base: String,
     token: String,
+    scope_headers: reqwest::header::HeaderMap,
+    legacy_knowledge: std::sync::atomic::AtomicBool,
+    require_scope_marker: std::sync::atomic::AtomicBool,
+    protocol_key: std::sync::Mutex<Option<String>>,
 }
 
 impl GatewayClient {
     pub fn new(fp: &str, base: &str, token: &str) -> Self {
-        Self { fp: fp.to_string(), base: base.trim_end_matches('/').to_string(), token: token.to_string() }
+        Self { fp: fp.to_string(), base: base.trim_end_matches('/').to_string(), token: token.to_string(), scope_headers: Default::default(), legacy_knowledge: std::sync::atomic::AtomicBool::new(false), require_scope_marker: std::sync::atomic::AtomicBool::new(false), protocol_key: Default::default() }
+    }
+
+    pub(crate) fn set_scope_proof(&self, key: String, reusable: bool) {
+        if let Ok(mut saved) = self.protocol_key.lock() { *saved = Some(key); }
+        self.require_scope_marker.store(reusable, std::sync::atomic::Ordering::Release);
+    }
+    pub(crate) fn scope_marker_required(&self) -> bool {
+        self.require_scope_marker.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(crate) fn retire_scope_proof(&self) {
+        if let Ok(key) = self.protocol_key.lock() {
+            if let Some(key) = key.as_deref() { crate::content::retire_protocol_proof(key); }
+        }
+    }
+    pub(crate) fn check_scope_response(&self, response: &reqwest::Response) -> Result<(), String> {
+        let headers=response.headers();
+        let result=response_policy::scope_marker(self.scope_marker_required(),response.status().as_u16(),
+            headers.get("x-luckyray-scope-protocol").and_then(|v|v.to_str().ok()),
+            headers.get_all("x-luckyray-scope-protocol").iter().count());
+        if result.is_err() || response.status().as_u16()==426 { self.retire_scope_proof(); }
+        result
+    }
+    /// Immutable per-request routing. Never change global Desktop selection.
+    pub(crate) fn scoped(mut self, library: Option<&str>, vault: Option<&str>) -> Result<Self, String> {
+        for (name, value) in [("x-luckyray-material-library", library), ("x-luckyray-knowledge-vault", vault)] {
+            if let Some(value) = value {
+                if value.is_empty() || value.len() > 160 || value.trim() != value || value.chars().any(char::is_control) {
+                    return Err("CONTENT_SCOPE_INVALID".into());
+                }
+                let header = HeaderValue::from_str(value).map_err(|_| "CONTENT_SCOPE_INVALID")?;
+                self.scope_headers.insert(name, header);
+            }
+        }
+        Ok(self)
+    }
+
+    fn effective_scope_headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = self.scope_headers.clone();
+        if self.legacy_knowledge.load(std::sync::atomic::Ordering::Acquire) {
+            headers.remove("x-luckyray-knowledge-vault");
+        }
+        headers
+    }
+    pub(crate) fn set_legacy_knowledge(&self, legacy: bool) {
+        self.legacy_knowledge.store(legacy, std::sync::atomic::Ordering::Release);
+    }
+    pub(crate) fn legacy_knowledge(&self) -> bool {
+        self.legacy_knowledge.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Discovery must never accidentally apply a selection header before the
+    /// per-device catalog has proved the selection protocol is available.
+    pub(crate) async fn unscoped_get(&self, path: &str) -> Result<(u16, Value), String> {
+        Self::new(&self.fp, &self.base, &self.token).content_request(reqwest::Method::GET, path, None).await
     }
 
     pub fn ws_url(&self) -> String {
@@ -79,6 +137,7 @@ impl GatewayClient {
     pub(crate) fn media_client_req(&self) -> Result<reqwest::Client, String> {
         let config = build_pinned_client_config(&self.fp)?;
         reqwest::Client::builder().use_preconfigured_tls(config)
+            .default_headers(self.effective_scope_headers())
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
@@ -105,6 +164,7 @@ impl GatewayClient {
         let config = build_pinned_client_config(&self.fp)?;
         reqwest::Client::builder()
             .use_preconfigured_tls(config)
+            .default_headers(self.effective_scope_headers())
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -113,18 +173,30 @@ impl GatewayClient {
 
     fn bearer(&self) -> reqwest::header::HeaderMap {
         let mut h = reqwest::header::HeaderMap::new();
+        h.insert("x-luckyray-request-id", HeaderValue::from_str(&response_policy::request_id()).expect("ASCII request id"));
         if let Ok(v) = HeaderValue::from_str(&self.ws_authorization()) {
             h.insert(AUTHORIZATION, v);
         }
         h
     }
 
+    fn bearer_for_request(&self, request_id: &str) -> reqwest::header::HeaderMap {
+        let mut headers = self.bearer();
+        // RequestBuilder::header appends. Replace the default correlation ID
+        // in the map so the strict Companion parser receives exactly one.
+        headers.insert("x-luckyray-request-id", HeaderValue::from_str(request_id).expect("ASCII request id"));
+        headers
+    }
+
     pub(crate) async fn content_get(&self, path: &str) -> Result<Value, String> {
         let mut resp = self.client()?.get(format!("{}{}", self.base, path)).headers(self.bearer())
-            .send().await.map_err(|_| "CONTENT_OFFLINE".to_string())?;
+            // JSON metadata must not inherit the five-minute media budget.
+            .timeout(std::time::Duration::from_secs(20))
+            .send().await.map_err(|error| {self.retire_scope_proof(); if error.is_timeout() { "CONTENT_TIMEOUT".to_string() } else { "CONTENT_OFFLINE".to_string() }})?;
+        self.check_scope_response(&resp)?;
         let status = resp.status();
         let mut bytes = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|_| "CONTENT_OFFLINE".to_string())? {
+        while let Some(chunk) = resp.chunk().await.map_err(|error| {self.retire_scope_proof(); if error.is_timeout() { "CONTENT_TIMEOUT".to_string() } else { "CONTENT_OFFLINE".to_string() }})? {
             if bytes.len() + chunk.len() > 8 * 1024 * 1024 { return Err("CONTENT_RESPONSE_TOO_LARGE".into()); }
             bytes.extend_from_slice(&chunk);
         }
@@ -136,15 +208,20 @@ impl GatewayClient {
     }
 
     pub(crate) async fn content_mutate(&self, path: &str, method: reqwest::Method, payload: &Value) -> Result<(u16, Value), String> {
-        let mut response = self.client()?.request(method,format!("{}{}",self.base,path)).headers(self.bearer()).json(payload)
-            .send().await.map_err(|_| "CONTENT_OFFLINE")?;
+        let request_id=response_policy::request_id();
+        let mut response = self.client()?.request(method,format!("{}{}",self.base,path)).headers(self.bearer_for_request(&request_id)).json(payload)
+            .send().await.map_err(|_| {self.retire_scope_proof(); "CONTENT_OFFLINE"})?;
+        self.check_scope_response(&response)?;
         let status = response.status().as_u16();
+        let response_headers=response.headers().clone();
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| "CONTENT_OFFLINE")? {
+        while let Some(chunk) = response.chunk().await.map_err(|_| {self.retire_scope_proof(); "CONTENT_OFFLINE"})? {
             if bytes.len()+chunk.len()>8*1024*1024 {return Err("CONTENT_RESPONSE_TOO_LARGE".into());}
             bytes.extend_from_slice(&chunk);
         }
-        let value = serde_json::from_slice(&bytes).map_err(|_| "CONTENT_RESPONSE_INVALID")?;
+        let mut value = serde_json::from_slice(&bytes).map_err(|_| "CONTENT_RESPONSE_INVALID")?;
+        Self::response_diagnostics(&mut value,status,&request_id,&response_headers);
+        if status>=400 {response_policy::qa_failure(path,status,&value);}
         Ok((status,value))
     }
 
@@ -160,10 +237,13 @@ impl GatewayClient {
         path: &str,
         raw: Option<(&[u8], &[(String, String)])>,
     ) -> Result<(u16, Value), String> {
+        let metadata_read = method == reqwest::Method::GET && raw.is_none();
+        let request_id=response_policy::request_id();
         let mut builder = self
             .client()?
             .request(method, format!("{}{}", self.base, path))
-            .headers(self.bearer());
+            .headers(self.bearer_for_request(&request_id));
+        if metadata_read { builder = builder.timeout(std::time::Duration::from_secs(20)); }
         if let Some((bytes, headers)) = raw {
             let mut map = reqwest::header::HeaderMap::new();
             for (name, value) in headers {
@@ -174,18 +254,27 @@ impl GatewayClient {
             }
             builder = builder.headers(map).body(bytes.to_vec());
         }
-        let mut response = builder.send().await.map_err(|_| "CONTENT_OFFLINE")?;
+        let mut response = builder.send().await.map_err(|error| {self.retire_scope_proof(); if metadata_read && error.is_timeout() { "CONTENT_TIMEOUT" } else { "CONTENT_OFFLINE" }})?;
+        self.check_scope_response(&response)?;
         let status = response.status().as_u16();
+        let response_headers=response.headers().clone();
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| "CONTENT_OFFLINE")? {
+        while let Some(chunk) = response.chunk().await.map_err(|error| {self.retire_scope_proof(); if metadata_read && error.is_timeout() { "CONTENT_TIMEOUT" } else { "CONTENT_OFFLINE" }})? {
             if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
                 return Err("CONTENT_RESPONSE_TOO_LARGE".into());
             }
             bytes.extend_from_slice(&chunk);
         }
-        let value: Value =
+        let mut value: Value =
             serde_json::from_slice(&bytes).map_err(|_| "CONTENT_RESPONSE_INVALID".to_string())?;
+        Self::response_diagnostics(&mut value,status,&request_id,&response_headers);
+        if status>=400 {response_policy::qa_failure(path,status,&value);}
         Ok((status, value))
+    }
+
+    fn response_diagnostics(value: &mut Value, status: u16, request_id: &str, headers: &HeaderMap) {
+        let header=|name|headers.get(name).and_then(|value|value.to_str().ok());
+        response_policy::enrich_error(value,status,request_id,header("retry-after"),header("x-luckyray-stage"),header("x-luckyray-reason"));
     }
 
     async fn get_json(&self, path: &str) -> Result<Value, String> {
@@ -282,7 +371,8 @@ impl GatewayClient {
         if let Some(e) = etag {
             req = req.header("If-None-Match", e);
         }
-        let mut resp = req.send().await.map_err(|_| "thumbnail: offline".to_string())?;
+        let mut resp = req.send().await.map_err(|_| {self.retire_scope_proof(); "thumbnail: offline".to_string()})?;
+        self.check_scope_response(&resp)?;
         let status = resp.status();
         let resp_etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let mime = resp.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("image/png").to_string();
@@ -296,7 +386,7 @@ impl GatewayClient {
             return Err(format!("thumbnail http {status}"));
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|_| "thumbnail: interrupted".to_string())? {
+        while let Some(chunk) = resp.chunk().await.map_err(|_| {self.retire_scope_proof(); "thumbnail: interrupted".to_string()})? {
             if bytes.len() + chunk.len() > crate::THUMBNAIL_MAX_BYTES { return Err("thumbnail: too large".into()); }
             bytes.extend_from_slice(&chunk);
         }
@@ -485,5 +575,91 @@ mod tests {
             Some(ERROR_CURSOR_TOO_OLD)
         );
         assert_eq!(response_protocol_error_code(&headers, &json!({})), Some(ERROR_CURSOR_TOO_OLD));
+    }
+}
+
+#[cfg(test)]
+mod saved_library_headers_tests {
+    use super::*;
+    #[test]
+    fn routing_headers_are_immutable_per_gateway_and_invalid_values_fail_closed() {
+        let a = GatewayClient::new("fp", "https://localhost", "fixture").scoped(Some("a"), Some("vault-a")).unwrap();
+        let b = GatewayClient::new("fp", "https://localhost", "fixture").scoped(Some("b"), None).unwrap();
+        assert_eq!(a.scope_headers["x-luckyray-material-library"], "a");
+        assert_eq!(a.scope_headers["x-luckyray-knowledge-vault"], "vault-a");
+        assert_eq!(b.scope_headers["x-luckyray-material-library"], "b");
+        assert!(!b.scope_headers.contains_key("x-luckyray-knowledge-vault"));
+        a.set_legacy_knowledge(true);
+        assert!(!a.effective_scope_headers().contains_key("x-luckyray-knowledge-vault"));
+        assert_eq!(a.effective_scope_headers()["x-luckyray-material-library"], "a");
+        a.set_legacy_knowledge(false);
+        assert_eq!(a.effective_scope_headers()["x-luckyray-knowledge-vault"], "vault-a");
+        assert!(GatewayClient::new("fp", "https://localhost", "fixture").scope_headers.is_empty());
+        for bad in ["", " a", "a\r\nx-header:wrong"] {
+            assert!(GatewayClient::new("fp", "https://localhost", "fixture").scoped(Some(bad), None).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod scoped_response_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Synthetic loopback HTTP fixture exercises the real response consumer, not
+    // TLS or app pairing. Production URLs still come from pinned pair capture.
+    async fn fixture(marker: bool, status: u16, retry: Option<&str>) -> (String, tokio::task::JoinHandle<String>) {
+        // Full host dev-dependencies also enable aws-lc; production Android
+        // uses ring. Select the existing production provider for this fixture.
+        let _=rustls::crypto::ring::default_provider().install_default();
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url=format!("http://{}",listener.local_addr().unwrap());
+        let retry=retry.map(str::to_owned);
+        let task=tokio::spawn(async move {
+            let (mut stream,_)=listener.accept().await.unwrap();let mut request=vec![0;8192];
+            let n=stream.read(&mut request).await.unwrap();let request=String::from_utf8_lossy(&request[..n]).to_ascii_lowercase();
+            assert!(request.contains("x-luckyray-material-library: fixture-a"));
+            assert!(request.contains("x-luckyray-request-id: m-"));
+            assert_eq!(request.lines().filter(|line| line.starts_with("x-luckyray-request-id:")).count(),1,
+                "Companion rejects duplicate headers before authentication");
+            let request_id=request.lines().find_map(|line|line.strip_prefix("x-luckyray-request-id:")).unwrap().trim().to_owned();
+            let body=if status==429 {r#"{"code":"RATE_LIMITED"}"#} else {r#"{"items":["wrong-scope-data"]}"#};
+            let mut headers=format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",body.len());
+            if marker {headers.push_str("X-LuckyRay-Scope-Protocol: 1\r\n");}
+            if let Some(retry)=retry {headers.push_str(&format!("Retry-After: {retry}\r\n"));}
+            headers.push_str("\r\n");headers.push_str(body);
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            request_id
+        });
+        (url,task)
+    }
+    #[tokio::test]
+    async fn actual_gateway_rejects_unmarked_downgrade_before_json_or_thumbnail_acceptance() {
+        for thumbnail in [false,true] {
+            let (url,server)=fixture(false,200,None).await;
+            let gateway=GatewayClient::new(&"00".repeat(32),&url,"synthetic-only").scoped(Some("fixture-a"),None).unwrap();
+            gateway.set_scope_proof("synthetic-proof-key".into(),true);
+            let error=if thumbnail {gateway.fetch_thumbnail("fixture-asset",None).await.unwrap_err()}
+                else {gateway.content_request(reqwest::Method::GET,"/v1/services/materials/assets/fixture-asset",None).await.unwrap_err()};
+            assert_eq!(error,"CONTENT_UPGRADE_REQUIRED");server.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn actual_gateway_preserves_denial_and_unshortened_retry_after() {
+        let (url,server)=fixture(false,429,Some("60")).await;
+        let gateway=GatewayClient::new(&"00".repeat(32),&url,"synthetic-only").scoped(Some("fixture-a"),None).unwrap();
+        gateway.set_scope_proof("synthetic-proof-key".into(),true);
+        let (status,body)=gateway.content_request(reqwest::Method::GET,"/v1/services/materials/assets/fixture-asset",None).await.unwrap();
+        assert_eq!(status,429);assert_eq!(body["code"],"RATE_LIMITED");assert_eq!(body["retryAfterMs"],60_000);
+        assert_eq!(body["requestId"],server.await.unwrap());
+    }
+    #[tokio::test]
+    async fn actual_gateway_mutation_sends_one_correlated_request_id() {
+        let (url,server)=fixture(true,429,Some("60")).await;
+        let gateway=GatewayClient::new(&"00".repeat(32),&url,"synthetic-only").scoped(Some("fixture-a"),None).unwrap();
+        let (status,body)=gateway.content_mutate("/v1/services/materials/assets/fixture-asset",reqwest::Method::PATCH,&serde_json::json!({"synthetic":true})).await.unwrap();
+        assert_eq!(status,429);assert_eq!(body["code"],"RATE_LIMITED");
+        assert!(body["requestId"].as_str().is_some_and(|id|id.starts_with("m-")));
+        assert_eq!(body["requestId"],server.await.unwrap());
     }
 }

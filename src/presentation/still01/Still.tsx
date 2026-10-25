@@ -1,3 +1,7 @@
+import {useNoteViewportStability} from './editor/noteViewportStability';
+import { useHorizontalSwipe } from "../../still/kit/useHorizontalSwipe";
+import { useNoteChrome } from './editor/useNoteChrome';
+import { NoteBodyTransition } from './editor/NoteBodyTransition';
 import { systemBarScrim } from "../../services/systemBarAppearance";
 import { NoteActionIcon, noteActionPaths } from './editor/NoteActionIcon';
 import { type EditorCommand } from './editor/editorCommands';
@@ -54,7 +58,7 @@ export function SearchField({value,onChange,placeholder='搜索',autoFocus=false
 export function SearchLauncher({onClick}: {onClick:()=>void}){return <button className="st-search st-search-launcher" onClick={onClick}><Icon name="search" size={18}/><span>搜索手机上的内容</span></button>}
 export type Root='home'|'library'|'ai'|'knowledge'|'settings';
 export const ROOTS: {id:Root;label:string;icon:string}[]=[{id:'home',label:'首页',icon:'home'},{id:'library',label:'素材',icon:'library'},{id:'ai',label:'AI',icon:'ai'},{id:'knowledge',label:'知识',icon:'knowledge'},{id:'settings',label:'我的',icon:'user'}];
-export function TabBar({value,onChange}: {value:Root;onChange:(v:Root)=>void}){return <nav className="st-tab-wrap" aria-label="主要导航"><div className="st-tab-bar">{ROOTS.map(r=><button key={r.id} className={'st-tab'+(value===r.id?' is-current':'')} aria-label={r.label} aria-current={value===r.id?'page':undefined} onClick={()=>onChange(r.id)}><Icon name={r.icon} size={22}/></button>)}</div></nav>}
+export function TabBar({value,onChange}: {value:Root;onChange:(v:Root)=>void}){const swipe=useHorizontalSwipe(direction=>{const index=ROOTS.findIndex(r=>r.id===value)+(direction==='left'?1:-1);if(ROOTS[index])onChange(ROOTS[index].id)});return <nav data-swipe-owner="tabs" {...swipe} style={{touchAction:'pan-y'}} className="st-tab-wrap" aria-label="主要导航"><div className="st-tab-bar">{ROOTS.map(r=><button key={r.id} className={'st-tab'+(value===r.id?' is-current':'')} aria-label={r.label} aria-current={value===r.id?'page':undefined} onClick={()=>onChange(r.id)}><Icon name={r.icon} size={22}/></button>)}</div></nav>}
 export function SourceSwitch({value,onChange}:{value:'local'|'desktop';onChange:(v:'local'|'desktop')=>void}){return <div className="st-source" role="group" aria-label="内容来源"><span className={'st-source-glide '+(value==='desktop'?'is-desktop':'')} aria-hidden="true"/>{(['local','desktop'] as const).map(x=><button key={x} aria-pressed={x===value} onClick={()=>onChange(x)}><span className="st-source-label">{x==='local'?'本机':'电脑'}</span></button>)}</div>}
 export function Header({title,left,right}:{title?:ReactNode;left?:ReactNode;right?:ReactNode}){return <header className="st-header"><div className="st-header-side">{left}</div><div className="st-header-title">{title}</div><div className="st-header-side end">{right}</div></header>}
 export function SectionTitle({children,action}: {children:ReactNode;action?:ReactNode}){return <div className="st-section-label"><h2>{children}</h2>{action}</div>}
@@ -140,10 +144,17 @@ export function HomeCapture({root,onCapture}:{root:Root;onCapture:()=>void}){
 }
 
 export type NoteState='local'|'synced'|'metadata'|'outdated'|'pending'|'conflict'|'error';
-export interface NoteSurfaceProps {title:string;body:string;notebook:string;mode:'read'|'edit';state:NoteState;bodyAvailability?:"loading"|"online"|"offline"|"error";savedLabel?:string;onBack:()=>void;onBrowse:()=>void;onMore:()=>void;onNew:()=>void;onEdit:(bodyOffset?:number)=>void;onRead?:()=>void;onChange:(title:string,body:string)=>void;onFormat:()=>void;onSearch:()=>void;onState:()=>void;onAttach?:()=>void;onCommand?:(command:EditorCommand)=>void;onRelations?:()=>void;readOnly?:boolean;readingContent?:ReactNode;/** The same retained CM editor replaces only the body textarea. */bodyEditor?:ReactNode}
+export interface NoteSurfaceProps {title:string;body:string;notebook:string;mode:'read'|'edit';state:NoteState;bodyAvailability?:"loading"|"online"|"offline"|"error";savedLabel?:string;onBack:()=>void;onBrowse:()=>void;onMore:()=>void;onNew:()=>void;onEdit:(bodyOffset?:number)=>void;onRead?:()=>void;onChange:(title:string,body:string)=>void;onFormat:()=>void;onSearch:()=>void;onState:()=>void;onAttach?:()=>void;onCommand?:(command:EditorCommand)=>void;onRelations?:()=>void;readOnly?:boolean;readingContent?:ReactNode;/** The same retained CM editor replaces only the body textarea. */bodyEditor?:ReactNode;editorScope?:string;chromeBlocked?:boolean}
 export function NoteSurface(p:NoteSurfaceProps){
+ // Existing notes are moved by NotePaperRail; no second gesture owner here.
  const input=useRef<HTMLTextAreaElement>(null);
+ const titleInput=useRef<HTMLInputElement>(null);
+ // A committed reading transition ends title editing too; failed saves keep focus.
+ useLayoutEffect(()=>{const title=titleInput.current;if(p.mode==='read'&&title&&title.ownerDocument.activeElement===title)title.blur()},[p.mode]);
  const tools=useEditorTools();
+ useNoteViewportStability(tools.root);
+ const hasWarning=['metadata','conflict','error'].includes(p.state)&&p.bodyAvailability!=='loading';
+ useNoteChrome(tools.root,{scope:p.editorScope,mode:p.mode,blocked:p.chromeBlocked||hasWarning,keyboardOpen:tools.keyboardOpen});
  const commands=toolbarCommands(useToolbarPreferences());
  const gesture=useRef<{x:number;y:number;dragged:boolean}|null>(null);
  const pendingBody=useRef<number|null>(null);
@@ -162,21 +173,22 @@ export function NoteSurface(p:NoteSurfaceProps){
    if(selection&&!selection.isCollapsed)return;
    beginBody(event.detail===0?0:readingOffsetAtPoint(event.currentTarget,p.body,event.clientX,event.clientY));
  };
- return <div ref={tools.root} className={"st-note-surface"+(tools.expanded?" has-editor-tools":"")+(tools.titleFocused?" is-title-focused":"")}><Header left={<button type="button" className="st-icon-button" aria-label="打开笔记列表" title="打开笔记列表" onClick={p.onBrowse}><NoteActionIcon name="sidebar"/></button>} right={<div className="st-note-header-actions">
+ return <div ref={tools.root} style={{touchAction:"pan-y"}} className={"st-note-surface"+(tools.expanded?" has-editor-tools":"")+(tools.titleFocused?" is-title-focused":"")+(hasWarning?" has-note-warning":"")}><Header left={<button type="button" className="st-icon-button" aria-label="打开笔记列表" title="打开笔记列表" onClick={p.onBrowse}><NoteActionIcon name="sidebar"/></button>} right={<div className="st-note-header-actions">
    {!noBody&&<button type="button" className="st-icon-button" aria-label={p.mode==='edit'?'切换到阅读模式':'切换到编辑模式'} title={p.mode==='edit'?'阅读模式':'编辑模式'} disabled={p.mode==='edit'?!p.onRead:!editable} onPointerDown={e=>e.preventDefault()} onClick={()=>p.mode==='edit'?p.onRead?.():p.onEdit()}><NoteActionIcon name={p.mode==='edit'?'reading':'edit'}/></button>}
    {p.onRelations?<button type="button" className="st-icon-button" aria-label="笔记链接" title="笔记链接" onClick={p.onRelations}><NoteActionIcon name="more"/></button>:null}
  </div>}/>
 
  {warnings[p.state]&&p.bodyAvailability!=='loading'&&<Notice tone={p.state==='conflict'||p.state==='error'?'danger':p.state==='pending'?'pending':'muted'} onClick={p.onState}>{warnings[p.state]}</Notice>}
- <main className={'st-note-paper'+(p.mode==='edit'?' is-editing':'')}>
+ {/* Touch arbitration stops at this scroll container, before the outer swipe owner. */}
+ <main style={{touchAction:'pan-y'}} className={'st-note-paper'+(p.mode==='edit'?' is-editing':'')}>
  {noBody?<><h1>{p.title}</h1>{p.bodyAvailability==='loading'?<div className="st-note-opening" role="status" aria-label="正在读取笔记"><i/><i/><i/></div>:<Empty title={p.bodyAvailability==='online'||p.bodyAvailability==='error'?"正文暂未读取":"连接电脑后，继续阅读"} body={p.bodyAvailability==='online'||p.bodyAvailability==='error'?"正文还没有缓存到手机，请稍后重试。":"标题和位置已保存，正文尚未缓存。"}><Button kind="quiet" onClick={p.onState}>{p.bodyAvailability==='online'||p.bodyAvailability==='error'?"查看状态":"查看连接"}</Button></Empty>}</>:<>
- {editable?<input className="st-note-title" aria-label="笔记标题" value={p.title} onFocus={()=>{if(p.mode==='read')p.onEdit()}} onChange={e=>p.onChange(e.target.value,p.body)} placeholder="标题"/>:<h1>{p.title||'未命名笔记'}</h1>}
- {p.mode==='edit'&&editable?(p.bodyEditor??<textarea ref={input} className="st-note-editor" aria-label="笔记正文" value={p.body} onChange={e=>p.onChange(p.title,e.target.value)} placeholder="" spellCheck={false}/>):<div className={'st-note-prose'+(editable?' is-tap-editable':'')} tabIndex={editable?0:undefined} aria-label={editable?'笔记正文，点击输入':'笔记正文'}
+
+ <NoteBodyTransition heading={editable?<input ref={titleInput} className="st-note-title" aria-label="笔记标题" enterKeyHint="done" onKeyDown={e=>{if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229){e.preventDefault();p.onRead?.()}}} value={p.title} onFocus={()=>{if(p.mode==='read')p.onEdit()}} onChange={e=>p.onChange(e.target.value,p.body)} placeholder="标题"/>:<h1 className="st-note-title">{p.title||'未命名笔记'}</h1>} mode={p.mode==='edit'&&editable?'edit':'read'} scope={p.editorScope} body={p.body} editor={p.bodyEditor??<textarea ref={input} className="st-note-editor" aria-label="笔记正文" value={p.body} onChange={e=>p.onChange(p.title,e.target.value)} placeholder="" spellCheck={false}/>}><div className={'st-note-prose'+(editable?' is-tap-editable':'')} tabIndex={editable?0:undefined} aria-label={editable?'笔记正文，点击输入':'笔记正文'}
    onPointerDown={e=>{pointer.current=e.isPrimary&&e.button===0?{x:e.clientX,y:e.clientY,at:Date.now()}:null}}
    onPointerCancel={()=>{pointer.current=null}} onClick={tapBody}
    onKeyDown={e=>{if(editable&&e.target===e.currentTarget&&(e.key==='Enter'||e.key===' ')){e.preventDefault();beginBody(0)}}}>
    {p.readingContent||(p.body?p.body.split('\n\n').map((x,i)=><p key={i}>{x}</p>):<span className="st-note-placeholder" aria-hidden="true"/>)}
- </div>}
+ </div></NoteBodyTransition>
  </>}
  </main><div className="st-reader-bottom">
    <div className="st-reader-tools st-note-navigation" role="toolbar" aria-label="笔记工具">

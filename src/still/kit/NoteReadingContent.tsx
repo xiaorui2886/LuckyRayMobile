@@ -1,8 +1,12 @@
+import {allowNoteViewportNavigation} from '../../presentation/still01/editor/noteViewportStability';
+import type { ReadingHeadingIntent } from "./useNoteHeadingNavigation";
 import { useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
 import { takeCmReadingAnchor } from "../../presentation/still01/editor/cmEditorSessions";
-import { plainReadingBlocks, restoreReadingAnchor } from "../../presentation/still01/editor/noteReadingPosition";
+import { restoreReadingAnchor } from "../../presentation/still01/editor/noteReadingPosition";
 import { bodyMatchRanges, type NoteSearchTarget, type BodyRange } from "./noteSearch";
 import { NoteFindBar } from "./NoteFindBar";
+
+import { SafeNoteMarkdown } from "../../components/SafeNoteMarkdown";
 
 export type ReadingFind = { body: string; ranges: BodyRange[]; index: number };
 
@@ -25,8 +29,9 @@ export function ReadingText({ text, from, find }: { text: string; from: number; 
  * No mode/save/selection authority lives here, and the retained editor is not
  * moved when the user goes back to editing.
  */
-export function NoteReadingContent({ scope, body, title = "", children, search, onSearchChange, onDismissSearch }: {
+export function NoteReadingContent({ scope, body, title = "", children, search, onSearchChange, onDismissSearch, heading, onHeadingConsumed }: {
   scope: string; body: string; title?: string; children?: ReactNode | ((find: ReadingFind) => ReactNode); search?: NoteSearchTarget;
+  heading?: ReadingHeadingIntent; onHeadingConsumed?: () => void;
   onSearchChange?: (target: NoteSearchTarget) => void; onDismissSearch?: () => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
@@ -35,11 +40,19 @@ export function NoteReadingContent({ scope, body, title = "", children, search, 
   const find: ReadingFind = { body, ranges, index };
   useLayoutEffect(() => {
     const anchor = takeCmReadingAnchor(scope, body);
-    if (root.current && anchor) restoreReadingAnchor(root.current, anchor);
+    if (root.current && anchor && !heading) { allowNoteViewportNavigation(root.current); restoreReadingAnchor(root.current, anchor); }
   }, [scope]);
   useLayoutEffect(() => {
-    if (root.current && ranges[index]) restoreReadingAnchor(root.current, { offset: ranges[index].from, viewportFraction: .5, atStart: false });
+    if (!heading && root.current && ranges[index]) { allowNoteViewportNavigation(root.current); restoreReadingAnchor(root.current, { offset: ranges[index].from, viewportFraction: .5, atStart: false }); }
   }, [scope, body, search, index]);
+  const appliedHeading = useRef<ReadingHeadingIntent | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!heading || appliedHeading.current === heading || !root.current) return;
+    appliedHeading.current = heading;
+    allowNoteViewportNavigation(root.current);
+    restoreReadingAnchor(root.current, { offset: heading.offset, viewportFraction: .15, atStart: false });
+    onHeadingConsumed?.();
+  }, [heading, onHeadingConsumed]);
   const nextMatch = (step: number) => {
     if (search && ranges.length) onSearchChange?.({ ...search, bodyRange: ranges[(index + step + ranges.length) % ranges.length] });
   };
@@ -47,7 +60,6 @@ export function NoteReadingContent({ scope, body, title = "", children, search, 
     {search?.query ? <NoteFindBar query={search.query} count={ranges.length} index={index}
       noMatch={bodyMatchRanges(title, search.query).length ? "仅标题命中，正文无匹配" : "正文无匹配"}
       onNext={nextMatch} onClose={onDismissSearch} /> : null}
-    {!body ? <span className="st-note-placeholder" aria-hidden="true"/> : typeof children === "function" ? children(find) : children ?? plainReadingBlocks(body).map(({ text, from, to }, i) =>
-      <p key={i} data-note-source-start={from} data-note-source-end={to}><ReadingText text={text} from={from} find={find} /></p>)}
+    {!body ? <span className="st-note-placeholder" aria-hidden="true"/> : typeof children === "function" ? children(find) : children ?? <SafeNoteMarkdown content={body} find={find} />}
   </div>;
 }

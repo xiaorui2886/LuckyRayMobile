@@ -1157,7 +1157,7 @@ test("M20b — the page wires the real grant (no hardcoded writeGranted:true)", 
   assert.ok(coll.includes("writeGranted: moveGrant,"), "the directory feed carries the real grant");
   assert.doesNotMatch(coll, /writeGranted: true/u, "no hardcoded write grant survives");
   assert.ok(coll.includes("const moveAuthorityNow = desktopCtrl.moveAuthority();"), "the grant comes from the canonical discovery");
-  assert.ok(coll.includes("session.resolveMoveAuthority(instanceId)"), "submit-time truth re-resolves fresh");
+  assert.ok(coll.includes("session.resolveMoveAuthority(instanceId, desktop.vaultId)"), "submit-time truth re-resolves fresh");
 });
 
 // ---------------------------------------------------------------------------
@@ -2455,7 +2455,11 @@ test("R16-D2 — the detail drives the projection reconciliation", () => {
   const desktopPart = raw.slice(raw.indexOf("function DesktopStillNote"));
   const editFn = desktopPart.slice(desktopPart.indexOf("function edit(nextTitle"), desktopPart.indexOf("function insertFormat"));
   assert.ok(editFn.includes("session2.projection.upsert({"), "a successful edit upserts the projection (pending create AND canonical overlay)");
-  const versionFx = desktopPart.slice(desktopPart.indexOf("if (!epoch.current) return;"), desktopPart.indexOf("}, [version, instance, vault, id]"));
+  const versionStart = desktopPart.indexOf("if (!epoch.current) return;");
+  const versionEnd = desktopPart.indexOf("}, [version, instance, vault, id, mode]", versionStart);
+  assert.ok(versionStart >= 0 && versionEnd > versionStart, "inspect the exact current body-read effect");
+  const versionFx = desktopPart.slice(versionStart, versionEnd);
+  assert.ok(versionFx.includes("serial === readSerial.current") && versionFx.includes("settledNoteRead"), "late observations stay behind the shared read fence");
   assert.ok(versionFx.includes("session2.projection.update(instance, vault, id, {"),
     "a published observation updates the projection — it is KEPT (the list retires on convergence)");
   assert.ok(versionFx.includes("session2.desktop.fastRevalidate()"), "and runs the ONE quiet fast revalidate");

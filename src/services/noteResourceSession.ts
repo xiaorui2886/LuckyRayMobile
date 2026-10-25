@@ -1,9 +1,11 @@
 /** One mounted attachment's captured scope; native IPC remains the authority. */
-export type NoteResourceScope = { instance: string; vault: string; note: string };
-export type NoteResource = { resourceId: string; target: string; status: string; mimeType?: string; version?: string };
+export type NoteResourceScope = { instance: string; vault: string; note: string; localVaultId?: string; revision?: string };
+export type NoteResource = { resourceId: string; target: string; status: string; mimeType?: string; version?: string; localAttachmentId?: string; localOnly?: boolean };
 export type ResourceFile = { path: string; mime: string };
 export type ResourceView = { file: ResourceFile | null; busy: boolean; message: string };
 type ResourceEffects = {
+  managedVaultResourceGet?(localVaultId: string, noteId: string, target: string, expectedRevision: string): Promise<ResourceFile>;
+  contentNoteLocalAttachment?(instance: string, vault: string, note: string, op: string): Promise<ResourceFile>;
   contentCachedResource(instance: string, id: string, vault: string, note: string): Promise<ResourceFile>;
   contentNoteResource(instance: string, vault: string, note: string, id: string, job: string): Promise<ResourceFile>;
   contentCancel(job: string): Promise<void>;
@@ -31,16 +33,34 @@ export class NoteResourceSession {
   async start(): Promise<void> {
     const gen = this.generation;
     const { instance, vault, note } = this.scope;
+    if (this.scope.localVaultId) {
+      this.publish({ busy: true, message: "" });
+      try {
+        if (!this.effects.managedVaultResourceGet || !this.scope.revision) throw Error("MANAGED_RESOURCE_SCOPE_REQUIRED");
+        const file = await this.effects.managedVaultResourceGet(this.scope.localVaultId, note, this.resource.target, this.scope.revision);
+        if (!this.retired && gen === this.generation) this.publish({ file, busy: false });
+      } catch {
+        if (!this.retired && gen === this.generation) this.publish({ file: null, busy: false, message: "附件尚未完整保存到本地，或校验未通过。原始内容未改变。" });
+      }
+      return; // Managed files never fall through to Desktop cache or network.
+    }
     try {
       const file = await this.effects.contentCachedResource(instance, this.resource.resourceId, vault, note);
       if (!this.retired && gen === this.generation && !this.view.file) this.publish({ file });
     } catch { /* absent local cache is a normal state */ }
+    if (!this.retired && gen === this.generation && !this.view.file && this.resource.localAttachmentId && this.effects.contentNoteLocalAttachment) {
+      try {
+        const file = await this.effects.contentNoteLocalAttachment(instance, vault, note, this.resource.localAttachmentId);
+        if (!this.retired && gen === this.generation && !this.view.file) this.publish({ file });
+      } catch { /* Original phone copy may have been removed; retain remote fallback. */ }
+    }
     if (!this.retired && gen === this.generation && this.resource.mimeType?.startsWith("image/") && this.resource.status === "resolved") {
       await this.download();
     }
   }
   async download(): Promise<void> {
-    if (this.retired || !this.online || this.job || this.resource.status !== "resolved") return;
+    if (this.scope.localVaultId) { if (!this.retired && !this.view.busy) await this.start(); return; }
+    if (this.retired || !this.online || this.job || this.resource.localOnly || this.resource.status !== "resolved") return;
     const gen = ++this.generation;
     const job = `media-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     this.job = job; this.publish({ busy: true, message: "" });

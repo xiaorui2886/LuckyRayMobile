@@ -177,21 +177,22 @@ test("L11 — thumbnail keys are source-qualified", () => {
 });
 
 // 12. A Desktop owner change does not clear Local thumbnails.
-test("L12 — a Desktop owner change clears only the Desktop map", () => {
+test("L12 — exact-owner thumbnail namespaces survive switches and clear on unpair", () => {
   const lib = strip(read("src", "still", "StillLibrary.tsx"));
   // REPAIR-R5: the owner lifecycle is one AND the same transition as the first
   // request, so the clearing lives on the authority bind rather than on a
   // separate invalidation effect.
-  const marker = "desktopAuthority.bind(desktopOwner, DESKTOP_SOURCE());";
+  const marker = "desktopAuthority.bind(desktopOwner, source);";
   const idx = lib.indexOf(marker);
   assert.ok(idx > 0, "the owner bind exists");
   const body = lib.slice(idx, idx + 460);
-  assert.match(body, /setDesktopThumbs\(\{\}\)/u, "Desktop thumbnails are cleared");
+  assert.doesNotMatch(body, /setDesktopThumbs\(\{\}\)/u, "a scope switch retains decoded URLs without a blank frame");
+  assert.match(lib, /const thumbId = desktopThumbKey\(owner, desktopAssetId, "", false, library\)/u, "the retained URL has exact owner and library identity");
   assert.doesNotMatch(body, /setThumbMap\(\{\}\)/u, "Local thumbnails are NOT cleared");
   assert.match(lib, /const \[desktopThumbs, setDesktopThumbs\]/u, "separate Desktop namespace exists");
   assert.match(lib, /const \[thumbMap, setThumbMap\]/u, "separate Local namespace exists");
   // The unpaired branch clears the Desktop map too, and still never the Local one.
-  const off = lib.indexOf('desktopAuthority.bind("", DESKTOP_SOURCE());');
+  const off = lib.indexOf('desktopAuthority.bind("", source);');
   assert.ok(off > 0, "the unpaired branch retires the Desktop page");
   const offBody = lib.slice(off, off + 160);
   assert.match(offBody, /setDesktopThumbs\(\{\}\)/u, "Desktop thumbnails are cleared when unpaired");

@@ -1,32 +1,12 @@
+import {MarkdownParseClient,SYNC_MARKDOWN_LIMIT,ASYNC_MARKDOWN_LIMIT} from './markdownParseClient';
 import { StateEffect, StateField, type Extension, type EditorState } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet } from '@codemirror/view';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { unified } from 'unified';
-import remarkParse from 'remark-parse';
-import remarkGfm from 'remark-gfm';
-import { wikiSyntax } from '../../../still/kit/wikiSyntax';
 import { NoteResourceSession, type NoteResource, type NoteResourceScope } from '../../../services/noteResourceSession';
 import { api } from '../../../services/client';
 export type EditorImageScope=NoteResourceScope & {resources:NoteResource[];online:boolean};
-export function editorImageRanges(doc:string, resources:NoteResource[]):{from:number;at:number;resource:NoteResource}[]{
- if(doc.length>250_000)return [];
- const parser=unified().use(remarkParse).use(remarkGfm).use(wikiSyntax(doc,new Map()));
- const tree=parser.runSync(parser.parse(doc));const found:{from:number;at:number;resource:NoteResource}[]=[];
- const byTarget=new Map(resources.filter(r=>r.status==='resolved'&&r.mimeType?.startsWith('image/')).map(r=>[r.target,r]));
- const definitions=new Map<string,string>();
- const collect=(node:any)=>{if(node.type==='definition'&&typeof node.identifier==='string'&&typeof node.url==='string')definitions.set(node.identifier.toLowerCase(),node.url);node.children?.forEach(collect)};
- collect(tree);
- const visit=(node:any)=>{if(found.length>=24)return;
-  const url=typeof node.url==='string'?node.url:node.type==='imageReference'?definitions.get(String(node.identifier).toLowerCase()):undefined;
-  if(['image','imageReference'].includes(node.type)&&typeof url==='string'){
-   let target=url;try{target=decodeURIComponent(target)}catch{}
-   const resource=byTarget.get(url)||byTarget.get(target);
-   if(resource&&Number.isInteger(node.position?.start?.offset)&&Number.isInteger(node.position?.end?.offset))found.push({from:node.position.start.offset,at:node.position.end.offset,resource});
-  }
-  if(!['code','inlineCode','html'].includes(node.type))node.children?.forEach(visit);
- };
- visit(tree);return found;
-}
+export { editorImageRanges } from './editorImageRanges';
+import { editorImageRanges } from './editorImageRanges';
 class InlineImage extends WidgetType {
  constructor(readonly scope:EditorImageScope,readonly resource:NoteResource,readonly block=true){super()}
  eq(other:InlineImage){return this.block===other.block&&JSON.stringify([this.scope.instance,this.scope.vault,this.scope.note,this.scope.online,this.resource])===JSON.stringify([other.scope.instance,other.scope.vault,other.scope.note,other.scope.online,other.resource])}
@@ -72,33 +52,52 @@ export function imageSourceIsActive(state:EditorState, from:number, to:number, f
  return focused && state.selection.ranges.some(range=>range.empty
   ? range.head>=from && range.head<=to : range.from<to && range.to>from);
 }
-export function cmInlineImages(scope:EditorImageScope,initialFocused=false):Extension {
+export function cmInlineImages(scope:EditorImageScope,initialFocused=false,onSettled?:(view:EditorView,available:boolean)=>void):Extension {
  const refresh=StateEffect.define<null>();
  const focus=StateEffect.define<boolean>();
- const build=(state:EditorState,focused:boolean)=>Decoration.set(editorImageRanges(state.doc.toString(),scope.resources).flatMap(({from,at,resource})=>{
+ const composition=StateEffect.define<boolean>();
+ let forceRaw=false;
+ let cachedDoc:EditorState['doc']|undefined,cachedRanges:ReturnType<typeof editorImageRanges>=[];
+ const result=StateEffect.define<{doc:EditorState['doc'];ranges:ReturnType<typeof editorImageRanges>}>();
+ const ranges=(state:EditorState)=>{if(state.doc!==cachedDoc){if(state.doc.length>SYNC_MARKDOWN_LIMIT)return null;cachedDoc=state.doc;cachedRanges=editorImageRanges(state.doc.toString(),scope.resources)}return cachedRanges};
+ const build=(state:EditorState,focused:boolean,previous=Decoration.none)=>{if(state.doc.length>ASYNC_MARKDOWN_LIMIT||forceRaw&&state.doc.length>SYNC_MARKDOWN_LIMIT)return Decoration.none;const parsed=ranges(state);if(!parsed)return previous.update({filter:(from,to)=>!imageSourceIsActive(state,from,to,focused)});return Decoration.set(parsed.flatMap(({from,at,resource})=>{
   if(imageSourceIsActive(state,from,at,focused))return [];
   const line=state.doc.lineAt(from),end=state.doc.lineAt(at);
   const block=line.number===end.number && !line.text.slice(0,from-line.from).trim() && !line.text.slice(at-line.from).trim();
   return [Decoration.replace({widget:new InlineImage(scope,resource,block),block,inclusive:false}).range(from,at)];
- }),true);
- const field=StateField.define<{decorations:DecorationSet;focused:boolean}>({
-  create:state=>({decorations:build(state,initialFocused),focused:initialFocused}),
+ }),true)};
+ const field=StateField.define<{decorations:DecorationSet;focused:boolean;composing:boolean}>({
+  create:state=>({decorations:build(state,initialFocused),focused:initialFocused,composing:false}),
   update(value,tr){
-   let focused=value.focused;
-   for(const effect of tr.effects)if(effect.is(focus))focused=effect.value;
-   if(tr.isUserEvent('input.type.compose'))return {focused,decorations:value.decorations.map(tr.changes)};
-   if(tr.docChanged||tr.selection||focused!==value.focused||tr.effects.some(e=>e.is(refresh)))return {focused,decorations:build(tr.state,focused)};
+   let focused=value.focused,composing=value.composing;
+   for(const effect of tr.effects){if(effect.is(focus))focused=effect.value;if(effect.is(composition))composing=effect.value}
+   if(composing||tr.isUserEvent('input.type.compose'))return {focused,composing,decorations:value.decorations.map(tr.changes)};
+   for(const effect of tr.effects)if(effect.is(result)&&effect.value.doc===tr.state.doc){cachedDoc=effect.value.doc;cachedRanges=effect.value.ranges;return {focused,composing,decorations:build(tr.state,focused)}}
+   if(tr.docChanged||tr.selection||focused!==value.focused||composing!==value.composing||tr.effects.some(e=>e.is(refresh)))return {focused,composing,decorations:build(tr.state,focused,value.decorations.map(tr.changes))};
    return value;
   },provide:f=>EditorView.decorations.from(f,value=>value.decorations)
  });
  const settle=ViewPlugin.fromClass(class {
-  frame=0;dead=false;
-  constructor(readonly view:EditorView){view.contentDOM.addEventListener('compositionend',this.end)}
+  frame=0;dead=false;requested:EditorState['doc']|undefined;requestId=0;pending:ReturnType<typeof editorImageRanges>|null=null;client:MarkdownParseClient<ReturnType<typeof editorImageRanges>>;
+  constructor(readonly view:EditorView){
+   this.client=new MarkdownParseClient('images',(parsed,id)=>{if(this.dead||id!==this.requestId||this.requested!==view.state.doc)return;forceRaw=false;this.pending=parsed;this.apply()},()=>{if(!this.dead){forceRaw=true;if(!view.composing&&!view.compositionStarted&&!view.state.field(field).composing)view.dispatch({effects:refresh.of(null)});this.notifySettled()}});
+   view.contentDOM.addEventListener('compositionstart',this.start);view.contentDOM.addEventListener('compositionend',this.end);this.schedule();
+  }
+  notifySettled(){queueMicrotask(()=>{if(this.dead||this.view.composing||this.view.compositionStarted||this.view.state.field(field).composing)return;if(cachedDoc===this.view.state.doc||forceRaw||this.view.state.doc.length>ASYNC_MARKDOWN_LIMIT)onSettled?.(this.view, !forceRaw && this.view.state.doc.length <= ASYNC_MARKDOWN_LIMIT)})}
+  schedule(){const doc=this.view.state.doc;if(this.requested===doc)return;this.pending=null;this.requested=doc;
+   if(doc.length<=SYNC_MARKDOWN_LIMIT||doc.length>ASYNC_MARKDOWN_LIMIT){if(doc.length<=SYNC_MARKDOWN_LIMIT)forceRaw=false;this.client.cancel();this.notifySettled();return}
+   this.requestId=this.client.request(doc.toString(),scope.resources,!cachedDoc);
+  }
+  apply(){if(this.dead||!this.pending||this.requested!==this.view.state.doc||this.view.composing||this.view.compositionStarted||this.view.state.field(field).composing)return;
+   const ranges=this.pending;this.pending=null;this.view.dispatch({effects:result.of({doc:this.view.state.doc,ranges})});this.notifySettled();
+  }
+  update(update:any){if(update.docChanged)this.schedule()}
+  start=()=>{if(!this.dead)this.view.dispatch({effects:composition.of(true)})}
   end=()=>{cancelAnimationFrame(this.frame);this.frame=requestAnimationFrame(()=>{
    if(this.dead)return;if(this.view.composing||this.view.compositionStarted){this.end();return}
-   this.view.dispatch({effects:refresh.of(null)});
+   this.view.dispatch({effects:[composition.of(false),refresh.of(null)]});this.schedule();this.apply();this.notifySettled();
   })};
-  destroy(){this.dead=true;cancelAnimationFrame(this.frame);this.view.contentDOM.removeEventListener('compositionend',this.end)}
+  destroy(){this.dead=true;this.client.destroy();cancelAnimationFrame(this.frame);this.view.contentDOM.removeEventListener('compositionstart',this.start);this.view.contentDOM.removeEventListener('compositionend',this.end)}
  });
  return [field,settle,EditorView.domEventHandlers({
   focus:(_event,view)=>{view.dispatch({effects:focus.of(true)});return false},

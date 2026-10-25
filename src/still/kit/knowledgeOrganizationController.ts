@@ -466,17 +466,18 @@ export const NO_MOVE_AUTHORITY: MoveAuthority = {
 export async function resolveMoveAuthority(deps: {
   registry: ServiceRegistry;
   knowledge: KnowledgeClient;
-}, instanceId: string): Promise<MoveAuthority> {
+}, instanceId: string, vaultId?: string): Promise<MoveAuthority> {
   if (!instanceId) return NO_MOVE_AUTHORITY;
   try {
-    const catalog = await deps.registry.refreshAdopting(instanceId);
+    const registry = deps.registry.forScope?.(instanceId, vaultId ? {vault:vaultId} : undefined) ?? deps.registry;
+    const catalog = await registry.refreshAdopting(instanceId, vaultId ? {vault:vaultId} : undefined);
     void catalog;
-    const moveState = deps.registry.operation("knowledge.move").state;
+    const moveState = registry.operation("knowledge.move").state;
     if (moveState !== "implemented") {
       return { ...NO_MOVE_AUTHORITY, moveState };
     }
-    const page = await deps.knowledge.vaults(instanceId);
-    const active = (page?.items ?? []).find((v) => v.activeInDesktop) ?? null;
+    const page = await deps.knowledge.vaults(instanceId, vaultId);
+    const active = (page?.items ?? []).find((v) => vaultId ? v.vaultId === vaultId : v.activeInDesktop) ?? null;
     if (!active) return { ...NO_MOVE_AUTHORITY, moveState };
     return {
       vaultId: active.vaultId,

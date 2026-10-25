@@ -1,0 +1,197 @@
+/* Settings child pages only. Keep the approved overview, shared sheet geometry,
+   safe-area authority and all note/collection surfaces unchanged. */
+.st-app .st-settings-page .st-scroll {
+  padding-top: 8px;
+  padding-bottom: calc(var(--st-safe-bottom) + 32px);
+  scroll-padding-bottom: 24px;
+}
+.st-app .st-settings-page .st-header-title {
+  font-size: 1.07em;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--st-ink);
+  white-space: normal;
+  overflow-wrap: break-word;
+  padding: 10px 0;
+}
+.st-app .st-settings-page .st-section-label {
+  margin-top: 24px;
+  margin-bottom: 9px;
+}
+.st-app .st-settings-page .st-scroll > .st-section-label:first-child { margin-top: 8px; }
+.st-app .st-settings-page .st-section-label h2 {
+  font-size: .86em;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: .02em;
+}
+.st-app .st-settings-page .st-settings-group,
+.st-app .st-settings-page .st-settings-card,
+.st-app .st-settings-page .st-empty {
+  min-width: 0;
+  background: var(--st-card, var(--st-sheet));
+  border: 1px solid var(--st-line);
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(29, 32, 44, .035);
+}
+.st-app .st-settings-page .st-settings-group { padding: 0 14px; }
+.st-app .st-settings-page .st-settings-card { padding: 16px; }
+.st-app .st-settings-page .st-row { min-height: 68px; padding: 14px 0!important; }
+.st-app .st-settings-page .st-row-copy strong {
+  font-size: 1em;
+  font-weight: 550;
+  line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.st-app .st-settings-page .st-row-copy small {
+  font-size: .86em;
+  line-height: 1.6;
+  margin-top: 5px;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.st-app .st-settings-page .st-row-end {
+  max-width: 46%;
+  min-width: 15px;
+  font-size: .86em;
+  line-height: 1.5;
+  text-align: right;
+  color: var(--st-secondary);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.st-app .st-settings-page .st-row:active:not(:disabled) { border-radius: 10px; }
+.st-app .st-settings-page .st-sheet-copy {
+  font-size: .93em;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.st-app .st-settings-page .st-settings-card > .st-sheet-copy:last-child { margin-bottom: 0!important; }
+.st-app .st-settings-page .st-settings-card > .st-sheet-copy:first-child { margin-top: 0!important; }
+.st-app .st-settings-diagnostics > .st-sheet-copy:first-child { color: var(--st-ink); font-weight: 550; }
+.st-app .st-settings-page .st-empty {
+  padding: 28px 18px 24px;
+  margin: 8px 0 20px;
+}
+.st-app .st-settings-page .st-empty-symbol { margin-bottom: 16px; color: var(--st-accent); }
+.st-app .st-settings-page .st-empty h2 { font-size: 1.21em; font-weight: 600; line-height: 1.55; }
+.st-app .st-settings-page .st-empty p { font-size: .93em; line-height: 1.75; }
+.st-app .st-settings-page .st-empty-actions { margin-top: 20px; }
+.st-app .st-settings-page .st-button {
+  max-width: 100%;
+  min-height: 46px;
+  padding: 10px 16px!important;
+  font-size: 1em!important;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.st-app .st-settings-connect .st-notice {
+  margin: 12px 0;
+  padding: 12px 14px;
+  background: var(--st-card, var(--st-sheet));
+  border: 1px solid var(--st-line);
+  border-radius: 12px;
+  font-size: .93em;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+.st-app .st-settings-connect .st-field {
+  font-size: .93em;
+  line-height: 1.6;
+}
+.st-app .st-settings-connect .st-field textarea {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-height: 132px;
+  margin-top: 10px;
+  padding: 14px;
+  border: 1px solid var(--st-line);
+  border-radius: 14px;
+  background: var(--st-card, var(--st-sheet));
+  color: var(--st-ink);
+  font-size: 1em;
+  line-height: 1.65;
+  resize: vertical;
+}
+.st-app .st-settings-connect .st-field textarea:focus {
+  border-color: var(--st-accent);
+  box-shadow: inset 0 0 0 1px var(--st-accent);
+}
+.st-app .st-settings-appearance .st-theme-pair {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-gap: 12px;
+  margin-top: 0;
+}
+.st-app .st-settings-appearance .st-theme-choice {
+  min-width: 0;
+  padding: 10px 10px 0!important;
+  background: var(--st-card, var(--st-sheet));
+  border-radius: 16px;
+  /* An inset stroke avoids selection changing dimensions. */
+  box-shadow: inset 0 0 0 1px var(--st-line)!important;
+}
+.st-app .st-settings-appearance .st-theme-choice[aria-pressed=true] {
+  box-shadow: inset 0 0 0 2px var(--st-accent)!important;
+}
+.st-app .st-settings-appearance .st-theme-preview { min-width: 0; padding: 12px; }
+.st-app .st-settings-appearance .st-theme-preview b { font-size: .93em; overflow-wrap: anywhere; }
+.st-app .st-settings-appearance .caption { font-size: .93em; min-height: 46px; font-weight: 550; }
+.st-app .st-settings-appearance .st-option { min-height: 72px; padding: 14px 0!important; }
+.st-app .st-settings-appearance .st-option > span { min-width: 0; font-size: 1em; line-height: 1.55; }
+.st-app .st-settings-appearance .st-option small { font-size: .86em; line-height: 1.6; margin-top: 5px; }
+.st-app[data-mode=dark] .st-settings-page .st-settings-group,
+.st-app[data-mode=dark] .st-settings-page .st-settings-card,
+.st-app[data-mode=dark] .st-settings-page .st-empty { box-shadow: 0 2px 8px rgba(0, 0, 0, .16); }
+@media (max-width: 360px) {
+  .st-app .st-settings-page .st-scroll { padding-left: 16px; padding-right: 16px; }
+  .st-app .st-settings-page .st-settings-group { padding-left: 12px; padding-right: 12px; }
+  .st-app .st-settings-page .st-row-end { margin-left: 8px; max-width: 44%; }
+  .st-app .st-settings-appearance .st-theme-pair { grid-gap: 10px; }
+  .st-app .st-settings-appearance .st-theme-preview { padding: 10px; }
+}
+/* A non-layout scope lets storage/connection sibling dialogs inherit this
+   treatment without changing their containing block or shared Sheet contract. */
+.st-settings-overlay-scope { display: contents; }
+.st-app .st-settings-overlay-scope .st-sheet-body,
+.st-app .st-settings-page .st-sheet-body { padding-top: 14px; }
+.st-app .st-settings-overlay-scope .st-sheet-heading,
+.st-app .st-settings-page .st-sheet-heading { height: auto; min-height: 45px; }
+.st-app .st-settings-overlay-scope .st-sheet-heading h2,
+.st-app .st-settings-page .st-sheet-heading h2 { font-size: 1.14em; line-height: 1.5; font-weight: 600; padding: 6px 0; overflow-wrap: anywhere; }
+.st-app .st-settings-overlay-scope .st-sheet .st-option,
+.st-app .st-settings-page .st-sheet .st-option {
+  min-height: 54px;
+  padding: 12px!important;
+  border-radius: 10px;
+  background: transparent;
+}
+.st-app .st-settings-overlay-scope .st-sheet .st-option > span,
+.st-app .st-settings-page .st-sheet .st-option > span { min-width: 0; font-size: 1em; line-height: 1.6; overflow-wrap: anywhere; }
+.st-app .st-settings-overlay-scope .st-sheet .st-option small,
+.st-app .st-settings-page .st-sheet .st-option small { font-size: .86em; line-height: 1.6; }
+.st-app .st-settings-overlay-scope .st-sheet .st-option[aria-pressed=true],
+.st-app .st-settings-page .st-sheet .st-option[aria-pressed=true] { background: var(--st-selected); }
+.st-app .st-settings-overlay-scope .st-sheet-copy { font-size: .93em; line-height: 1.75; overflow-wrap: anywhere; word-break: break-word; }
+.st-app .st-settings-overlay-scope .st-sheet-footer,
+.st-app .st-settings-page .st-sheet-footer { flex-wrap: wrap; }
+.st-app .st-settings-overlay-scope .st-sheet-footer .st-button,
+.st-app .st-settings-page .st-sheet-footer .st-button {
+  max-width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  padding: 10px 16px!important;
+  margin-top: 4px;
+  font-size: 1em!important;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.st-app .st-settings-overlay-scope .st-sheet .st-option + .st-option,
+.st-app .st-settings-page .st-sheet .st-option + .st-option { border-top: 1px solid var(--st-line); border-radius: 0; }
+.st-app .st-settings-overlay-scope .st-sheet .st-option:active:not(:disabled),
+.st-app .st-settings-page .st-sheet .st-option:active:not(:disabled) { background: var(--st-surface); }

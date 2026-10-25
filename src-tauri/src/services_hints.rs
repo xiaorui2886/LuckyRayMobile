@@ -34,7 +34,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{Manager, State};
 
-use crate::content::expected_gateway;
+use crate::content::expected_scoped_gateway;
 
 /// Bounded hint buffer: hints are wake-up targets, so a small ring is enough
 /// and a misbehaving peer can never grow Mobile memory.
@@ -577,6 +577,12 @@ impl HintStreamState {
 /// hint, which fails closed (the caller stops the worker).
 pub fn parse_hint(text: &str) -> Result<Option<Value>, ()> {
     let value: Value = serde_json::from_str(text).map_err(|_| ())?;
+    for field in ["materialLibraryId", "vaultId"] {
+        if let Some(id) = value.get(field) {
+            let id = id.as_str().ok_or(())?;
+            if id.is_empty() || id.len() > 160 || id.chars().any(char::is_control) { return Err(()); }
+        }
+    }
     let kind = value.get("kind").and_then(Value::as_str).ok_or(())?;
     if !HINT_KINDS.contains(&kind) {
         return Err(());
@@ -655,14 +661,21 @@ pub async fn services_hints_start(
     shared: State<'_, crate::SharedState>,
     hints: State<'_, ManagedHintState>,
     instance: String,
+    library: Option<String>,
+    vault: Option<String>,
 ) -> Result<StartOutcome, String> {
     if instance.is_empty() {
         return Err("SOURCE_CHANGED".to_string());
     }
     // Capture the expected owner + pinned gateway BEFORE the worker starts, so a
     // wrong/absent Desktop never opens a socket.
-    let gateway = expected_gateway(&shared, &instance).map_err(|_| "SOURCE_CHANGED".to_string())?;
+    let gateway = expected_scoped_gateway(&shared, &instance, library.as_deref(), vault.as_deref()).map_err(|_| "SOURCE_CHANGED".to_string())?;
 
+    gateway.require_scope_protocol(&shared).await?;
+    static SCOPES: std::sync::OnceLock<Mutex<Option<(String, Option<String>, Option<String>)>>> = std::sync::OnceLock::new();
+    let mut scope = SCOPES.get_or_init(Default::default).lock().map_err(|_| "SOURCE_CHANGED")?;
+    let selected = (instance.clone(), library.clone(), vault.clone());
+    if scope.as_ref() != Some(&selected) { hints.retire(); *scope = Some(selected); }
     let generation = match hints.begin(&instance) {
         BeginOutcome::AlreadyRunning(generation) => {
             return Ok(StartOutcome::AlreadyRunning { generation })
@@ -670,6 +683,7 @@ pub async fn services_hints_start(
         BeginOutcome::Started(generation) => generation,
     };
 
+    let vault = gateway.wire_vault(vault);
     let url = gateway.services_hint_url();
     let authorization = gateway.ws_authorization();
     let fingerprint = gateway.pinned_fingerprint().to_string();
@@ -687,6 +701,8 @@ pub async fn services_hints_start(
             generation,
             shared_for_task,
             owner,
+            library,
+            vault,
         )
         .await;
     });

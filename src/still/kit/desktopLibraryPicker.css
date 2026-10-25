@@ -1,0 +1,9 @@
+/* Reuse the original source segment sizing and colors inside the existing sheet. */
+.st-directory-tabs button[aria-selected=true]{color:var(--st-ink);font-weight:500}
+.st-directory-tabs button:focus-visible{outline:2px solid var(--st-accent);outline-offset:2px}
+.st-directory-panel{min-height:180px}
+.st-directory-panel[hidden]{display:none}
+.st-library-option>span:first-child{min-width:0;overflow-wrap:anywhere;word-break:break-word;padding-right:12px}
+.st-library-option>svg{flex-shrink:0}
+.st-library-option:disabled{opacity:.55}
+.st-library-option:disabled[aria-pressed=true]{opacity:1}

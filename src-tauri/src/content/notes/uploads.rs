@@ -78,7 +78,7 @@ async fn request(
     method: reqwest::Method,
     body: &Value,
 ) -> Result<Value, String> {
-    let (status, result) = source.gateway.content_mutate(path, method, body).await?;
+    let (status, result) = source.mutate(state, path, method, body).await?;
     source.check(state)?;
     if status == 200 {
         return Ok(result);
@@ -184,4 +184,69 @@ pub(super) async fn upload_pending(
         completed += 1;
     }
     Ok(completed)
+}
+
+/// Materialize only a durable attachment owned by this exact note into the
+/// existing asset-protocol cache. This works offline; it grants no remote read.
+#[tauri::command]
+pub(crate) async fn content_note_local_attachment(
+    state: State<'_, SharedState>, app: tauri::AppHandle,
+    instance: String, vault: String, note: String, op: String,
+) -> Result<Value, String> {
+    for id in [&instance, &vault, &note, &op] { public_id(id)?; }
+    let resource_authority = with_db(&state, |db| db.content_resource_authority())?;
+    let epochs = scope_epochs(&instance)?;
+    let (lifecycle, _) = connection_controls(&state);
+    let connection_epoch = lifecycle.observe();
+    let check = || -> Result<(), String> {
+        if lifecycle.observe() != connection_epoch || scope_epochs(&instance)?.1 != epochs.1 { return Err("CONTENT_SOURCE_CHANGED".into()); }
+        with_db(&state, |db| {
+            if db.paired()?.is_none_or(|p| p.instance_id != instance) || db.content_resource_authority()? != resource_authority { return Err("CONTENT_SOURCE_CHANGED".into()); }
+            Ok(())
+        })
+    };
+    check()?;
+    let saved = with_db(&state, |db| db.content_local_attachment_file(&instance, &vault, &note, &op))?;
+    let resource_id = format!("local-attachment-{op}");
+    if let Ok(cached) = crate::content::content_cached_resource(state.clone(), app.clone(), instance.clone(), None, resource_id.clone(), Some(vault.clone()), Some(note.clone())).await {
+        if cached["etag"] == saved["sha256"] {
+            with_db(&state, |db| db.content_local_attachment_file(&instance, &vault, &note, &op))?;
+            check()?;
+            return Ok(cached);
+        }
+    }
+    let root = app.path().app_data_dir().map_err(|_| "CONTENT_NOT_CACHED")?.join("content-drafts")
+        .canonicalize().map_err(|_| "CONTENT_NOT_CACHED")?;
+    let source = std::path::PathBuf::from(saved["path"].as_str().ok_or("CONTENT_NOT_CACHED")?)
+        .canonicalize().map_err(|_| "CONTENT_NOT_CACHED")?;
+    if source.parent() != Some(root.as_path()) { return Err("CONTENT_NOT_CACHED".into()); }
+    let size = saved["sizeBytes"].as_u64().filter(|n| *n > 0 && *n <= 64 * 1024 * 1024).ok_or("CONTENT_NOT_CACHED")?;
+    let hash = saved["sha256"].as_str().filter(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit())).ok_or("CONTENT_NOT_CACHED")?;
+    let metadata = tokio::fs::metadata(&source).await.map_err(|_| "CONTENT_NOT_CACHED")?;
+    if !metadata.is_file() || metadata.len() != size { return Err("CONTENT_ATTACHMENT_CHANGED".into()); }
+    let file = tokio::fs::File::open(&source).await.map_err(|_| "CONTENT_NOT_CACHED")?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(size + 1).read_to_end(&mut bytes).await.map_err(|_| "CONTENT_NOT_CACHED")?;
+    if bytes.len() as u64 != size || format!("{:x}", Sha256::digest(&bytes)) != hash { return Err("CONTENT_ATTACHMENT_CHANGED".into()); }
+    check()?;
+    // Recheck deletion/scope after I/O before making pixels readable.
+    with_db(&state, |db| db.content_local_attachment_file(&instance, &vault, &note, &op))?;
+    let key = format!("{:x}", Sha256::digest(format!("{instance}:note:{vault}:{note}:{resource_id}")));
+    let cache = app.path().app_cache_dir().map_err(|_| "CONTENT_CACHE_UNAVAILABLE")?.join("content-resources");
+    tokio::fs::create_dir_all(&cache).await.map_err(|_| "CONTENT_CACHE_UNAVAILABLE")?;
+    let extension = match saved["mime"].as_str().unwrap_or("").split(';').next().unwrap_or("") {
+        "image/jpeg" => "jpg", "image/png" => "png", "image/webp" => "webp", "image/gif" => "gif",
+        "image/svg+xml" => "svg", "video/mp4" => "mp4", "audio/mpeg" => "mp3", "application/pdf" => "pdf", _ => "bin",
+    };
+    let filename = format!("{key}-{hash}.{extension}");
+    let path = cache.join(&filename);
+    let temp = cache.join(format!("{key}-{}.tmp", uuid::Uuid::new_v4()));
+    tokio::fs::write(&temp, &bytes).await.map_err(|_| "CONTENT_CACHE_UNAVAILABLE")?;
+    tokio::fs::rename(&temp, &path).await.map_err(|_| "CONTENT_CACHE_UNAVAILABLE")?;
+    let metadata = json!({"resourceAuthority":resource_authority,"fileName":filename,"mime":saved["mime"],"etag":hash,"sizeBytes":size});
+    let meta_temp = cache.join(format!("{key}-{}.json.tmp", uuid::Uuid::new_v4()));
+    tokio::fs::write(&meta_temp, metadata.to_string()).await.map_err(|_| "CONTENT_CACHE_UNAVAILABLE")?;
+    tokio::fs::rename(meta_temp, cache.join(format!("{key}.json"))).await.map_err(|_| "CONTENT_CACHE_UNAVAILABLE")?;
+    check()?;
+    Ok(json!({"path":path.to_string_lossy(),"mime":saved["mime"],"etag":hash,"sizeBytes":size,"cached":true}))
 }

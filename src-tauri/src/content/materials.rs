@@ -48,6 +48,7 @@ fn mutation_error(status: u16, body: &Value) -> String {
 async fn send(
     state: &SharedState,
     expected_instance: &str,
+    library: Option<&str>,
     capability: &str,
     path: String,
     method: reqwest::Method,
@@ -56,7 +57,7 @@ async fn send(
     if expected_instance.is_empty() {
         return Err("CONTENT_SOURCE_CHANGED".into());
     }
-    let source = Source::capture(state)?;
+    let source = Source::capture(state)?.scoped(library, None)?;
     // CROSS-DEVICE WRITE INTEGRITY: the UI decided this mutation belongs to a
     // specific Desktop. If the live connection has moved on, the request must
     // not be retargeted at the new one — bail out BEFORE the capability probe
@@ -71,7 +72,8 @@ async fn send(
     if source.instance != expected_instance {
         return Err("CONTENT_SOURCE_CHANGED".into());
     }
-    let (status, body) = source.gateway.content_mutate(&path, method, &payload).await?;
+    source.check(state)?;
+    let (status, body) = source.mutate(state, &path, method, &payload).await?;
     if !(200..300).contains(&status) {
         return Err(mutation_error(status, &body));
     }
@@ -84,6 +86,7 @@ async fn send(
 pub(crate) async fn content_material_set_favorite(
     state: State<'_, SharedState>,
     instance: String,
+    library: Option<String>,
     asset_id: String,
     favorited: bool,
 ) -> Result<Value, String> {
@@ -94,6 +97,7 @@ pub(crate) async fn content_material_set_favorite(
     send(
         &state,
         &instance,
+        library.as_deref(),
         "materialFavorite",
         format!("/v1/assets/{}/favorite", encode(&asset_id)),
         reqwest::Method::POST,
@@ -106,6 +110,7 @@ pub(crate) async fn content_material_set_favorite(
 pub(crate) async fn content_material_set_tags(
     state: State<'_, SharedState>,
     instance: String,
+    library: Option<String>,
     asset_id: String,
     set: Option<Vec<String>>,
     add: Option<Vec<String>>,
@@ -133,6 +138,7 @@ pub(crate) async fn content_material_set_tags(
     send(
         &state,
         &instance,
+        library.as_deref(),
         "materialTags",
         format!("/v1/assets/{}/tags", encode(&asset_id)),
         reqwest::Method::PATCH,
@@ -145,6 +151,7 @@ pub(crate) async fn content_material_set_tags(
 pub(crate) async fn content_material_set_folder(
     state: State<'_, SharedState>,
     instance: String,
+    library: Option<String>,
     asset_id: String,
     folder_id: Option<String>,
 ) -> Result<Value, String> {
@@ -161,6 +168,7 @@ pub(crate) async fn content_material_set_folder(
     send(
         &state,
         &instance,
+        library.as_deref(),
         "materialFolders",
         format!("/v1/assets/{}/folder", encode(&asset_id)),
         reqwest::Method::PATCH,
@@ -173,6 +181,7 @@ pub(crate) async fn content_material_set_folder(
 pub(crate) async fn content_material_create_tag(
     state: State<'_, SharedState>,
     instance: String,
+    library: Option<String>,
     name: String,
     color: Option<String>,
 ) -> Result<Value, String> {
@@ -186,7 +195,7 @@ pub(crate) async fn content_material_create_tag(
         }
     }
     let payload = serde_json::json!({ "name": name, "color": color });
-    send(&state, &instance, "materialTags", "/v1/assets/tags".into(), reqwest::Method::POST, payload)
+    send(&state, &instance, library.as_deref(), "materialTags", "/v1/assets/tags".into(), reqwest::Method::POST, payload)
         .await
 }
 
@@ -194,6 +203,7 @@ pub(crate) async fn content_material_create_tag(
 pub(crate) async fn content_material_create_folder(
     state: State<'_, SharedState>,
     instance: String,
+    library: Option<String>,
     name: String,
     parent_id: Option<String>,
 ) -> Result<Value, String> {
@@ -207,7 +217,7 @@ pub(crate) async fn content_material_create_folder(
         }
     }
     let payload = serde_json::json!({ "name": name, "parentId": parent_id });
-    send(&state, &instance, "materialFolders", "/v1/assets/folders".into(), reqwest::Method::POST, payload)
+    send(&state, &instance, library.as_deref(), "materialFolders", "/v1/assets/folders".into(), reqwest::Method::POST, payload)
         .await
 }
 
@@ -215,6 +225,7 @@ pub(crate) async fn content_material_create_folder(
 pub(crate) async fn content_material_batch(
     state: State<'_, SharedState>,
     instance: String,
+    library: Option<String>,
     asset_ids: Vec<String>,
     favorited: Option<bool>,
     add: Option<Vec<String>>,
@@ -257,6 +268,7 @@ pub(crate) async fn content_material_batch(
     send(
         &state,
         &instance,
+        library.as_deref(),
         "materialBatch",
         "/v1/assets/favorite-batch".into(),
         reqwest::Method::POST,

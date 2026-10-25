@@ -67,7 +67,7 @@ export const productionPreviewReader: PreviewReader = (instance, vault, ids) =>
 export type DesktopOwnerView = { paired: boolean; connected: boolean; instanceId: string };
 
 /** A stable cold snapshot per (instanceId, phase) — first-frame truth, no old rows. */
-function coldSnapshotFor(instanceId: string, phase: "waiting-catalog" | "offline" | "unpaired"): KnowledgeBrowseSnapshot {
+function coldSnapshotFor(instanceId: string, phase: "waiting-catalog" | "offline" | "unpaired" | "not-granted"): KnowledgeBrowseSnapshot {
   return {
     phase, instanceId, vaultId: "", vaultName: "",
     query: "", rows: [], nextAfterId: null, hasMore: false,
@@ -106,6 +106,12 @@ export class PreviewRetainer {
 
   private emit(): void {
     for (const fn of this.listeners) fn();
+  }
+
+  clearScope(instance: string, vault: string): void {
+    const key = previewStoreKey(instance, vault);
+    this.tokens.set(key, (this.tokens.get(key) ?? 0) + 1);
+    this.stores.delete(key); this.covered.delete(key); this.emit();
   }
 
   /** The retained store for exactly this owner (null = never loaded). */
@@ -165,7 +171,7 @@ export type KnowledgeSessionDeps = {
  * gate the retained list. Canonical list refresh stays owned by owner/pairing
  * changes, connection flips, query changes, and the explicit user Refresh.
  */
-export type DesktopGateInput = DesktopOwnerView;
+export type DesktopGateInput = DesktopOwnerView & { vaultId?: string; readable?: boolean };
 
 /** Retained Knowledge UI request identity (R4.2 P1-A6 + ORG-1A). */
 export type KnowledgeUiState = {
@@ -205,7 +211,7 @@ export type KnowledgeSession = {
    * write grant + knowledge.move operation state) through the SAME injected
    * registry/client. Fail-closed.
    */
-  resolveMoveAuthority(instanceId: string): Promise<MoveAuthority>;
+  resolveMoveAuthority(instanceId: string, vaultId?: string): Promise<MoveAuthority>;
   previews: PreviewRetainer;
   /**
    * The SYNCHRONOUS render-time Desktop gate (R4.1 P0-A1 + R4.2 P1-A5 +
@@ -280,7 +286,7 @@ export function createKnowledgeSession(deps: KnowledgeSessionDeps): KnowledgeSes
   // snapshot object; one entry per owner is enough — a newer source object
   // replaces it).
   const offlineProjection = new Map<string, { source: KnowledgeBrowseSnapshot; value: KnowledgeBrowseSnapshot }>();
-  const coldFor = (instanceId: string, phase: "waiting-catalog" | "offline" | "unpaired"): KnowledgeBrowseSnapshot => {
+  const coldFor = (instanceId: string, phase: "waiting-catalog" | "offline" | "unpaired" | "not-granted"): KnowledgeBrowseSnapshot => {
     const key = `${instanceId}|${phase}`;
     let cold = coldByInstance.get(key);
     if (!cold) { cold = coldSnapshotFor(instanceId, phase); coldByInstance.set(key, cold); }
@@ -301,9 +307,20 @@ export function createKnowledgeSession(deps: KnowledgeSessionDeps): KnowledgeSes
   const directory = new KnowledgeDirectoryController(
     (instanceId, vaultId, q, page, dir) =>
       api.contentNotes(instanceId, vaultId, q, page, dir),
+    {
+      scopeRevision: (instance, vault) => (deps.registry.forScope?.(instance, { vault }) ?? deps.registry).currentSecurityRevision?.() ?? 0,
+      subscribe: listener => deps.registry.subscribe?.(listener) ?? (() => {}),
+    },
   );
   // ORG-1B: the move authority (deps arrive per call through moveDeps —
   // the ONE injected Services client, never a second transport).
+  desktop.subscribe(snapshot => {
+    if (snapshot.phase === "not-granted" && snapshot.instanceId) {
+      directory.invalidateScope(snapshot.instanceId, snapshot.requestedVaultId || snapshot.vaultId || undefined);
+    } else if (snapshot.phase === "unpaired") {
+      directory.setOwner({ paired: false, connected: false, instanceId: "", writeGranted: false, isLive: () => false });
+    }
+  });
   const organization = new KnowledgeOrganizationController();
   // R1.6-B: the transient Desktop-note projection (UI/session only).
   const projection = new DesktopTransientProjection();
@@ -324,10 +341,10 @@ export function createKnowledgeSession(deps: KnowledgeSessionDeps): KnowledgeSes
     organization,
     projection,
     retainedDirectoryFor(instanceId: string, vaultId: string): string {
-      return directoryByScope.get(`${instanceId}|${vaultId}`) ?? "";
+      return directoryByScope.get(JSON.stringify([instanceId, vaultId])) ?? "";
     },
     retainDirectory(instanceId: string, vaultId: string, dirValue: string): void {
-      directoryByScope.set(`${instanceId}|${vaultId}`, dirValue);
+      directoryByScope.set(JSON.stringify([instanceId, vaultId]), dirValue);
     },
     moveDeps(opts: { isLive: () => boolean; onCommitted?: MoveDeps["onCommitted"] }): MoveDeps {
       return {
@@ -338,18 +355,26 @@ export function createKnowledgeSession(deps: KnowledgeSessionDeps): KnowledgeSes
         onCommitted: opts.onCommitted,
       };
     },
-    resolveMoveAuthority(instanceId: string): Promise<MoveAuthority> {
-      return resolveMoveAuthority({ registry: deps.registry, knowledge: deps.knowledge }, instanceId);
+    resolveMoveAuthority(instanceId: string, vaultId?: string): Promise<MoveAuthority> {
+      return resolveMoveAuthority({ registry: deps.registry, knowledge: deps.knowledge }, instanceId, vaultId);
     },
     previews,
     previewReader: deps.previewReader,
     ui,
     desktopViewFor(current: DesktopGateInput): KnowledgeBrowseSnapshot {
-      const snap = desktop.snapshot();
+      const snap = desktop.snapshotFor(current.instanceId, current.vaultId) ?? coldFor(current.instanceId, current.connected ? "waiting-catalog" : "offline");
       if (!current.paired || !current.instanceId) {
         return coldFor("", "unpaired");
       }
-      if (snap.instanceId !== current.instanceId) {
+      if (current.readable === false) return coldFor(current.instanceId, "not-granted");
+      // A cold request can fail before resolving a vault. Its empty terminal
+      // diagnostic belongs to the explicit requested scope, not to any rows.
+      // Do not replace that completed failure with an eternal waiting spinner.
+      // Actual rows and resolved vaults still require the exact identity fence.
+      const selectedFailure = Boolean(current.vaultId && snap.requestedVaultId === current.vaultId
+        && !snap.vaultId && snap.rows.length === 0 && !snap.replica
+        && ["error", "not-granted", "temporarily-unavailable", "unsupported"].includes(snap.phase));
+      if (snap.instanceId !== current.instanceId || (current.vaultId && snap.vaultId !== current.vaultId && !selectedFailure)) {
         return coldFor(current.instanceId, current.connected ? "waiting-catalog" : "offline");
       }
       // Same owner. Connection truth first: a retained ready snapshot is
@@ -360,8 +385,8 @@ export function createKnowledgeSession(deps: KnowledgeSessionDeps): KnowledgeSes
       // the SAME reference (React's getSnapshot contract); a real controller
       // change produces a new source object and therefore a new projection.
       if (!current.connected) {
-        if (snap.phase === "ready" || snap.replica) {
-          const pkey = `offline|${snap.instanceId}`;
+        if (snap.phase === "ready" || snap.replica || snap.rows.length > 0) {
+          const pkey = JSON.stringify(["offline", snap.instanceId, snap.vaultId]);
           const cached = offlineProjection.get(pkey);
           if (cached && cached.source === snap) return cached.value;
           const value = { ...snap, phase: "offline" as const };
@@ -401,7 +426,7 @@ export const knowledgeChangeFeed = productionServices.changeFeed;
 /** Hints invalidate only the registry owning this exact connected Desktop. */
 export function knowledgePermissionsChanged(instance: string, revision: number) {
   const catalog = productionServices.registry.snapshot();
-  if (!catalog || catalog.desktopInstanceId === instance) productionServices.registry.invalidateForPermissionRevision(revision);
+  if (!catalog || catalog.desktopInstanceId === instance) productionServices.registry.invalidateForPermissionRevision(revision, instance);
 }
 const productionSession = createKnowledgeSession({
   ...productionServices,

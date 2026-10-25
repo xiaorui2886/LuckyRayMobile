@@ -1,3 +1,4 @@
+import { managedVault, managedNoteRoute, type ManagedNote } from "../services/managedVault";
 // STILL-01.1 — Home (production data, Still authority tree).
 // Hierarchy: wordmark -> settings -> search launcher -> connection ->
 // 继续阅读 -> 最近收集的画面 -> 手边 -> (dock/+ rendered by the shell).
@@ -16,6 +17,8 @@ export function StillHome() {
     (fn) => localDataStore.subscribe(fn),
     () => localDataStore.getVersion()
   );
+  const [managedVersion, setManagedVersion] = useState(0);
+  useEffect(() => { const changed = () => setManagedVersion(value => value + 1); window.addEventListener("luckyray:managed-vault-change", changed); return () => window.removeEventListener("luckyray:managed-vault-change", changed); }, []);
   const [recentNote, setRecentNote] = useState<NoteItem | undefined>(undefined);
   const [assets, setAssets] = useState<AssetItem[]>([]);
   const [inboxCount, setInboxCount] = useState(0);
@@ -25,20 +28,29 @@ export function StillHome() {
     (async () => {
       try {
         const [notes, assetsPage, stats] = await Promise.all([
-          api.localNoteList({ page: 1, limit: 1 }),
+          (async () => {
+            const vaults = await managedVault.list();
+            const selected = vaults.items.find(vault => vault.localVaultId === vaults.selectedVaultId && vault.migrationState === "ready");
+            if (!selected) return api.localNoteList({ page: 1, limit: 1 });
+            const page = await managedVault.notes({ localVaultId: selected.localVaultId, page: 1, limit: 1 });
+            return { ...page, items: page.items.map(note => ({ ...note, noteId: managedNoteRoute(note.localVaultId, note.noteId) })) };
+          })(),
           api.localAssetList({ kind: "image", page: 1, limit: 2 }),
           api.localInboxStats(),
         ]);
         if (!alive) return;
         const n = (notes.items || [])[0];
+        const managed = n?.noteId.startsWith("vault:") ? n as unknown as ManagedNote : undefined;
+        const managedState = managed?.bodyState === "missing" || managed?.syncState === "incomplete" ? "metadata"
+          : managed?.bodyState === "conflict" ? "conflict" : managed?.syncState;
         setRecentNote(n ? {
           id: n.noteId,
           title: n.title || "无标题笔记",
           body: n.content || "",
           source: "local",
           meta: localMeta(n.updatedAt),
-          state: "local",
-          notebook: "本机笔记",
+          state: managedState === "pending" || managedState === "synced" || managedState === "conflict" || managedState === "metadata" ? managedState : "local",
+          notebook: n.noteId.startsWith("vault:") ? "笔记" : "本机笔记",
         } : undefined);
         setInboxCount(stats.total);
         const imgs = (assetsPage.items || []).filter((a: any) => a.kind === "image").slice(0, 2);
@@ -53,7 +65,7 @@ export function StillHome() {
       } catch { /* keep last known */ }
     })();
     return () => { alive = false; };
-  }, [version]);
+  }, [version, managedVersion]);
 
   // Resolve real thumbnails for the 2-up media.
   useEffect(() => {

@@ -1,5 +1,7 @@
+import {isTableCellComposing,runTableHistory} from "./tableFocus.ts";
 import type { EditorView } from "@codemirror/view";
 import { undo, redo } from "@codemirror/commands";
+import { mobileMarkdownCommandTransaction } from "./mobileMarkdownCommands.ts";
 export type EditorCommand = "undo" | "redo" | "wiki" | "heading" | "bold" | "italic" | "strike" | "highlight" | "code" | "quote" | "link" | "bullet" | "number" | "task" | "indent" | "outdent";
 export const editorCommands: ReadonlyArray<{ command: EditorCommand; label: string; glyph: string }> = [
   { command: "undo", label: "撤销", glyph: "↶" }, { command: "redo", label: "重做", glyph: "↷" },
@@ -15,37 +17,20 @@ export const editorCommands: ReadonlyArray<{ command: EditorCommand; label: stri
 /** Live CM selection/history only. Never end composition or focus a title's
  * dormant body editor. Every document change follows the existing save path. */
 export function runEditorCommand(view: EditorView, command: EditorCommand): boolean {
-  if (view.composing || view.compositionStarted) return false;
+  if (view.composing || view.compositionStarted || isTableCellComposing(view)) return false;
   const active = view.dom?.ownerDocument.activeElement;
+  const tableCellFocused = active?.matches?.('textarea.cm-lp-table-input') && view.dom?.contains(active);
+  if (tableCellFocused && active?.getAttribute('data-composing') === 'true') return false;
   const toolbarFocused = active?.closest('.st-editor-tools') && view.dom?.closest('.st-note-surface')?.contains(active);
-  if (!view.hasFocus && !toolbarFocused) return false;
+  if (!view.hasFocus && !toolbarFocused && !tableCellFocused) return false;
+  if (command === "undo" || command === "redo") {
+    const handled = runTableHistory(view, command === "redo");
+    if (handled !== null) return handled;
+  }
   if (!view.hasFocus) view.focus();
   if (command === "undo" || command === "redo") return (command === "undo" ? undo : redo)(view);
-  const { from, to } = view.state.selection.main;
-  const selected = view.state.sliceDoc(from, to);
-  const pairs: Partial<Record<EditorCommand, [string, string]>> = {
-    wiki: ["[[", "]]"], bold: ["**", "**"], italic: ["*", "*"], strike: ["~~", "~~"],
-    highlight: ["==", "=="], code: ["`", "`"], link: ["[", "](https://)"],
-  };
-  const pair = pairs[command];
-  if (pair) {
-    view.dispatch({ changes: { from, to, insert: pair[0] + selected + pair[1] },
-      selection: { anchor: from + pair[0].length, head: to + pair[0].length }, scrollIntoView: true });
-    return true;
-  }
-  const prefixes: Partial<Record<EditorCommand, string>> = { heading: "## ", quote: "> ", bullet: "- ", number: "1. ", task: "- [ ] ", indent: "  " };
-  const start = view.state.doc.lineAt(from).from;
-  const endLine = view.state.doc.lineAt(to > from && view.state.doc.lineAt(to).from === to ? to - 1 : to);
-  const changes = [];
-  for (let pos = start; pos <= endLine.from;) {
-    const line = view.state.doc.lineAt(pos);
-    if (command === "outdent") {
-      const count = /^ {1,2}|^\t/.exec(line.text)?.[0].length ?? 0;
-      if (count) changes.push({ from: pos, to: pos + count, insert: "" });
-    } else changes.push({ from: pos, insert: prefixes[command] ?? "" });
-    pos = line.to + 1;
-  }
-  const changeSet = view.state.changes(changes);
-  view.dispatch({ changes: changeSet, selection: view.state.selection.map(changeSet), scrollIntoView: true });
+  const transaction = mobileMarkdownCommandTransaction(view.state, command);
+  if (!transaction || !transaction.docChanged) return false;
+  view.dispatch(transaction);
   return true;
 }

@@ -1,17 +1,21 @@
+import { DesktopDocumentFallback } from "./kit/DesktopDocumentFallback";
+import { useDesktopLibraries } from "./kit/DesktopLibraryPicker";
 import { usePageCurrent } from "../presentation/still01/PageLayer";
 // STILL-01.1 — 素材查看 page (authority AssetDemo composition, real data).
 // Local assets keep their real edit/export/share/delete authorities; Desktop
 // assets stay read-only with on-demand acquisition and cancel. Image zoom is
 // a media-layer-only interaction (data-media-zoom-layer) — the shell pinch
 // blocker exempts exactly this layer.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useMemo, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Header, IconButton, Button, Sheet, Option, Empty, Icon } from "./kit/StillImports";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { api } from "../services/client";
+import { api, materialApi } from "../services/client";
 import { localDataStore } from "../services/localDataStore";
 import { dataStore } from "../services/dataStore";
 import { contentError } from "../components/DesktopLibrary";
-import { openInlineMediaLease, type MediaGrant } from "./kit/inlineMediaLease";
+import { InlineAssetVideo } from "./InlineAssetVideo";
+import { assetSequenceNeighbor, assetSwipeDirection, type AssetSequenceItem, type AssetSequenceSession } from "./kit/assetSequence";
+import { suppressTrailingSwipeClick } from "./kit/useHorizontalSwipe";
 import "./assetDetail.css";
 import {
   classifyExportDestination,
@@ -41,7 +45,7 @@ import { ServicesSourceSection, sourceRetryText } from "./kit/servicesSourceSect
 import { thumbnailScheduler, desktopThumbKey, localThumbKey, materialImageVersion } from "../services/thumbnailQueue";
 
 /** Presentation handoff for this one navigation route, not a data/cache authority. */
-export type AssetPreview = { title: string; thumbnail: string; kind: string; version?: string };
+export type AssetPreview = { title: string; thumbnail: string; kind: string; version?: string; sequence?: readonly AssetSequenceItem[]; continuation?: AssetSequenceSession };
 
 type SheetName = "" | "info" | "more" | "rename" | "delete" | "acquire"
   | "organize" | "favorite" | "tags" | "folder" | "new-tag" | "new-folder";
@@ -60,19 +64,70 @@ function videoFailureCopy(error: unknown): string {
 }
 
 export function StillAsset({ id, preview }: { id: string; preview?: AssetPreview }) {
-  const { back, registerOverlay } = useStillNav();
+  const { back, open, registerOverlay } = useStillNav();
+  const current = usePageCurrent();
+  const gesture = useRef<{ pointer: number; x: number; y: number; time: number } | null>(null);
+  const locked = useRef(false);
+  useEffect(() => { locked.current = false; gesture.current = null; }, [id]);
   const route = parseAssetRoute(id);
-  if (route.kind === "local") {
-    return <LocalAsset key={route.assetId} localId={route.assetId} preview={preview} registerOverlay={registerOverlay} back={back} />;
-  }
-  if (route.kind === "desktop") {
-    // The owner is proven by the route itself, so the page stays bound to one
-    // Desktop for its whole lifetime.
-    return <DesktopAsset key={`${route.owner}:${route.assetId}`} ownerInstanceId={route.owner} assetId={route.assetId} preview={preview} registerOverlay={registerOverlay} back={back} />;
-  }
-  // A route with no provable owner fails closed; it is never resolved by
-  // guessing the owner from the live connection.
-  return <UnownedAssetRoute back={back} />;
+  const continuation = preview?.continuation;
+  const paged = useSyncExternalStore(continuation?.subscribe || (() => () => {}), continuation?.snapshot || (() => null));
+  const sequence = paged?.items || preview?.sequence;
+  const routeRef = useRef(id); routeRef.current = id;
+  const currentRef = useRef(current); currentRef.current = current;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    if (!current || !continuation || paged?.error || !paged?.hasMore) return;
+    const index = paged.items.findIndex(item => item.route === id);
+    if (index >= 0 && index >= paged.items.length - 3) void continuation.loadNext();
+  }, [current, id, continuation, paged]);
+  const go = async (direction: -1 | 1) => {
+    if (!current || locked.current) return;
+    locked.current = true;
+    const origin = id;
+    let navigated = false;
+    try {
+      const next = continuation ? await continuation.neighbor(id, direction) : assetSequenceNeighbor(sequence, id, direction);
+      if (!next || !mounted.current || !currentRef.current || routeRef.current !== origin) return;
+      navigated = true;
+      open("asset", next.route, { assetPreview: { ...next, sequence: continuation?.snapshot().items || sequence, continuation } });
+    } finally { if (!navigated && routeRef.current === origin) locked.current = false; }
+  };
+  const previous = assetSequenceNeighbor(sequence, id, -1), next = assetSequenceNeighbor(sequence, id, 1);
+  const content = route.kind === "local"
+    ? <LocalAsset key={route.assetId} localId={route.assetId} preview={preview} registerOverlay={registerOverlay} back={back} />
+    : route.kind === "desktop"
+      ? <DesktopAsset key={`${route.owner}:${route.library || ""}:${route.assetId}`} library={route.library} ownerInstanceId={route.owner} assetId={route.assetId} preview={preview} registerOverlay={registerOverlay} back={back} />
+      : <UnownedAssetRoute back={back} />;
+  return <div className="st-asset-sequence" data-gesture-owner="asset-detail"
+    onPointerDownCapture={event => {
+      const target = event.target as Element;
+      if (!current || gesture.current || event.isPrimary === false || event.pointerType === "mouse" || event.button > 0 || target.closest('button,input,select,a,[role="dialog"],.st-sheet,.st-inline-video.is-fullscreen,[data-media-zoomed="true"]')) { gesture.current = null; return; }
+      const selection = event.currentTarget.ownerDocument.getSelection();
+      if (selection && !selection.isCollapsed) return;
+      gesture.current = { pointer: event.pointerId, x: event.clientX, y: event.clientY, time: Date.now() };
+    }}
+    onPointerMoveCapture={event => {
+      const start = gesture.current;
+      if (!start || start.pointer !== event.pointerId) return;
+      const dx = event.clientX - start.x, dy = event.clientY - start.y;
+      if (Date.now() - start.time > 900 || Math.abs(dy) > 12 && Math.abs(dy) >= Math.abs(dx)) gesture.current = null;
+    }}
+    onPointerUpCapture={event => {
+      const start = gesture.current; gesture.current = null;
+      if (!start || start.pointer !== event.pointerId) return;
+      const direction = assetSwipeDirection(event.clientX - start.x, event.clientY - start.y, Date.now() - start.time);
+      if (direction) {
+        suppressTrailingSwipeClick(event.currentTarget.ownerDocument);
+        // Let the inner zoom stage retire its pointer even at list boundaries.
+        event.preventDefault(); go(direction);
+      }
+    }} onPointerCancelCapture={() => { gesture.current = null; }}>
+    {content}
+    {paged?.error ? <button type="button" className="st-asset-sequence-retry" onClick={() => { if (paged.hasMore) void continuation?.loadNext(); else back(); }}>{paged.error}</button> : null}
+    {(previous || next || paged?.hasMore) ? <div className="st-asset-sequence-access" aria-label="切换素材"><button type="button" disabled={!previous} onClick={() => go(-1)}>上一项</button><button type="button" disabled={!next && !paged?.hasMore} onClick={() => void go(1)}>下一项</button></div> : null}
+  </div>;
 }
 
 /** A Desktop asset route that carried no owner. There is no safe way to read
@@ -96,50 +151,18 @@ function AssetAction({ icon, label, active, disabled, onClick }: { icon: string;
   return <button type="button" className={"st-asset-action" + (active ? " is-active" : "")} aria-label={label} aria-pressed={active} disabled={disabled} onClick={onClick}><Icon name={icon} size={23} /><span>{label}</span></button>;
 }
 
-/** Inline playback reuses the same owner-bound private lease as the native player.
- * A route/version/connection change unmounts it and retires pending grants. */
-function InlineAssetVideo({ localPath, owner, id, poster, onFallback }: { localPath?: string; owner?: string; id: string; poster?: string; onFallback?: () => void }) {
-  const [url, setUrl] = useState("");
-  const [error, setError] = useState("");
-  const player = useRef<HTMLVideoElement>(null);
-  useEffect(() => {
-    const element = player.current;
-    setError("");
-    setUrl("");
-    const jobId = `inline-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const retire = openInlineMediaLease({
-      cached: () => owner ? api.contentMediaSource(owner, id) : api.localAssetMediaSource(id),
-      stream: () => owner ? invoke<MediaGrant>("content_media_stream", { instance: owner, id, jobId }) : Promise.reject(new Error("CONTENT_NOT_CACHED")),
-      release: api.contentMediaRelease,
-      cancel: () => api.contentCancel(jobId),
-      ready: setUrl,
-      failed: (failure) => setError(videoFailureCopy(failure)),
-    });
-    return () => {
-      element?.pause();
-      element?.removeAttribute("src");
-      element?.load();
-      retire?.();
-    };
-  }, [owner, id, localPath]);
-  return <div className="st-inline-video">
-    <video ref={player} src={url || undefined} poster={poster} controls playsInline preload="metadata" aria-label="视频播放器" onError={() => setError("内嵌播放器暂不支持这段视频，可使用本机播放器。")} />
-    {!url && !error ? <p role="status">正在准备视频…</p> : null}
-    {error ? <div className="st-inline-video-error" role="status"><p>{error}</p>{onFallback ? <Button kind="quiet" onClick={onFallback}>使用本机播放器</Button> : null}</div> : null}
-  </div>;
-}
-
 // --- shared zoomable media stage ---------------------------------------------
 
-function ZoomStage({ src, alt, poster, video, onNeedOriginal, playLabel = "获取视频", playBusy = false, playMessage = "", notice = "", toggleSignal = 0 }: {
+function ZoomStage({ src, alt, poster, video, pendingVideo, onNeedOriginal, playLabel = "获取视频", playBusy = false, playMessage = "", notice = "", toggleSignal = 0 }: {
   src: string; alt: string;
-  poster?: string; video?: { instance?: string; id: string; path: string; localPath?: string; epoch?: string } | null;
+  poster?: string; pendingVideo?: boolean; video?: { instance?: string; library?: string; id: string; path: string; localPath?: string; epoch?: string } | null;
   onNeedOriginal?: () => void;
   playLabel?: string; playBusy?: boolean; playMessage?: string;
   notice?: string;
   toggleSignal?: number;
 }) {
   const [zoom, setZoom] = useState(1);
+  const [videoFullscreen, setVideoFullscreen] = useState(false);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const base = useRef({ distance: 0, zoom: 1, x: 0, y: 0, ox: 0, oy: 0 });
@@ -174,8 +197,9 @@ function ZoomStage({ src, alt, poster, video, onNeedOriginal, playLabel = "获�
   return (
     <div
       ref={area}
-      className="st-asset-area"
+      className={"st-asset-area" + (videoFullscreen ? " is-video-fullscreen" : "")}
       data-media-zoom-layer="true"
+      data-media-zoomed={zoom > 1 ? "true" : "false"}
       onDoubleClick={() => { if (video) return; setZoom((z) => (z === 1 ? 2 : 1)); setOffset({ x: 0, y: 0 }); }}
       onPointerDown={(e) => {
         if (!src || video) return;
@@ -206,19 +230,19 @@ function ZoomStage({ src, alt, poster, video, onNeedOriginal, playLabel = "获�
       onPointerUp={(e) => pointers.current.delete(e.pointerId)}
       onPointerCancel={(e) => pointers.current.delete(e.pointerId)}
     >
-      {video ? (
-        <InlineAssetVideo key={`${video.instance || "local"}:${video.id}:${video.path}:${video.epoch || ""}`} owner={video.instance} id={video.id} localPath={video.localPath} poster={poster} onFallback={onNeedOriginal} />
+      {pendingVideo ? <div className="st-inline-video" role="status" aria-label="正在准备视频"><div className="st-video-wait"><span className="st-video-spinner" /></div></div> : video ? (
+        <InlineAssetVideo key={`${video.instance || "local"}:${video.id}:${video.path}:${video.epoch || ""}`} owner={video.instance} library={video.library} id={video.id} localPath={video.localPath} poster={poster} onFallback={onNeedOriginal} onFullscreenChange={setVideoFullscreen} />
       ) : readySrc && src || poster ? (
         <div className="st-progressive-image" style={{ transform: `translate(${offset.x}px,${offset.y}px) scale(${zoom})` }}>
           {poster && poster !== readySrc ? <img className="st-image-placeholder" src={poster} alt="" aria-hidden="true" draggable={false} /> : null}
           {readySrc && src ? <img className={"st-image-original" + (reveal ? " is-revealed" : "")} src={readySrc} alt={alt} draggable={false} /> : <span className="st-sr-only">{alt}</span>}
         </div>
       ) : null}
-      {onNeedOriginal && !video ? (
+      {onNeedOriginal && !video && !pendingVideo ? (
         <button style={{ position: "absolute", background: "rgba(0,0,0,.65)", color: "white", border: 0, borderRadius: 24, width: 48, height: 48, display: "grid", placeItems: "center" }}
           aria-label={playLabel} disabled={playBusy} onClick={onNeedOriginal}><Icon name="play" /></button>
       ) : null}
-      {playBusy || playMessage || notice || imageError ? <div className="st-media-feedback" role="status">{playBusy ? "正在准备播放…" : playMessage || notice || imageError}</div> : null}
+      {!pendingVideo && (playBusy || playMessage || notice || imageError) ? <div className="st-media-feedback" role="status">{playBusy ? "正在准备播放…" : playMessage || notice || imageError}</div> : null}
     </div>
   );
 }
@@ -279,7 +303,7 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
     return (
       <div className="st-asset-view">
         <AssetHeader title={preview?.title || "正在读取素材…"} back={back} />
-        <ZoomStage src="" poster={loadError ? "" : preview?.thumbnail} alt={preview?.title || "素材"} notice={loadError || "正在读取本机文件…"} />
+        <ZoomStage src="" pendingVideo={!loadError && preview?.kind === "video"} poster={loadError ? "" : preview?.thumbnail} alt={preview?.title || "素材"} notice={loadError || "正在读取本机文件…"} />
         <div className="st-asset-actions" role="toolbar" aria-label="素材操作">{[["share", "分享"], ["heart", "收藏"], ["info", "信息"], ["trash", "删除"], ["more", "更多"]].map(([icon, label]) => <AssetAction key={icon} icon={icon} label={label} disabled onClick={() => {}} />)}</div>
       </div>
     );
@@ -384,6 +408,7 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
   async function remove() {
     try {
       await api.localAssetDelete(localId);
+      preview?.continuation?.remove(`local:${localId}`);
       localDataStore.publish("asset");
       back();
     } catch (e: any) {
@@ -396,7 +421,8 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
       <div className={"st-asset-view" + (asset.kind === "image" ? " is-image" : "")}>
         <AssetHeader title={asset.name} back={back} />
         <ZoomStage src={previewSrc} poster={!integrityError ? preview?.thumbnail : ""} alt={asset.name}
-          video={asset.kind === "video" && healthy ? { id: localId, path: asset.contentHash || asset.localPath, localPath: asset.localPath } : null}
+          pendingVideo={asset.kind === "video" && !integrity && !loadError}
+        video={asset.kind === "video" && healthy ? { id: localId, path: asset.contentHash || asset.localPath, localPath: asset.localPath } : null}
           onNeedOriginal={asset.kind==="video" && healthy ? ()=>void playVideo() : undefined}
           playLabel="播放视频" playBusy={playBusy} playMessage={playMessage}
           notice={integrityError ? `${integrityText[integrityError] || "文件异常"} — 仅保留元数据。` : loadError} />
@@ -463,10 +489,13 @@ function LocalAsset({ localId, preview, registerOverlay, back }: {
 
 // --- 电脑素材 -----------------------------------------------------------------
 
-function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back }: {
-  ownerInstanceId: string; assetId: string; preview?: AssetPreview; registerOverlay: (d: () => void) => () => void; back: () => void;
+function DesktopAsset({ ownerInstanceId, library, assetId, preview, registerOverlay, back }: {
+  ownerInstanceId: string; library?: string; assetId: string; preview?: AssetPreview; registerOverlay: (d: () => void) => () => void; back: () => void;
 }) {
   const { conn, mode } = useStillNav();
+  const libraries = useDesktopLibraries(ownerInstanceId,conn?.ws?.state === "connected");
+  const writeGranted = !library || libraries.catalog?.materials.find(row=>row.libraryId===library)?.writeGranted === true;
+  const scopedApi = materialApi(library,writeGranted);
   const [asset, setAsset] = useState<any>(null);
   const [thumb, setThumb] = useState(preview?.thumbnail || "");
   const pageCurrent = usePageCurrent();
@@ -492,14 +521,14 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
   const owner = ownerInstanceId;
   // Wave A: Desktop remains the authority; the controller owns the single
   // in-flight organization request and the identity fence.
-  const org = useRef(new MaterialOrganizationController({
-    setFavorite: (i, id, fav) => api.contentMaterialSetFavorite(i, id, fav),
-    setTags: (i, id, patch) => api.contentMaterialSetTags(i, id, patch),
-    setFolder: (i, id, folderId) => api.contentMaterialSetFolder(i, id, folderId),
-    createTag: (i, name) => api.contentMaterialCreateTag(i, name),
-    createFolder: (i, name) => api.contentMaterialCreateFolder(i, name),
-    batch: (i, input) => api.contentMaterialBatch(i, input),
-  })).current;
+  const org = useMemo(() => new MaterialOrganizationController({
+    setFavorite: (i, id, fav) => scopedApi.contentMaterialSetFavorite(i, id, fav),
+    setTags: (i, id, patch) => scopedApi.contentMaterialSetTags(i, id, patch),
+    setFolder: (i, id, folderId) => scopedApi.contentMaterialSetFolder(i, id, folderId),
+    createTag: (i, name) => scopedApi.contentMaterialCreateTag(i, name),
+    createFolder: (i, name) => scopedApi.contentMaterialCreateFolder(i, name),
+    batch: (i, input) => scopedApi.contentMaterialBatch(i, input),
+  }), [library,writeGranted]);
   const [cacheChecked, setCacheChecked] = useState(false);
   const autoImageAttempt = useRef("");
   const [orgSnapshot, setOrgSnapshot] = useState(org.snapshot());
@@ -518,7 +547,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
   // SERVICES-ASSET-DETAIL-R1: additive Services V1 enrichment for the SAME
   // desktop asset — canonical source fidelity + "在电脑打开". Content V1 stays
   // the primary detail authority above; this is an additive block.
-  const services = useRef(createProductionServices()).current;
+  const services = useRef(createProductionServices({library})).current;
   const [sourceState, setSourceState] = useState<SourceLoadState>({ phase: "idle" });
   const [present, setPresent] = useState<PresentFeedback | null>(null);
   const presentRef = useRef<PresentationActionController | null>(null);
@@ -540,7 +569,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
   const sourceCtrl = useRef<SourceEnrichmentController | null>(null);
   if (!sourceCtrl.current) {
     sourceCtrl.current = new SourceEnrichmentController({
-      detailV1: (ownerId, asset) => services.materials.detailV1(ownerId, asset),
+      detailV1: (ownerId, asset) => services.materials.detailV1(ownerId, asset, library),
       commit: (c) => {
         if (c.phase === "ready") setSourceState({ phase: "ready", source: carrySafeSource(c.source) });
         else if (c.phase === "error") setSourceState({ phase: "error", code: c.code });
@@ -571,7 +600,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     const gen=detailGen.current, seq=++readSeq.current;
     const current=()=>gen===detailGen.current && seq===readSeq.current;
     try {
-      const value=await api.contentAssetDetail(owner,assetId);
+      const value=await scopedApi.contentAssetDetail(owner,assetId);
       if (!current()) return;
       const version=materialImageVersion(value);
       const previous=assetRef.current ? materialImageVersion(assetRef.current) : preview?.version;
@@ -580,7 +609,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
       assetRef.current=value; denied.current=false; setUnavailable(false); setAsset(value); setMessage("");
       if (recovering) {sourceCtrlRef.bind({owner,assetId,isLive:()=>gen===detailGen.current});loadSource();}
       if (changed) {thumbRef.current="";setThumb("");setScreenPreview("");playPosition.current=0;}
-      if (!thumbRef.current) void thumbnailScheduler.enqueue(desktopThumbKey(owner,assetId,version),()=>api.assetThumbnail(owner,assetId,false,false,version),"near")
+      if (!thumbRef.current) void thumbnailScheduler.enqueue(desktopThumbKey(owner,assetId,version,false,library),()=>scopedApi.assetThumbnail(owner,assetId,false,false,version),"near")
         .then(v=>{if(current()&&!denied.current&&materialImageVersion(assetRef.current)===version){thumbRef.current=convertFileSrc(v.uri);setThumb(thumbRef.current);}}).catch(()=>{});
     } catch (error) {
       if (!current()) return;
@@ -612,7 +641,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     // Every read is expected-instance: the owner this page belongs to, not the
     // Desktop that happens to be connected when the promise settles.
     void readDetail();
-    void api.contentCachedResource(owner, assetId).then((cached) => {
+    void scopedApi.contentCachedResource(owner, assetId).then((cached) => {
       if (gen === detailGen.current && !denied.current) setResource(cached);
     }).catch(() => {}).finally(() => { if(gen===detailGen.current) setCacheChecked(true); });
     // Services V1 enrichment through the production controller.
@@ -640,7 +669,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     appliedPreviewRetry.current=previewRetry;
     async function prepare() {
       try {
-        const v=await thumbnailScheduler.enqueue(desktopThumbKey(owner,assetId,version,true),()=>api.assetThumbnail(owner,assetId,force,true,version),"near");
+        const v=await thumbnailScheduler.enqueue(desktopThumbKey(owner,assetId,version,true,library),()=>scopedApi.assetThumbnail(owner,assetId,force,true,version),"near");
         if(live && gen===detailGen.current && !denied.current && materialImageVersion(assetRef.current)===version) {setMessage("");setScreenPreview(convertFileSrc(v.uri)+(force ? `?preview=${previewRetry}` : ""));}
       } catch(error) {
         if(!live || gen!==detailGen.current || denied.current || materialImageVersion(assetRef.current)!==version) return;
@@ -663,7 +692,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     autoImageAttempt.current=version;
     const gen=detailGen.current, jobId=`image-detail-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     job.current=jobId;
-    void api.contentAssetFile(owner,assetId,jobId,32*1024*1024,version).then(value=>{
+    void scopedApi.contentAssetFile(owner,assetId,jobId,32*1024*1024,version).then(value=>{
       if(gen===detailGen.current&&!denied.current&&materialImageVersion(assetRef.current)===version)setResource(value);
     }).catch(()=>{ /* Keep the visible thumbnail and explicit original/retry action. */ })
       .finally(()=>{if(job.current===jobId)job.current="";});
@@ -724,10 +753,10 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     const jobId = `download-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     job.current = jobId; setBusy(true); setMessage("");
     try {
-      const value = await api.contentAssetFile(owner, assetId, jobId);
+      const value = await scopedApi.contentAssetFile(owner, assetId, jobId);
       if (gen !== detailGen.current || denied.current) return;
       setResource(value);
-      if (!/^(image|video|audio)\//.test(value.mime)) await api.contentOpenResource(owner, assetId);
+      if (!/^(image|video|audio)\//.test(value.mime)) await scopedApi.contentOpenResource(owner, assetId);
     } catch (e) { if (gen === detailGen.current) setMessage(contentError(e)); }
     finally { if (gen === detailGen.current) { setBusy(false); job.current = ""; } }
   }
@@ -785,7 +814,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     const jobId = `play-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     playJob.current = jobId; setPlayBusy(true); setPlayMessage(""); setPlayEvidence(null);
     try {
-      const result = await api.contentVideoPlay(owner, assetId, jobId, asset?.name || preview?.title || "视频", playPosition.current, mode==="dark");
+      const result = await scopedApi.contentVideoPlay(owner, assetId, jobId, asset?.name || preview?.title || "视频", playPosition.current, mode==="dark");
       if (gen !== detailGen.current) return;
       if (Number.isFinite(result.positionMs)) playPosition.current = result.reason === "ended" ? 0 : Math.max(0, result.positionMs);
       if (result.errorCode?.includes("VERSION_CHANGED")) playPosition.current = 0;
@@ -813,15 +842,24 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
     <>
       <div className={"st-asset-view" + ((asset?.kind || preview?.kind) === "image" ? " is-image" : "")}>
         <AssetHeader title={unavailable ? "素材暂不可用" : asset?.name || preview?.title || "正在读取素材…"} back={back} />
-        <ZoomStage
+        {(asset?.kind || preview?.kind) === "document" ? <DesktopDocumentFallback
+          cached={Boolean(resource)} busy={busy} disabled={unavailable || ownerMismatch || !asset}
+          message={ownerMismatch ? "当前电脑已更换，请返回素材库重新打开。" : message}
+          onOpen={() => {
+            if (unavailable || ownerMismatch || !asset || busy) return;
+            if (resource) void scopedApi.contentOpenResource(owner, assetId).catch(() => setMessage("未找到可打开此文件的应用。"));
+            else void load();
+          }}
+        /> : <ZoomStage
           src={source && !isVideo ? source : ""}
           alt={asset?.name || preview?.title || "素材"}
           poster={!unavailable && !ownerMismatch ? thumb : ""}
-          video={!unavailable && !ownerMismatch && asset?.kind === "video" ? { instance: owner, id: assetId, path: materialImageVersion(asset), epoch: wsState } : null}
+          pendingVideo={!unavailable && !ownerMismatch && !asset && preview?.kind === "video"}
+        video={!unavailable && !ownerMismatch && asset?.kind === "video" ? { instance: owner, library, id: assetId, path: materialImageVersion(asset), epoch: wsState } : null}
           onNeedOriginal={!unavailable && !ownerMismatch && (asset?.kind || preview?.kind) === "video" ? () => void playVideo() : undefined}
           playLabel="播放视频" playBusy={playBusy} playMessage={playMessage}
           notice={ownerMismatch ? "当前电脑已更换，请返回素材库重新打开。" : message || (busy && !source ? "正在从电脑获取原文件…" : "")}
-        />
+        />}
         <div className="st-asset-actions" role="toolbar" aria-label="素材操作">
           <AssetAction icon="heart" label="收藏" active={favoritePreview ?? Boolean(asset?.favorite)}
             disabled={ownerMismatch || unavailable || !asset}
@@ -867,14 +905,14 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
       {sheet === "more" ? (
         <Sheet title="素材操作" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
           <Option label={busy ? "获取中…" : resource ? "重新获取原文件" : asset?.kind === "video" ? "完整保存视频供离线使用" : "查看原文件"} icon="refresh" onClick={() => { if (!busy) { setSheet(""); void load(); } }} />
-          {resource && asset?.kind === "image" && !unavailable && !ownerMismatch ? <Option label="打开原图" icon="zoom" onClick={()=>{setSheet("");void api.contentOpenResource(owner,assetId).catch(()=>setMessage("无法打开原图。"));}} /> : null}
+          {resource && asset?.kind === "image" && !unavailable && !ownerMismatch ? <Option label="打开原图" icon="zoom" onClick={()=>{setSheet("");void scopedApi.contentOpenResource(owner,assetId).catch(()=>setMessage("无法打开原图。"));}} /> : null}
           {resource && asset?.kind==="image" && !unavailable && !ownerMismatch ? <Option label="重试清晰预览" icon="refresh" onClick={()=>{setSheet("");setPreviewRetry(v=>v+1);}} /> : null}
           {unavailable ? <Option label="重试读取素材" icon="refresh" onClick={()=>{setSheet("");void readDetail();}} /> : null}
           {busy ? <Option label="取消获取" icon="close" onClick={() => { void api.contentCancel(job.current); setSheet(""); }} /> : null}
           {resource && !/^(image|video|audio)\//.test(resource.mime) ? (
             <Option label="打开已缓存文件" icon="file" onClick={() => {
               setSheet("");
-              api.contentOpenResource(owner, assetId).catch(() => setMessage("未找到可打开此文件的应用。"));
+              scopedApi.contentOpenResource(owner, assetId).catch(() => setMessage("未找到可打开此文件的应用。"));
             }} />
           ) : null}
           {!ownerMismatch && !unavailable && asset ? (
@@ -894,7 +932,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
       {sheet === "tags" ? (
         <TagOrganizationSheet
           assetId={assetId}
-          owner={owner}
+          owner={owner} library={library}
           current={(asset?.tags || []) as string[]}
           org={org}
           onClose={() => setSheet("")}
@@ -905,7 +943,7 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
       {sheet === "folder" ? (
         <FolderOrganizationSheet
           assetId={assetId}
-          owner={owner}
+          owner={owner} library={library}
           currentFolderId={asset?.folderId ?? null}
           org={org}
           onClose={() => setSheet("")}
@@ -924,11 +962,12 @@ function DesktopAsset({ ownerInstanceId, assetId, preview, registerOverlay, back
 }
 
 /** Tag organization: inspect, choose existing, create a simple new tag. */
-function TagOrganizationSheet({ assetId, owner, current, org, onClose, registerOverlay, onChanged }: {
-  assetId: string; owner: string; current: string[]; org: MaterialOrganizationController;
+function TagOrganizationSheet({ assetId, owner, library, current, org, onClose, registerOverlay, onChanged }: {
+  assetId: string; owner: string; library?: string; current: string[]; org: MaterialOrganizationController;
   onClose: () => void; registerOverlay: (d: () => void) => () => void;
   onChanged: () => Promise<void>;
 }) {
+  const scopedApi = materialApi(library);
   const [tags, setTags] = useState<{ id: string; name: string }[]>([]);
   const [selected, setSelected] = useState<string[]>(current);
   const [creating, setCreating] = useState(false);
@@ -937,7 +976,7 @@ function TagOrganizationSheet({ assetId, owner, current, org, onClose, registerO
 
   useEffect(() => {
     let alive = true;
-    api.contentNavigation(owner).then((nav: any) => {
+    scopedApi.contentNavigation(owner).then((nav: any) => {
       if (alive) setTags((nav?.tags || []).map((t: any) => ({ id: t.id, name: t.name })));
     }).catch(() => { /* tags stay empty; creation still works */ });
     return () => { alive = false; };
@@ -988,11 +1027,12 @@ function TagOrganizationSheet({ assetId, owner, current, org, onClose, registerO
 }
 
 /** Folder organization: choose an existing folder, root, or create a folder. */
-function FolderOrganizationSheet({ assetId, owner, currentFolderId, org, onClose, registerOverlay, onChanged }: {
-  assetId: string; owner: string; currentFolderId: string | null; org: MaterialOrganizationController;
+function FolderOrganizationSheet({ assetId, owner, library, currentFolderId, org, onClose, registerOverlay, onChanged }: {
+  assetId: string; owner: string; library?: string; currentFolderId: string | null; org: MaterialOrganizationController;
   onClose: () => void; registerOverlay: (d: () => void) => () => void;
   onChanged: () => Promise<void>;
 }) {
+  const scopedApi = materialApi(library);
   const [folders, setFolders] = useState<{ id: string; label: string }[]>([]);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -1000,7 +1040,7 @@ function FolderOrganizationSheet({ assetId, owner, currentFolderId, org, onClose
 
   useEffect(() => {
     let alive = true;
-    api.contentNavigation(owner).then((nav: any) => {
+    scopedApi.contentNavigation(owner).then((nav: any) => {
       if (!alive) return;
       const flat: { id: string; label: string }[] = [];
       const walk = (rows: any[], prefix: string) => {

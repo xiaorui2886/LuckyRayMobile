@@ -74,7 +74,7 @@ test("P1-H4 — the worker selects on cancellation, not a polling timeout", () =
 
 test("P1-H4 — cancellation is also honoured while dialling", () => {
   const worker = code(WORKER);
-  assert.match(worker, /let dial = hint_websocket_connect/u, "the dial future is named");
+  assert.match(worker, /let dial = hint_scoped_websocket_connect/u, "the dial future is named");
   assert.match(worker, /_ = cancel\.changed\(\) => \{[\s\S]{0,160}?state\.finish\(generation, false\);/u,
     "a retire during the dial finishes the generation without opening a socket");
 });

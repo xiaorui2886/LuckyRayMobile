@@ -171,6 +171,13 @@ export class LshSurfaceController {
 /** Truthful bounded copy: never claim success, never invent a queue. */
 export function lshErrorCopy(error: unknown): string {
   const raw = String((error as any)?.message ?? error ?? "");
+  if (raw.includes("LSH_WEBVIEW_UPDATE_REQUIRED")) return "当前 Android System WebView 不支持此对话界面，请更新系统 WebView 后重试。";
+  if (raw.includes("LSH_BOOTSTRAP_TIMEOUT")) return "电脑会话连接超时，请重新连接。尚未确认会话页面已打开。";
+  if (raw.includes("LSH_NATIVE_TIMEOUT") || raw.includes("LSH_EMBED_OUTCOME_UNKNOWN")) return "手机对话视图未及时响应，请重新连接。";
+  if (raw.includes("LSH_PRESENTATION_TIMEOUT") || raw.includes("LSH_PAGE_TIMEOUT")) return "LightSeek 页面未完成启动，请重试；若仍失败，请检查当前配对电脑的运行版本。";
+  if (raw.includes("LSH_LAYOUT_NOT_READY")) return "手机对话区域未就绪，请重试。";
+  if (raw.includes("LSH_REVALIDATION_TIMEOUT")) return "恢复连接时未能及时完成确认，请重新连接。";
+  if (raw.includes("LSH_STATE_TIMEOUT")) return "未能及时确认电脑的 LightSeek 状态，请重新检查连接。";
   if (raw.includes("LSH_UNAVAILABLE")) {
     return "当前桌面版本尚未开放 LightSeek 远程面。";
   }
@@ -192,6 +199,16 @@ export function lshErrorCopy(error: unknown): string {
   if (raw.includes("CONTENT_OFFLINE") || raw.includes("CONTENT_DISCONNECTED")) {
     return "电脑未连接：LightSeek 需要在电脑在线时使用。";
   }
+  if (raw.includes("LSH_PRESENTATION_PROBE_INVALID")) return "无法读取手机对话界面的启动状态，请重试。";
+  if (raw.includes("LSH_MOBILE_MODE_REQUIRED")) return "页面未进入手机对话模式，请重新连接。";
+  if (raw.includes("LSH_MOBILE_UI_REQUIRED")) return "未检测到手机对话界面启动标记，请重试或检查桌面 LightSeek。";
+  if (raw.includes("LSH_MOBILE_UI_NOT_READY")) return "手机对话界面没有完成启动，请重试或检查桌面 LightSeek。";
+  if (raw.includes("LSH_PAGE_LOAD_FAILED") || raw.includes("LSH_SURFACE_CLOSED")) {
+    return "LightSeek 页面连接中断，重新连接即可继续查看电脑上的会话。";
+  }
+  if (raw.includes("LSH_SURFACE_UNSUPPORTED") || raw.includes("LSH_NO_ACTIVITY")) {
+    return "当前设备暂不支持内嵌对话，请在 Android 安装包中使用。";
+  }
   if (raw.includes("LSH_SURFACE_DECLINED")) {
     return "未能打开 LightSeek 界面，请稍后重试。";
   }
@@ -199,4 +216,17 @@ export function lshErrorCopy(error: unknown): string {
     return "当前桌面版本尚未开放该能力。";
   }
   return "操作失败，请重试。";
+}
+
+/** Only fixed diagnostic labels may leave this presentation boundary. */
+export function lshDiagnosticCode(error: unknown): string {
+  const raw = String((error as any)?.message ?? error ?? "");
+  const allowed = ['LSH_WEBVIEW_UPDATE_REQUIRED','LSH_BOOTSTRAP_TIMEOUT','LSH_NATIVE_TIMEOUT','LSH_EMBED_OUTCOME_UNKNOWN','LSH_PRESENTATION_TIMEOUT','LSH_PAGE_TIMEOUT','LSH_LAYOUT_NOT_READY','LSH_REVALIDATION_TIMEOUT','LSH_STATE_TIMEOUT','LSH_UNAVAILABLE','LSH_NOT_GRANTED','LSH_RUNTIME_UNAVAILABLE','LSH_GATEWAY_CONTRACT_INVALID','LSH_BOOTSTRAP_FAILED','CONTENT_SOURCE_CHANGED','LSH_SOURCE_CHANGED','CONTENT_OFFLINE','CONTENT_DISCONNECTED','LSH_PRESENTATION_PROBE_INVALID','LSH_MOBILE_MODE_REQUIRED','LSH_MOBILE_UI_REQUIRED','LSH_MOBILE_UI_NOT_READY','LSH_PAGE_LOAD_FAILED','LSH_SURFACE_CLOSED','LSH_SURFACE_UNSUPPORTED','LSH_NO_ACTIVITY','LSH_SURFACE_DECLINED','CONTENT_UPGRADE_REQUIRED'];
+  const code = allowed.find(value => raw.includes(value));
+  if (!code) return raw ? 'LSH_UNKNOWN' : '';
+  if (code === 'LSH_BOOTSTRAP_TIMEOUT') {
+    const stage = /LSH_BOOTSTRAP_TIMEOUT:(source_gate|hello|state|session_mint|carrier_bootstrap)(?![a-z_])/.exec(raw)?.[1];
+    return stage ? `${code}:${stage}` : code;
+  }
+  return code;
 }

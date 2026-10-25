@@ -45,14 +45,14 @@ const LOCAL_PREFIX = "local:";
 
 export type AssetRoute =
   | { kind: "local"; assetId: string; owner: "" }
-  | { kind: "desktop"; assetId: string; owner: string }
+  | { kind: "desktop"; assetId: string; owner: string; library?: string }
   /** A bare Desktop asset id with no owner encoded. The owner is unprovable,
    *  so this fails closed instead of guessing from the live connection. */
   | { kind: "unowned"; assetId: string; owner: "" };
 
 /** Build the route for a Desktop asset owned by `instanceId`. */
-export function desktopAssetRoute(instanceId: string, assetId: string): string {
-  return `${DESKTOP_PREFIX}${encodeURIComponent(instanceId)}:${encodeURIComponent(assetId)}`;
+export function desktopAssetRoute(instanceId: string, assetId: string, library?: string): string {
+  return library ? `desktop-library:${encodeURIComponent(instanceId)}:${encodeURIComponent(library)}:${encodeURIComponent(assetId)}` : `${DESKTOP_PREFIX}${encodeURIComponent(instanceId)}:${encodeURIComponent(assetId)}`;
 }
 
 /** Build the route for a local (本机) asset. */
@@ -67,6 +67,13 @@ export function localAssetRoute(assetId: string): string {
  */
 export function parseAssetRoute(route: string): AssetRoute {
   const raw = route || "";
+  if (raw.startsWith("desktop-library:")) {
+    try {
+      const parts = raw.slice("desktop-library:".length).split(":").map(decodeURIComponent);
+      if (parts.length === 3 && parts.every(Boolean)) return {kind:"desktop",owner:parts[0],library:parts[1],assetId:parts[2]};
+    } catch {}
+    return {kind:"unowned",owner:"",assetId:""};
+  }
   if (raw.startsWith(LOCAL_PREFIX)) {
     return { kind: "local", assetId: raw.slice(LOCAL_PREFIX.length), owner: "" };
   }

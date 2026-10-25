@@ -190,7 +190,7 @@ test("R44-5 — the page no longer wires dataStore into any vault-currentness pa
   assert.ok(src.includes("session.observeNoteCacheVersion(desktopVersion)"),
     "dataStore feeds note-cache freshness for previews only");
   // The gate input is owner + connection only.
-  assert.ok(src.includes("session.desktopViewFor({ paired, connected, instanceId })"),
+  assert.ok(src.includes("session.desktopViewFor({ paired, connected, instanceId, vaultId:selectedVault, readable: selectedLibraryReadable(libraries, \"knowledge\") })"),
     "the synchronous gate no longer receives a version");
 });
 

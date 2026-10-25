@@ -16,6 +16,7 @@ import type { HitSegment } from "./searchHit";
 
 export type KnowledgeNoteRowProps = {
   title: string;
+  current?: boolean;
   /** The body line (the p element — "" when only metadata is known). */
   body: string;
   /** The metadata line (the small element — body preview or fallback). */
@@ -46,7 +47,7 @@ export type KnowledgeNoteRowProps = {
 };
 
 export function KnowledgeNoteRow({
-  title, body, meta, noteId, onClick, activateOnClick = false, onLongPress, selected = false, selecting = false,
+  title, body, meta, noteId, onClick, current = false, activateOnClick = false, onLongPress, selected = false, selecting = false,
   onDragSelect, onDragEnd, titleHit, bodyHitLine, onVisibility,
 }: KnowledgeNoteRowProps) {
   const hostRef = useRef<HTMLButtonElement | null>(null);
@@ -75,6 +76,7 @@ export function KnowledgeNoteRow({
       type="button"
       className={"st-note-row" + (selecting ? " is-selecting" : "") + (selected ? " is-selected" : "")}
       ref={hostRef}
+      aria-current={current ? "page" : undefined}
       aria-pressed={selecting ? selected : undefined}
       data-note-id={noteId}
       {...(activateOnClick && !onLongPress ? { onClick } : press.handlers)}

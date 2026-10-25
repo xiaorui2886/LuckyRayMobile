@@ -1,3 +1,17 @@
+import { managedNoteResources } from "../services/managedNoteResources";
+import DesktopNotePreview from "../components/DesktopNotePreview";
+import { SafeNoteMarkdown } from "../components/SafeNoteMarkdown";
+import { managedVault, managedNoteRoute, parseManagedNoteRoute, type ManagedNote, type ManagedVault } from "../services/managedVault";
+import { managedBoundWikiChoices } from "./kit/managedWiki";
+import { wikiChoiceRows } from "./kit/wikiChoiceRows";
+import {NotePaperRail} from "./kit/NotePaperRail";
+import { NoteSidePanel } from "./kit/NoteSidePanel";
+import { trackKnowledgeWrite } from "../services/knowledgeCacheSafety";
+import { LocalNoteUploadSheet } from "./kit/LocalNoteUploadSheet";
+import { noteFormatActions, applyNoteFormatAction, type NoteFormatAction, type NoteFormatSnapshot } from "./kit/noteFormatActions";
+import { NoteOutline } from "./kit/NoteOutline";
+import { useNoteHeadingNavigation, type NoteHeadingIntent } from "./kit/useNoteHeadingNavigation";
+import { settledNoteRead } from "./kit/settledNoteRead";
 import { desktopNotePrefetch } from "../services/desktopNotePrefetch";
 import { NoteActionIcon } from '../presentation/still01/editor/NoteActionIcon';
 import { wikiChoices } from "./kit/wikiChoices";
@@ -61,7 +75,7 @@ import { usePageCurrent, useRetainedPage } from "../presentation/still01/PageLay
 import type { NoteBodyFocusRequest } from "../presentation/still01/editor/noteTapEditing";
 
 type Mode = "read" | "edit";
-type SheetName = "" | "more" | "state" | "conflict" | "tag" | "format" | "delete" | "switcher" | "attach" | "rename" | "move" | "relations" | "toolbar" | "browser";
+type SheetName = "" | "upload-local" | "more" | "state" | "conflict" | "tag" | "format" | "delete" | "switcher" | "attach" | "rename" | "move" | "relations" | "toolbar" | "browser" | "outline";
 
 /** The live editor host inside the CURRENT (top) Still page layer. */
 function pageEditorHost(): HTMLElement | null {
@@ -74,13 +88,6 @@ function pageEditorHandle(): CmEditorHandle | null {
 }
 function pageTitleInput(): HTMLInputElement | null {
   return document.querySelector<HTMLInputElement>('.st-detail-stage[data-current="true"] .st-note-title');
-}
-/** Formatting annotates selected user text; it must never replace it with only a template. */
-function formatInsertion(marker: string, selected: string): string {
-  if (!selected) return marker;
-  return marker === "\n[链接文字](https://)"
-    ? `\n[${selected}](https://)`
-    : marker + selected;
 }
 /**
  * CM6-EDITOR-R1: the editor-activity predicate. The original matched the
@@ -98,12 +105,26 @@ function isEditorElement(el: Element | null): boolean {
   return Boolean(el.matches?.(".st-note-editor") || el.closest?.(".st-note-editor"));
 }
 
-export function StillNote({ id, startInEdit, current = true, search }: { id: string; startInEdit?: boolean; current?: boolean; search?: NoteSearchTarget }) {
+export function StillNote({ id, startInEdit, current = true, search, heading }: { id: string; startInEdit?: boolean; current?: boolean; search?: NoteSearchTarget; heading?: NoteHeadingIntent }) {
   const liveCurrent = usePageCurrent(current);
-  const isLocal = id.startsWith("note-");
-  return isLocal
-    ? <LocalStillNote id={id} startInEdit={startInEdit} current={liveCurrent} search={search} />
-    : <DesktopStillNote route={id} startInEdit={startInEdit} current={liveCurrent} search={search} />;
+  const { back } = useStillNav();
+  const [aliasRetry, setAliasRetry] = useState(0);
+  const direct = parseManagedNoteRoute(id);
+  const [resolution, setResolution] = useState<{ route: string; target: { localVaultId: string; noteId: string } | null; error?: boolean }>();
+  useEffect(() => {
+    if (parseManagedNoteRoute(id)) return;
+    let alive = true;
+    managedVault.resolveLegacy(id).then(target => { if (alive) setResolution({ route: id, target }); }, () => { if (alive) setResolution({ route: id, target: null, error: true }); });
+    return () => { alive = false; };
+  }, [id, aliasRetry]);
+  const resolved = (resolution?.route === id ? resolution.target : null) || direct;
+  if (resolved) return <LocalStillNote key={managedNoteRoute(resolved.localVaultId, resolved.noteId)} id={managedNoteRoute(resolved.localVaultId, resolved.noteId)} managed={resolved} onManagedRedirect={target => setResolution({ route: id, target })} startInEdit={startInEdit} current={liveCurrent} search={search} heading={heading} />;
+  if (resolution?.route !== id) return <div className="st-view"><Header title="笔记" /></div>;
+  // Failed alias reads cannot silently reopen a migrated SQLite/replica copy.
+  if (resolution.error) return <div className="st-view"><Header title="笔记" /><p role="status">暂时无法确认笔记位置，原有内容未改变。</p><Button kind="quiet" onClick={back}>返回</Button><Button onClick={() => setAliasRetry(value => value + 1)}>重试</Button></div>;
+  return id.startsWith("note-")
+    ? <LocalStillNote key={id} id={id} startInEdit={startInEdit} current={liveCurrent} search={search} heading={heading} />
+    : <DesktopStillNote route={id} startInEdit={startInEdit} current={liveCurrent} search={search} heading={heading} />;
 }
 
 /** Explicitly scoped search; the local surface never mixes Desktop rows. */
@@ -115,9 +136,22 @@ export function NoteSwitcherSheet(props: NoteSwitcherProps) {
 // 本机 notes — LocalNoteAutosaveCoordinator authority
 // ---------------------------------------------------------------------------
 
-function LocalStillNote({ id, startInEdit, current, search }: { id: string; startInEdit?: boolean; current: boolean; search?: NoteSearchTarget }) {
+function LocalStillNote({ id, managed, onManagedRedirect, startInEdit, current, search, heading }: { onManagedRedirect?: (target: {localVaultId: string; noteId: string}) => void; managed?: { localVaultId: string; noteId: string }; id: string; startInEdit?: boolean; current: boolean; search?: NoteSearchTarget; heading?: NoteHeadingIntent }) {
   const [searchTarget, setSearchTarget] = useState(search);
-  const { open, back, registerOverlay } = useStillNav();
+  const { open, back, registerOverlay, conn } = useStillNav();
+  const managedRecord = useRef<ManagedNote | null>(null);
+  const [managedInfo, setManagedInfo] = useState<ManagedVault | null>(null);
+  const managedConnectionAvailable = !managedInfo?.binding || Boolean(conn?.paired && conn.identity?.instanceId === managedInfo.binding.instanceId && conn.ws.state === "connected");
+  const [bodyProblem, setBodyProblem] = useState("");
+  const [loadEpoch, setLoadEpoch] = useState(0);
+  const [hydrating, setHydrating] = useState(false);
+  const [moveFolders, setMoveFolders] = useState<string[]>([]);
+  const mutationBusy = useRef(false);
+  const publishManaged = () => window.dispatchEvent(new Event("luckyray:managed-vault-change"));
+  const routeFor = (noteId: string) => managed ? managedNoteRoute(managed.localVaultId, noteId) : noteId;
+  const sourceId = managed?.noteId || id;
+  const resourceRevision = managedRecord.current?.revision;
+  const resources = managedNoteResources(managedRecord.current);
   const [loaded, setLoaded] = useState(false);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -138,7 +172,8 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
   const [saveMsg, setSaveMsg] = useState("");
   const [sheet, setSheet] = useState<SheetName>("");
   const [tagInput, setTagInput] = useState("");
-  const [formatSel, setFormatSel] = useState<{ start: number; end: number } | null>(null);
+  const [formatSnapshot, setFormatSnapshot] = useState<NoteFormatSnapshot | null>(null);
+  const [formatNotice, setFormatNotice] = useState("");
   const coordinator = useRef<LocalNoteAutosaveCoordinator | null>(null);
   const editingActivity = useRef(0);
   const localComposing = useRef(false);
@@ -150,6 +185,15 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
   if (currentRef.current !== current) currentGeneration.current += 1;
   currentRef.current = current;
   useEffect(() => () => { currentRef.current = false; currentGeneration.current += 1; }, []);
+  const wasCurrent = useRef(current);
+  useEffect(() => {
+    const resumed = current && !wasCurrent.current; wasCurrent.current = current;
+    // A retained clean page may have been transferred while covered. Recheck
+    // the source identity before editing again; never replace an unsaved draft.
+    if (managed && resumed && !coordinator.current?.isDirty() && !failedRef.current) {
+      setLoaded(false); setBodyProblem(""); setLoadEpoch(value => value + 1);
+    }
+  }, [current]);
   backRef.current = () => void guardedBack();
 
   // Guarded Back: a failed flush blocks leaving (same contract as the legacy
@@ -197,7 +241,33 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
     let alive = true;
     (async () => {
       try {
-        const n = await api.localNoteGet(id);
+        const n = managed ? await managedVault.get(managed.localVaultId, managed.noteId) : await api.localNoteGet(id);
+        if (!alive) return;
+        if (managed) {
+          if (n.localVaultId !== managed.localVaultId || n.noteId !== managed.noteId) throw Error("MANAGED_NOTE_SCOPE_MISMATCH");
+          const transfer = (n.remote as {transferredTo?: {localVaultId?: unknown; noteId?: unknown}; transferPending?: unknown} | undefined);
+          const target = transfer?.transferredTo;
+          if (target) {
+            if (typeof target.localVaultId !== "string" || typeof target.noteId !== "string" || !target.localVaultId || !target.noteId || (target.localVaultId === managed.localVaultId && target.noteId === managed.noteId)) throw Error("MANAGED_TRANSFER_TARGET_INVALID");
+            const verified = await managedVault.get(target.localVaultId, target.noteId);
+            if (!alive) return;
+            if (verified.localVaultId !== target.localVaultId || verified.noteId !== target.noteId || (verified.remote as {transferredTo?: unknown} | undefined)?.transferredTo) throw Error("MANAGED_TRANSFER_TARGET_INVALID");
+            onManagedRedirect?.({localVaultId: target.localVaultId, noteId: target.noteId});
+            return; // Never hydrate the retained source into an editable surface.
+          }
+          const vaults = await managedVault.list();
+          if (!alive) return;
+          const vaultInfo = vaults.items.find(vault => vault.localVaultId === managed.localVaultId);
+          if (!vaultInfo) throw Error("MANAGED_VAULT_UNAVAILABLE");
+          setManagedInfo(vaultInfo);
+          managedRecord.current = n as ManagedNote;
+          if (transfer?.transferPending || vaultInfo.transferState) {
+            setTitle(n.title || "笔记"); setContent(typeof n.content === "string" ? n.content : ""); setBodyProblem("正在加入同步库，原始笔记暂为只读。请回到笔记库继续完成。"); setMode("read"); setLoaded(true); return;
+          }
+          if (n.bodyState !== "ready" || typeof n.content !== "string") {
+            setTitle(n.title || "笔记"); setContent(typeof n.content === "string" ? n.content : ""); setBodyProblem(n.bodyState === "conflict" ? "笔记存在冲突，原有版本已保留。请先处理冲突，不能覆盖编辑。" : "正文尚未保存在此设备，不能作为空白笔记编辑。"); setMode("read"); setLoaded(true); return;
+          }
+        }
         if (!alive) return;
         setTitle(n.title ?? "");
         setContent(n.content ?? "");
@@ -212,26 +282,33 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
             id,
             snap,
             async (s) => {
-              await api.localNoteUpdate(id, s.title, s.content, s.tags);
-              localDataStore.publish("note");
+              if (managed) {
+                const previous = managedRecord.current;
+                if (!previous || previous.bodyState !== "ready") throw Error("MANAGED_BODY_UNAVAILABLE");
+                managedRecord.current = await managedVault.save(managed.localVaultId, managed.noteId, previous.revision, s.title, s.content, s.tags);
+                publishManaged();
+              } else {
+                await api.localNoteUpdate(id, s.title, s.content, s.tags);
+                localDataStore.publish("note");
+              }
             },
             1000
           );
           coordinator.current.subscribe((st, err) => {
             setSaveState(st);
             failedRef.current = st === "error";
-            if (err) setSaveMsg("自动保存失败: " + err);
+            if (err) setSaveMsg(/VAULT_LEGACY_NOTE_MIGRATED|VAULT_NOTE_TRANSFERRED|VAULT_NOTE_TRANSFER_PENDING/.test(String(err)) ? "笔记正在整理或已加入同步库，当前草稿保留但尚未保存；请先复制草稿，再从目标库继续编辑。" : failureCopy(err, "自动保存尚未完成，当前草稿已保留，请重试。"));
           });
         } else {
           coordinator.current.resetBase(snap);
         }
         setLoaded(true);
       } catch (e: any) {
-        if (alive) { setSaveMsg("加载笔记失败: " + failureCopy(e, "")); setLoaded(true); }
+        if (alive) { setBodyProblem("加载笔记失败: " + failureCopy(e, "")); setLoaded(true); }
       }
     })();
     return () => { alive = false; };
-  }, [id]);
+  }, [id, loadEpoch]);
 
   // CM6-EDITOR-R1: leaving this local note DESTROYS its retained editor.
   useEffect(() => () => { forgetCmView(cmScope("local", "", "", id)); }, [id]);
@@ -246,7 +323,7 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
     const unchanged =
       cur.title === snap.title && cur.content === snap.content &&
       cur.tags.length === snap.tags.length && cur.tags.every((t, i) => t === snap.tags[i]);
-    if (unchanged && !c.isDirty()) return;
+    if (unchanged && (managed || !c.isDirty())) return;
     dirtyRef.current = true;
     c.updateSnapshot(snap);
   }, [title, content, tags]);
@@ -271,7 +348,7 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
   }, []);
 
   async function guardEdit(): Promise<boolean> {
-    if (!currentRef.current) return false;
+    if (!currentRef.current || bodyProblem || mutationBusy.current) return false;
     const generation = currentGeneration.current;
     const c = coordinator.current;
     if (failedRef.current) { setSaveState("error"); return false; }
@@ -296,77 +373,115 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
   async function toggleFlag(flag: "pinned" | "favorite" | "archived") {
     const current = flag === "pinned" ? pinned : flag === "favorite" ? favorite : archived;
     try {
-      await publishAfter("note", api.localNoteSetFlags(id, { [flag]: !current }));
+      if (managed) {
+        if (!(await guardEdit()) || mutationBusy.current) return;
+        mutationBusy.current = true;
+        const previous = managedRecord.current!;
+        managedRecord.current = await managedVault.setFlags(managed.localVaultId, managed.noteId, previous.revision, { [flag]: !current });
+        publishManaged();
+      } else await publishAfter("note", api.localNoteSetFlags(id, { [flag]: !current }));
       if (flag === "pinned") setPinned((v) => !v);
       if (flag === "favorite") setFavorite((v) => !v);
       if (flag === "archived") setArchived((v) => !v);
     } catch (e: any) {
       setSaveMsg(failureCopy(e, "操作失败"));
-    }
+    } finally { mutationBusy.current = false; }
   }
 
   async function remove() {
     if (!currentRef.current) return;
     const generation = currentGeneration.current;
     try {
-      await publishAfter("note", api.localNoteDelete(id));
+      if (managed) {
+        if (!(await guardEdit()) || mutationBusy.current) return;
+        mutationBusy.current = true;
+        await managedVault.trash(managed.localVaultId, managed.noteId, managedRecord.current!.revision);
+        publishManaged();
+        if (managedInfo?.binding) toast.success("删除已提交；电脑端确认前保持待同步。");
+      } else await publishAfter("note", api.localNoteDelete(id));
       if (currentRef.current && generation === currentGeneration.current) back();
     } catch (e: any) {
       setSaveMsg(failureCopy(e, "删除笔记失败"));
-    }
+    } finally { mutationBusy.current = false; }
   }
 
-  function insertFormat(marker: string) {
-    if (!currentRef.current) return;
+  async function hydrateBody() {
+    if (!managed || managedRecord.current?.bodyState !== "missing" || !currentRef.current || hydrating) return;
+    if (!managedConnectionAvailable) { setSaveMsg("请连接此库关联的电脑后获取正文。"); return; }
+    setHydrating(true); setSaveMsg("");
     const generation = currentGeneration.current;
-    const handle = pageEditorHandle();
-    if (handle) {
-      if (handle.isComposing() || handle.compositionStarted()) return;
-      // CM6-EDITOR-R1: the format insertion is a USER transaction — it
-      // enters history and flows through the normal onChange → coordinator
-      // save chain exactly once, with the caret after the formatted text.
-      const pos = formatSel ?? handle.getSelection();
-      const insertion = formatInsertion(marker, handle.getValue().slice(pos.start, pos.end));
-      handle.focus();
-      handle.replaceRange(insertion, pos);
-      setSheet("");
-      return;
-    }
-    const el = pageEditorHost() as HTMLTextAreaElement | null;
-    const pos = formatSel ?? (el ? { start: el.selectionStart ?? content.length, end: el.selectionEnd ?? content.length } : { start: content.length, end: content.length });
-    const insertion = formatInsertion(marker, content.slice(pos.start, pos.end));
-    const next = content.slice(0, pos.start) + insertion + content.slice(pos.end);
-    setContent(next);
-    setSheet("");
-    setTimeout(() => {
-      if (!currentRef.current || generation !== currentGeneration.current) return;
-      const editor = pageEditorHost() as HTMLTextAreaElement | null;
-      if (editor) { editor.focus(); editor.setSelectionRange(pos.start + insertion.length, pos.start + insertion.length); }
-    }, 0);
+    try {
+      await managedVault.hydrate(managed.localVaultId, managed.noteId);
+      publishManaged();
+      if (currentRef.current && generation === currentGeneration.current) { setLoaded(false); setBodyProblem(""); setLoadEpoch(value => value + 1); }
+    } catch (error) { setSaveMsg(failureCopy(error, "正文尚未获取，请检查关联电脑连接与读取权限后重试。")); }
+    finally { setHydrating(false); }
   }
+
+  async function createNote() {
+    if (!(await guardEdit())) return;
+    if (!managed) { open("new-note"); return; }
+    mutationBusy.current = true;
+    const generation = currentGeneration.current;
+    try {
+      const note = await managedVault.create(managed.localVaultId, "新笔记", "", [], managedRecord.current?.folder || "");
+      publishManaged();
+      if (currentRef.current && generation === currentGeneration.current) { setSheet(""); open("note", routeFor(note.noteId), { edit: true }); }
+    } catch (error) { setSaveMsg(failureCopy(error, "新建笔记失败")); }
+    finally { mutationBusy.current = false; }
+  }
+  async function moveNote(folder: string) {
+    if (!managed || !(await guardEdit())) return;
+    mutationBusy.current = true;
+    try {
+      managedRecord.current = await managedVault.move(managed.localVaultId, managed.noteId, managedRecord.current!.revision, folder);
+      publishManaged(); setSheet("");
+    } catch (error) { setSaveMsg(failureCopy(error, "移动笔记失败")); }
+    finally { mutationBusy.current = false; }
+  }
+
+  function insertFormat(action: NoteFormatAction) {
+    if (!currentRef.current || mode !== "edit") return;
+    if (applyNoteFormatAction(pageEditorHandle(), formatSnapshot, action)) setSheet("");
+    else setFormatNotice("当前位置暂不适合该操作，或正文、选区已变化。请返回正文调整后重试。");
+  }
+
+  const { navigateHeading, readingHeading, consumeReadingHeading } = useNoteHeadingNavigation({
+    intent: heading, body: content, current, ready: loaded, mode,
+    composing: () => localComposing.current, editor: pageEditorHandle,
+    clearSearch: () => setSearchTarget(undefined), closeSheet: () => setSheet(""), notice: message => { toast.warn(message); },
+  });
 
   if (!loaded) {
     return <div className="st-view"><Header title="笔记" /></div>;
   }
 
-  const state: NoteState = saveState === "error" ? "error" : "local";
+  if (bodyProblem) return <NoteSurface title={title} body={content} notebook={managed ? "笔记" : "笔记"} mode="read" state="error" readOnly savedLabel={bodyProblem}
+    onBack={() => void guardedBack()} onBrowse={() => {}} onMore={() => {}} onNew={() => {}} onEdit={() => {}} onChange={() => {}} onFormat={() => {}} onSearch={() => {}} onState={() => {}}
+    readingContent={<><p className="st-sheet-copy" role="status">{bodyProblem}</p>{managedRecord.current?.bodyState === "missing" && managedInfo?.binding ? <><Button disabled={hydrating || !managedConnectionAvailable} onClick={() => void hydrateBody()}>{hydrating ? "正在获取正文…" : "从关联电脑获取正文"}</Button>{!managedConnectionAvailable ? <p className="st-sheet-copy">请先连接此库关联的电脑。</p> : null}</> : null}{saveMsg ? <p className="st-sheet-copy" role="status">{saveMsg}</p> : null}{content ? managed ? <DesktopNotePreview localVaultId={managed.localVaultId} revision={resourceRevision} instance="" vault={managed.localVaultId} note={managed.noteId} content={content} resources={resources} online={false} registerOverlay={registerOverlay} /> : <SafeNoteMarkdown content={content} /> : null}</>} />;
+
+  const syncState = managedRecord.current?.syncState;
+  const state: NoteState = saveState === "error" ? "error" : !managed ? "local" : syncState === "incomplete" ? "metadata" : syncState === "pending" || syncState === "synced" || syncState === "conflict" ? syncState : "local";
+  const managedLabel = syncState === "pending" ? "已保存在本地 · 待同步" : syncState === "synced" ? "已同步" : syncState === "incomplete" ? "本地文件 · 附件尚不完整" : syncState === "conflict" ? "本地文件 · 需处理冲突" : "已保存在本地";
   const savedLabel = mode === "edit"
-    ? (saveState === "saving" ? "正在保存…" : saveState === "unsaved" ? "未保存" : saveState === "error" ? (saveMsg || "保存出错") : "已自动保存")
-    : "本机笔记";
+    ? (saveState === "saving" ? "正在保存…" : saveState === "unsaved" ? "未保存" : saveState === "error" ? (saveMsg || "保存出错") : managed ? managedLabel : "已自动保存")
+    : managed ? managedLabel : "本机笔记";
 
   return (
-    <>
+    <NotePaperRail panel={sheet === "browser" ? "left" : sheet === "relations" ? "right" : null} disabled={!current || Boolean(sheet && sheet !== "browser" && sheet !== "relations")} onPanelChange={side => setSheet(side === "left" ? "browser" : side === "right" ? "relations" : "")}>
       <NoteSurface
+        chromeBlocked={!current || Boolean(sheet) || Boolean(searchTarget)}
+        editorScope={cmScope("local", "", "", id)}
         title={title}
         body={content}
-        notebook="本机笔记"
+        notebook={managed ? "笔记" : "本机笔记"}
         state={state}
         mode={mode}
         savedLabel={savedLabel}
         onBack={() => void guardedBack()}
-        onBrowse={async () => { if (await guardEdit()) setSheet("browser"); }}
+        onBrowse={() => setSheet("browser")}
         onMore={() => setSheet("more")}
-        onNew={async () => { if (await guardEdit()) open("new-note"); }}
+        onNew={() => void createNote()}
         onEdit={(offset) => {
           if (!currentRef.current) return;
           editingActivity.current += 1;
@@ -375,46 +490,58 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
         }}
         onRead={() => void enterReading()}
         onRelations={() => setSheet("relations")}
-        onChange={(t, b) => { editingActivity.current += 1; setTitle(t); setContent(b); setSaveMsg(""); }}
+        onChange={(t, b) => { editingActivity.current += 1; if (managed) coordinator.current?.updateSnapshot({ title: t, content: b, tags }); setTitle(t); setContent(b); setSaveMsg(""); }}
         onCommand={command => { pageEditorHandle()?.runCommand(command); }}
         onFormat={() => {
           const handle = pageEditorHandle();
-          if (handle) {
-            if (handle.isComposing() || handle.compositionStarted()) return;
-            setFormatSel(handle.getSelection()); setSheet("format"); return;
-          }
-          const el = pageEditorHost() as HTMLTextAreaElement | null;
-          setFormatSel(el ? { start: el.selectionStart ?? content.length, end: el.selectionEnd ?? content.length } : null);
+          if (mode !== "edit" || !handle || document.activeElement === pageTitleInput()
+            || handle.isComposing() || handle.compositionStarted()) return;
+          setFormatNotice("");
+          setFormatSnapshot({ body: handle.getValue(), selection: handle.getSelection() });
           setSheet("format");
         }}
         onSearch={() => setSheet("switcher")}
         onState={() => setSheet("state")}
         readingContent={<NoteReadingContent scope={cmScope("local", "", "", id)} body={content} title={title}
+          heading={readingHeading} onHeadingConsumed={consumeReadingHeading}
           search={searchTarget} onSearchChange={setSearchTarget} onDismissSearch={() => setSearchTarget(undefined)}>{find =>
-          <LocalKnowledgeReader source={id} content={content} current={current && !sheet} find={find} registerOverlay={registerOverlay}
-            onNavigate={async (noteId, isCurrent) => {
+          <LocalKnowledgeReader source={sourceId} localVaultId={managed?.localVaultId} binding={managedInfo?.binding || undefined} resources={resources} revision={resourceRevision} content={content} current={current && !sheet} find={find} registerOverlay={registerOverlay}
+            onNavigate={async (noteId, isCurrent, targetHeading) => {
               if (!(await guardEdit()) || !currentRef.current || !isCurrent()) return;
-              if (noteId !== id) open("note", noteId, { edit: false, linked: true });
+              if (noteId === sourceId && targetHeading) navigateHeading(targetHeading);
+              else if (noteId !== sourceId) open("note", routeFor(noteId), { edit: false, linked: true, noteHeading: targetHeading ? { fragment: targetHeading } : undefined });
             }} />}</NoteReadingContent>}
-        bodyEditor={<MobileCmEditor
+        bodyEditor={<LocalKnowledgeReader source={sourceId} localVaultId={managed?.localVaultId} binding={managedInfo?.binding || undefined} resources={resources} revision={resourceRevision} content={content} current={current && !sheet && mode === "edit"}
+          find={{ body: content, ranges: [], index: 0 }} registerOverlay={registerOverlay}
+          onNavigate={async (noteId, isCurrent, targetHeading) => {
+            if (!(await guardEdit()) || !currentRef.current || !isCurrent()) return;
+            if (noteId === sourceId && targetHeading) navigateHeading(targetHeading);
+            else if (noteId !== sourceId) open("note", routeFor(noteId), { edit: true, linked: true, noteHeading: targetHeading ? { fragment: targetHeading } : undefined });
+          }} renderEditor={(follow, linkStatus) => <MobileCmEditor registerOverlay={registerOverlay}
+          linkStatus={linkStatus}
+          onWikiLink={follow}
           sourceMode={sourceMode}
+          imageScope={managed && resourceRevision ? { instance: "", vault: managed.localVaultId, note: managed.noteId, localVaultId: managed.localVaultId, revision: resourceRevision, resources, online: false } : undefined}
           scope={cmScope("local", "", "", id)}
-          wikiLoader={query => wikiChoices(query)} assistActive={current && !sheet && mode === "edit"}
+          wikiLoader={async query => { if (!managed) return wikiChoices(query); const page = await managedVault.notes({ localVaultId: managed.localVaultId, q: query, page: 1, limit: 50, sort: "name" }); const items = managedInfo?.binding ? managedBoundWikiChoices(managedRecord.current, page.items, query, { localVaultId: managed.localVaultId, binding: managedInfo.binding }) : wikiChoiceRows(page.items, query, undefined, true); return { items: items.slice(0, 12), partial: page.hasMore || items.length > 12 }; }} assistActive={current && !sheet && mode === "edit"}
           value={content}
           search={searchTarget}
           onDismissSearch={() => setSearchTarget(undefined)}
-          onChange={(next) => { editingActivity.current += 1; setContent(next); setSaveMsg(""); }}
+          onChange={(next) => { editingActivity.current += 1; if (managed) coordinator.current?.updateSnapshot({ title, content: next, tags }); setContent(next); setSaveMsg(""); }}
           placeholderText=""
           focusRequest={bodyFocus}
-        />}
+        />} />}
       />
-      {sheet === "relations" ? <Sheet title="笔记链接" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
-        <LocalKnowledgeReader panelOnly source={id} content={content} current={current} find={{ body: content, ranges: [], index: 0 }} registerOverlay={registerOverlay}
-          onNavigate={async (noteId, isCurrent) => {
+      {sheet === "relations" ? <NoteSidePanel side="right" title="笔记链接" registerOverlay={registerOverlay} onClose={() => setSheet("")}>
+        <LocalKnowledgeReader panelOnly source={sourceId} localVaultId={managed?.localVaultId} binding={managedInfo?.binding || undefined} resources={resources} revision={resourceRevision} content={content} current={current} find={{ body: content, ranges: [], index: 0 }} registerOverlay={registerOverlay}
+          onNavigate={async (noteId, isCurrent, targetHeading) => {
             if (!(await guardEdit()) || !currentRef.current || !isCurrent()) return;
-            setSheet(""); if (noteId !== id) open("note", noteId, { edit: false, linked: true });
+            setSheet(""); if (noteId === sourceId && targetHeading) navigateHeading(targetHeading);
+              else if (noteId !== sourceId) open("note", routeFor(noteId), { edit: false, linked: true, noteHeading: targetHeading ? { fragment: targetHeading } : undefined });
           }} />
-      </Sheet> : null}
+      </NoteSidePanel> : null}
+      {sheet === "outline" ? <NoteOutline body={content} registerOverlay={registerOverlay}
+        onClose={() => setSheet("")} onSelect={navigateHeading} /> : null}
       {sheet === "more" ? (
         <Sheet title={title || "笔记"} registerDismiss={registerOverlay} onClose={() => setSheet("")}>
           <Option label="重命名" iconSlot={<NoteActionIcon name="rename" size={23}/>} onClick={() => {
@@ -433,11 +560,14 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
             if (editor?.isComposing() || editor?.compositionStarted()) return;
             setSourceMode(value => !value); setMode("edit"); setSheet("");
           }} />
+          <Option label="笔记大纲" icon="heading" onClick={() => setSheet("outline")} />
           <Option label="编辑工具栏" iconSlot={<NoteActionIcon name="tools" size={23}/>} onClick={() => setSheet("toolbar")} />
           <Option label="查看来源与状态" iconSlot={<NoteActionIcon name="info" size={23}/>} onClick={() => setSheet("state")} />
-          <Option label="删除笔记" iconSlot={<NoteActionIcon name="trash" size={23}/>} danger onClick={() => setSheet("delete")} />
+          {managed ? <Option label="移动到目录" icon="folder" onClick={async () => { if (!(await guardEdit())) return; try { const result = await managedVault.folders(managed.localVaultId); setMoveFolders(result.paths); setSheet("move"); } catch (error) { setSaveMsg(failureCopy(error, "读取目录失败")); } }} /> : <Option label="上传到电脑知识库" icon="monitor" onClick={async () => { if (await guardEdit()) setSheet("upload-local"); }} />}
+          <Option label={managedInfo?.binding ? "删除并同步到此电脑知识库" : "删除笔记"} iconSlot={<NoteActionIcon name="trash" size={23}/>} danger onClick={() => setSheet("delete")} />
         </Sheet>
       ) : null}
+      {sheet === "upload-local" ? <LocalNoteUploadSheet noteId={id} conn={conn} registerOverlay={registerOverlay} onClose={() => setSheet("")} /> : null}
       {sheet === "tag" ? (
         <Sheet title="标签" registerDismiss={registerOverlay} onClose={() => setSheet("")}
           footer={<Button onClick={() => {
@@ -460,36 +590,39 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
       ) : null}
       {sheet === "state" ? (
         <Sheet title="来源与状态" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
-          <div className="st-metadata-row"><span>来源</span><b>本机笔记</b></div>
-          <p className="st-sheet-copy">只保存在手机。本机笔记不会被界面自动变成电脑笔记。</p>
+          <div className="st-metadata-row"><span>来源</span><b>{managed ? "本地文件" : "本机笔记"}</b></div>
+          <p className="st-sheet-copy">{managed ? "正文以本地文件为准；同步状态不会改变当前笔记身份。" : "只保存在手机。本机笔记不会被界面自动变成电脑笔记。"}</p>
         </Sheet>
       ) : null}
       {sheet === "toolbar" ? <EditorToolbarSheet registerOverlay={registerOverlay} onClose={() => setSheet("")} /> : null}
       {sheet === "format" ? (
         <Sheet title="文本格式" retainEditorFocus registerDismiss={registerOverlay} onClose={() => setSheet("")}>
-          {([["小标题", "\n\n## "], ["无序列表", "\n- "], ["待办事项", "\n- [ ] "], ["引用", "\n> "], ["链接", "\n[链接文字](https://)"]] as const).map(([label, marker]) => (
-            <Option key={label} label={label} icon={({"小标题":"heading","无序列表":"bullet","待办事项":"task","引用":"quote","链接":"link"} as Record<string,string>)[label]} onClick={() => insertFormat(marker)} />
+          {formatNotice ? <p className="st-sheet-copy" role="status">{formatNotice}</p> : null}
+          {noteFormatActions.map(action => (
+            <Option key={action.label} label={action.label} icon={action.icon} onClick={() => insertFormat(action)} />
           ))}
         </Sheet>
       ) : null}
       {sheet === "delete" ? (
-        <Sheet title="删除这条内容？" registerDismiss={registerOverlay} onClose={() => setSheet("")}
+        <Sheet title={managedInfo?.binding ? "删除并同步到此电脑知识库？" : "删除这条内容？"} registerDismiss={registerOverlay} onClose={() => setSheet("")}
           footer={<>
             <Button kind="quiet" onClick={() => setSheet("")}>取消</Button>
-            <Button kind="danger" onClick={() => { setSheet(""); void remove(); }}>删除</Button>
+            <Button kind="danger" onClick={() => { setSheet(""); void remove(); }}>{managedInfo?.binding ? "确认删除并同步" : "删除"}</Button>
           </>}>
-          <p className="st-sheet-copy">只删除这条本机笔记，其他内容不受影响。</p>
+          <p className="st-sheet-copy">{managedInfo?.binding ? `将删除「${title || "未命名笔记"}」并同步到关联电脑知识库「${managedInfo.name}」。离线时保持待同步，不是仅清理手机缓存。手机保留的历史不代表电脑端可以撤销。` : managed ? "移入本地回收站，其他内容不受影响。" : "只删除这条本机笔记，其他内容不受影响。"}</p>
         </Sheet>
       ) : null}
+      {sheet === "move" && managed ? <Sheet title="移动到目录" registerDismiss={registerOverlay} onClose={() => setSheet("")}><Option label="根目录" icon="folder" onClick={() => void moveNote("")} />{moveFolders.filter(Boolean).map(folder => <Option key={folder} label={folder} icon="folder" onClick={() => void moveNote(folder)} />)}</Sheet> : null}
+      {saveMsg ? <p className="st-note-switcher-status" role="status">{saveMsg}</p> : null}
       {sheet === "switcher" || sheet === "browser" ? (
-        <NoteSwitcherSheet variant={sheet === "browser" ? "browse" : "search"} currentRoute={id} key={sheet} onClose={() => setSheet("")} registerOverlay={registerOverlay} onPick={async (route, target, isCurrent) => {
+        <NoteSwitcherSheet localVaultId={managed?.localVaultId} onNew={() => void createNote()} variant={sheet === "browser" ? "browse" : "search"} currentRoute={id} key={sheet} onClose={() => setSheet("")} registerOverlay={registerOverlay} onPick={async (route, target, isCurrent) => {
           if (!(await guardEdit()) || !isCurrent()) return;
           setSheet("");
-          if (route === id && !target) { setSearchTarget(undefined); setBodyFocus(undefined); setMode("read"); }
+          if (route === id && !target) { setSearchTarget(undefined); }
           else open("note", route, { noteSearch: target });
         }} />
       ) : null}
-    </>
+    </NotePaperRail>
   );
 }
 
@@ -497,7 +630,7 @@ function LocalStillNote({ id, startInEdit, current, search }: { id: string; star
 // 电脑 notes — epoch/generation editor authority
 // ---------------------------------------------------------------------------
 
-function DesktopStillNote({ route, startInEdit, current, search }: { route: string; startInEdit?: boolean; current: boolean; search?: NoteSearchTarget }) {
+function DesktopStillNote({ route, startInEdit, current, search, heading }: { route: string; startInEdit?: boolean; current: boolean; search?: NoteSearchTarget; heading?: NoteHeadingIntent }) {
   const retained = useRetainedPage();
   const [searchTarget, setSearchTarget] = useState(search);
   const { open, back, registerOverlay, conn } = useStillNav();
@@ -523,7 +656,8 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
   const [renameValue, setRenameValue] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [resuming, setResuming] = useState(false);
-  const [formatSel, setFormatSel] = useState<{ start: number; end: number } | null>(null);
+  const [formatSnapshot, setFormatSnapshot] = useState<NoteFormatSnapshot | null>(null);
+  const [formatNotice, setFormatNotice] = useState("");
   // ORG-1B REPAIR-R1.1: single-note move (移动到目录) — canonical move through
   // the session's ONE injected Services client, gated on the REAL capability
   // truth and the note's own provenance facts.
@@ -538,6 +672,7 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
   // closures already bind a local `session` variable for the owner counter).
   const session2 = session;
   const owner = useRef(0);
+  const readSerial = useRef(0);
   const noteOpener = useRef<DesktopNoteOpener | null>(null);
   const editGeneration = useRef(0);
   const epoch = useRef(0);
@@ -590,10 +725,10 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
     return true;
   }
 
-  async function openLinkedNote(noteId: string, isCurrent: () => boolean) {
+  async function openLinkedNote(noteId: string, isCurrent: () => boolean, targetHeading?: string) {
     if (!isCurrent() || !/^[A-Za-z0-9_-]{1,160}$/.test(noteId) || !(await guardNavigation()) || !isCurrent()) return;
-    if (noteId === id) { setMessage("链接指向当前笔记。"); return; }
-    open("note", desktopNoteRoute(instance, vault, noteId));
+    if (noteId === id) { if (targetHeading) navigateHeading(targetHeading); else setMessage("链接指向当前笔记。"); return; }
+    open("note", desktopNoteRoute(instance, vault, noteId), { edit: false, linked: true, noteHeading: targetHeading ? { fragment: targetHeading } : undefined });
   }
 
   async function browseCurrentNotes(variant: "browser" | "switcher" = "switcher") {
@@ -640,21 +775,27 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
     } else { deferredIncoming.current = true; }
   }
   useEffect(() => {
+    let live = true;
     const input = (event: Event) => currentPage.current && isEditorElement((event.target as Element) ?? null);
     const start = (event: Event) => { if (input(event)) { composing.current = true; navigationActivity.current += 1; } };
     const settle = (event: Event) => {
       if (!input(event)) return;
       if (event.type === "compositionend") composing.current = false;
       if (!deferredIncoming.current) return;
-      const ownerToken = owner.current, generation = editGeneration.current;
-      void Promise.all(pending.current).then(() => api.contentNoteGet(instance, vault, id)).then(value => {
-        if (ownerToken === owner.current && currentPage.current) { setNote(value); adoptIncoming(value, generation); }
-      }).catch(() => {});
+      const ownerToken = owner.current, generation = editGeneration.current, serial = ++readSerial.current;
+      void settledNoteRead({
+        pending: [...pending.current],
+        isCurrent: () => live && serial === readSerial.current && ownerToken === owner.current
+          && currentPage.current && generation === editGeneration.current && !pending.current.size && !failed.current,
+        read: () => api.contentNoteGet(instance, vault, id),
+        apply: value => { setNote(value); adoptIncoming(value, generation); },
+      });
     };
     document.addEventListener("compositionstart", start, true);
     document.addEventListener("compositionend", settle, true);
     document.addEventListener("blur", settle, true);
     return () => {
+      live = false;
       document.removeEventListener("compositionstart", start, true);
       document.removeEventListener("compositionend", settle, true);
       document.removeEventListener("blur", settle, true);
@@ -731,13 +872,20 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
   // noteId; parent preserved; no Desktop N+1 (the read is the local cache).
   useEffect(() => {
     if (version === 0) return;
-    void api.contentNoteGet(instance, vault, id).then((value) => {
-      if (!value) return;
-      if (value.pendingKind !== "create" || !value.dirty) return; // only pending creates can be auto-renamed
-      session2.projection.update(instance, vault, id, { title: value.title || "新笔记" });
-    }).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [version]);
+    let live = true;
+    const session = owner.current, generation = editGeneration.current;
+    void settledNoteRead({
+      pending: [...pending.current],
+      isCurrent: () => live && session === owner.current && generation === editGeneration.current
+        && !pending.current.size && !failed.current,
+      read: () => api.contentNoteGet(instance, vault, id),
+      apply: value => {
+        if (!value || value.pendingKind !== "create" || !value.dirty) return;
+        session2.projection.update(instance, vault, id, { title: value.title || "新笔记" });
+      },
+    });
+    return () => { live = false; };
+  }, [version, instance, vault, id]);
 
   useEffect(() => {
     owner.current++;
@@ -763,10 +911,19 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
         if (loaded.refreshed || (prefetched && prefetched.revision === cached.revision && hasReadableBody(cached) && !cached.bodyOutdated)) return; // baseline already fetched
         const gen = editGeneration.current;
         try {
-          const fresh = await api.contentNoteRefresh(instance, vault, id);
-          if (session !== owner.current) return;
-          setNote(fresh);
-          adoptIncoming(fresh, gen);
+          await api.contentNoteRefresh(instance, vault, id);
+          if (session !== owner.current || gen !== editGeneration.current || !isAttemptCurrent()) return;
+          // Remote refresh may finish after a newer cache observation. Re-read
+          // the current cache instead of displaying its delayed response bytes.
+          const serial = ++readSerial.current;
+          await settledNoteRead({
+            pending: [...pending.current],
+            isCurrent: () => serial === readSerial.current && session === owner.current
+              && isAttemptCurrent() && currentPage.current && gen === editGeneration.current
+              && !pending.current.size && !failed.current,
+            read: () => api.contentNoteGet(instance, vault, id),
+            apply: fresh => { setNote(fresh); adoptIncoming(fresh, gen); },
+          });
         } catch {
           // Readability comes from the CACHED BODY, never the latest summary.
           const missing = missingBodyMessage(cached);
@@ -799,8 +956,14 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
     if (!epoch.current) return;
     const session = owner.current;
     const gen = editGeneration.current;
-    void api.contentNoteGet(instance, vault, id).then((value) => {
-      if (session !== owner.current) return;
+    const serial = ++readSerial.current;
+    let live = true;
+    void settledNoteRead({
+      pending: [...pending.current],
+      isCurrent: () => live && serial === readSerial.current && currentPage.current
+        && session === owner.current && gen === editGeneration.current && pending.current.size === 0 && !failed.current,
+      read: () => api.contentNoteGet(instance, vault, id),
+      apply: (value) => {
       setNote(value);
       adoptIncoming(value, gen);
       // R1.6-B/R1.6.3-1/2 reconciliation: the ACK TARGET is recorded ONLY
@@ -817,7 +980,9 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
         });
         session2.desktop.fastRevalidate();
       }
-    }).catch(() => {});
+      },
+    });
+    return () => { live = false; };
   }, [version, instance, vault, id, mode]);
 
   function edit(nextTitle: string, nextContent: string): Promise<boolean> {
@@ -873,6 +1038,7 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
         if (session === owner.current && pending.current.size === 0) setSaving(false);
       });
     pending.current.add(request);
+    trackKnowledgeWrite(JSON.stringify([instance, vault, id]), request);
     return request;
   }
 
@@ -1066,31 +1232,20 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
     }
   }
 
-  function insertFormat(marker: string) {
-    const handle = pageEditorHandle();
-    if (handle) {
-      if (handle.isComposing() || handle.compositionStarted()) return;
-      // CM6-EDITOR-R1: a USER transaction — history + the normal
-      // onChange → edit() → durable publish chain, exactly once.
-      const pos = formatSel ?? handle.getSelection();
-      const insertion = formatInsertion(marker, handle.getValue().slice(pos.start, pos.end));
-      handle.focus();
-      handle.replaceRange(insertion, pos);
-      setSheet("");
-      return;
-    }
-    const el = pageEditorHost() as HTMLTextAreaElement | null;
-    const pos = formatSel ?? (el ? { start: el.selectionStart ?? content.length, end: el.selectionEnd ?? content.length } : { start: content.length, end: content.length });
-    const insertion = formatInsertion(marker, content.slice(pos.start, pos.end));
-    edit(title, content.slice(0, pos.start) + insertion + content.slice(pos.end));
-    setSheet("");
-    setTimeout(() => {
-      const editor = pageEditorHost() as HTMLTextAreaElement | null;
-      if (editor) { editor.focus(); editor.setSelectionRange(pos.start + insertion.length, pos.start + insertion.length); }
-    }, 0);
+  function insertFormat(action: NoteFormatAction) {
+    if (!currentPage.current || mode !== "edit") return;
+    if (applyNoteFormatAction(pageEditorHandle(), formatSnapshot, action)) setSheet("");
+    else setFormatNotice("当前位置暂不适合该操作，或正文、选区已变化。请返回正文调整后重试。");
   }
 
   const loaded = hasReadableBody(note);
+  const { navigateHeading, readingHeading, consumeReadingHeading } = useNoteHeadingNavigation({
+    intent: heading, body: content, current,
+    ready: loaded && loadedNoteScope === JSON.stringify([instance, vault, id]), mode,
+    composing: () => composing.current, editor: pageEditorHandle,
+    clearSearch: () => setSearchTarget(undefined), closeSheet: () => setSheet(""), notice: message => { toast.warn(message); },
+  });
+
   // R1.6.1-5: in EDIT mode a routine pending (saved on the phone, waiting
   // for the background sync) maps to the NEUTRAL synced visual — the
   // underlying provenance is unchanged, READ mode and 来源与状态 keep the
@@ -1110,27 +1265,30 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
     : null;
 
   return (
-    <>
+    <NotePaperRail panel={sheet === "browser" ? "left" : sheet === "relations" ? "right" : null} disabled={!current || Boolean(sheet && sheet !== "browser" && sheet !== "relations")} onPanelChange={side => setSheet(side === "left" ? "browser" : side === "right" ? "relations" : "")}>
       <NoteSurface
+        chromeBlocked={!current || Boolean(sheet) || Boolean(searchTarget)}
+        editorScope={cmScope("desktop", instance, vault, id)}
         title={title}
         body={content}
         notebook={note?.vaultName || "LuckyRay 知识库"}
         // Hidden reading children stay mounted; currentPage/navigationScope
         // independently deny their input and late navigation authority.
-        readingContent={(current || retained) && mode === "read" && loaded && loadedNoteScope === JSON.stringify([instance, vault, id]) ? <NoteReadingContent scope={cmScope("desktop", instance, vault, id)} body={content} title={title}
+        readingContent={(current || retained) && loaded && loadedNoteScope === JSON.stringify([instance, vault, id]) ? <NoteReadingContent scope={cmScope("desktop", instance, vault, id)} body={content} title={title}
+          heading={readingHeading} onHeadingConsumed={consumeReadingHeading}
           search={searchTarget} onSearchChange={setSearchTarget} onDismissSearch={() => setSearchTarget(undefined)}>{find => <DesktopKnowledgeReader
           key={JSON.stringify([instance, vault, id, epoch.current])}
           instance={instance} vault={vault} note={id} content={content} resources={cachedResources(note)} online={connectedOwner}
           revision={displayedRevision.current} clean={!note?.dirty && !note?.bodyOutdated && !note?.conflictDocument
             && !deferredIncoming.current && !pending.current.size && !failed.current && content === note?.content}
-          onNavigate={openLinkedNote} find={find}
+          onNavigate={openLinkedNote} find={find} registerOverlay={registerOverlay}
         />}</NoteReadingContent> : undefined}
         state={state}
         bodyAvailability={bodyOpening ? "loading" : connectedOwner ? "online" : "offline"}
         mode={mode}
         savedLabel={savedLabel}
         onBack={() => void guardedBack()}
-        onBrowse={() => void browseCurrentNotes("browser")}
+        onBrowse={() => setSheet("browser")}
         onMore={() => setSheet("more")}
         onNew={() => void createSiblingNote()}
         onEdit={(offset) => {
@@ -1143,19 +1301,24 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
         onCommand={command => { pageEditorHandle()?.runCommand(command); }}
         onFormat={() => {
           const handle = pageEditorHandle();
-          if (handle) {
-            if (handle.isComposing() || handle.compositionStarted()) return;
-            setFormatSel(handle.getSelection()); setSheet("format"); return;
-          }
-          const el = pageEditorHost() as HTMLTextAreaElement | null;
-          setFormatSel(el ? { start: el.selectionStart ?? content.length, end: el.selectionEnd ?? content.length } : null);
+          if (mode !== "edit" || !handle || document.activeElement === pageTitleInput()
+            || handle.isComposing() || handle.compositionStarted()) return;
+          setFormatNotice("");
+          setFormatSnapshot({ body: handle.getValue(), selection: handle.getSelection() });
           setSheet("format");
         }}
         onSearch={() => void browseCurrentNotes()}
         onState={() => setSheet(note?.conflictDocument ? "conflict" : "state")}
         onRelations={() => setSheet("relations")}
         onAttach={() => { const handle = pageEditorHandle(); if (handle?.isComposing() || handle?.compositionStarted()) return; setSheet("attach"); }}
-        bodyEditor={<MobileCmEditor
+        bodyEditor={<DesktopKnowledgeReader instance={instance} vault={vault} note={id} content={content}
+          resources={cachedResources(note)} online={current && connectedOwner}
+          revision={displayedRevision.current} clean={!note?.dirty && !note?.bodyOutdated && !note?.conflictDocument
+            && !deferredIncoming.current && !pending.current.size && !failed.current && content === note?.content}
+          onNavigate={async (noteId, isCurrent, targetHeading) => { await openLinkedNote(noteId, isCurrent, targetHeading); }}
+          renderEditor={(follow, linkStatus) => <MobileCmEditor registerOverlay={registerOverlay}
+          linkStatus={linkStatus}
+          onWikiLink={follow}
           sourceMode={sourceMode}
           scope={cmScope("desktop", instance, vault, id)}
           wikiLoader={query => wikiChoices(query, {instance, vault})} assistActive={current && !sheet && mode === "edit"}
@@ -1167,22 +1330,24 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
           onChange={(next) => { void edit(title, next); }}
           placeholderText=""
           focusRequest={bodyFocus}
-        />}
+        />} />}
       />
-      {sheet === "relations" ? <Sheet title="双向链接" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
+      {sheet === "relations" ? <NoteSidePanel side="right" title="笔记链接" registerOverlay={registerOverlay} onClose={() => setSheet("")}>
         {current && loaded && loadedNoteScope === JSON.stringify([instance, vault, id]) ? <DesktopKnowledgeReader
           panelOnly instance={instance} vault={vault} note={id} content={content} resources={cachedResources(note)} online={connectedOwner}
           revision={displayedRevision.current} clean={!note?.dirty && !note?.bodyOutdated && !note?.conflictDocument
             && !deferredIncoming.current && !pending.current.size && !failed.current && content === note?.content}
-          onNavigate={async (noteId, isCurrent) => { await openLinkedNote(noteId, isCurrent); }}
+          onNavigate={async (noteId, isCurrent, targetHeading) => { await openLinkedNote(noteId, isCurrent, targetHeading); }}
         /> : <p className="st-sheet-copy">笔记载入后可查看链接。</p>}
-      </Sheet> : null}
+      </NoteSidePanel> : null}
       {message ? <div className="st-notice danger" role="status">{message}</div> : null}
       {desktopBusy ? <div className="st-notice" role="status">电脑正在编辑 · 你的修改已保存在手机，电脑保存后会自动继续同步</div> : null}
       {desktopEditing && !desktopBusy && !note?.conflictDocument ? <div className="st-notice" role="status">电脑正在编辑 · 编辑提示不影响手机保存</div> : null}
       {note?.createCollisionBlocked ? (
         <div className="st-notice danger" role="status">同名笔记过多，已暂停自动创建。修改标题后会重新尝试。</div>
       ) : null}
+      {sheet === "outline" ? <NoteOutline body={content} registerOverlay={registerOverlay}
+        onClose={() => setSheet("")} onSelect={navigateHeading} /> : null}
       {sheet === "more" ? (
         <Sheet title={title || "笔记"} registerDismiss={registerOverlay} onClose={() => setSheet("")}>
           {loaded ? <Option label="重命名" iconSlot={<NoteActionIcon name="rename" size={23}/>} onClick={() => { setRenameValue(title); setRenameOpen(true); }} /> : null}
@@ -1194,6 +1359,7 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
             if (editor?.isComposing() || editor?.compositionStarted()) return;
             setSourceMode(value => !value); setMode("edit"); setSheet("");
           }} />
+          <Option label="笔记大纲" icon="heading" onClick={() => setSheet("outline")} />
           <Option label="编辑工具栏" iconSlot={<NoteActionIcon name="tools" size={23}/>} onClick={() => setSheet("toolbar")} />
           <Option label="查看来源与状态" iconSlot={<NoteActionIcon name="info" size={23}/>} onClick={() => setSheet("state")} />
           <Option label={note?.operationPaused ? "删除前先处理同步暂停" : "删除这篇电脑笔记"} iconSlot={<NoteActionIcon name="trash" size={23}/>} danger={!note?.operationPaused} onClick={() => openNoteDeletion(note, setSheet)} />
@@ -1240,8 +1406,9 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
       {sheet === "toolbar" ? <EditorToolbarSheet registerOverlay={registerOverlay} onClose={() => setSheet("")} /> : null}
       {sheet === "format" ? (
         <Sheet title="文本格式" retainEditorFocus registerDismiss={registerOverlay} onClose={() => setSheet("")}>
-          {([["小标题", "\n\n## "], ["无序列表", "\n- "], ["待办事项", "\n- [ ] "], ["引用", "\n> "], ["链接", "\n[链接文字](https://)"]] as const).map(([label, marker]) => (
-            <Option key={label} label={label} icon={({"小标题":"heading","无序列表":"bullet","待办事项":"task","引用":"quote","链接":"link"} as Record<string,string>)[label]} onClick={() => insertFormat(marker)} />
+          {formatNotice ? <p className="st-sheet-copy" role="status">{formatNotice}</p> : null}
+          {noteFormatActions.map(action => (
+            <Option key={action.label} label={action.label} icon={action.icon} onClick={() => insertFormat(action)} />
           ))}
         </Sheet>
       ) : null}
@@ -1300,17 +1467,17 @@ function DesktopStillNote({ route, startInEdit, current, search }: { route: stri
         />
       ) : null}
       {sheet === "switcher" || sheet === "browser" ? (
-        <NoteSwitcherSheet variant={sheet === "browser" ? "browse" : "search"} currentRoute={desktopNoteRoute(instance, vault, id)} key={JSON.stringify([instance, vault, scopeParent, sheet])}
+        <NoteSwitcherSheet online={connectedOwner} onNew={() => { void createSiblingNote(); }} variant={sheet === "browser" ? "browse" : "search"} currentRoute={desktopNoteRoute(instance, vault, id)} key={JSON.stringify([instance, vault, scopeParent, sheet])}
           scope={{ instance, vault, directory: "" }} enabled={canUseScope}
           onClose={() => setSheet("")} registerOverlay={registerOverlay}
           onPick={async (route, target, isCurrent) => {
             if (!(await guardNavigation()) || !isCurrent()) return;
             setSheet("");
-            if (route === desktopNoteRoute(instance, vault, id) && !target) { setSearchTarget(undefined); setBodyFocus(undefined); setMode("read"); }
+            if (route === desktopNoteRoute(instance, vault, id) && !target) { setSearchTarget(undefined); }
             else open("note", route, { noteSearch: target });
           }} />
       ) : null}
-    </>
+    </NotePaperRail>
   );
 }
 

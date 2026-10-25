@@ -24,7 +24,7 @@ def main():
     original_lock = lock_path.read_bytes()
     packages = tomllib.loads(original_lock.decode())["package"]
     direct = {}
-    for name in ("rusqlite", "serde", "serde_json", "uuid"):
+    for name in ("rusqlite", "serde", "serde_json", "uuid", "sha2"):
         matches = [p for p in packages if p["name"] == name]
         if len(matches) != 1:
             raise RuntimeError(f"Expected one locked version of {name}")
@@ -36,7 +36,7 @@ def main():
         (work / "src").mkdir(parents=True)
         shutil.copytree(ROOT / "shared/companion-content-v1", Path(temp) / "shared/companion-content-v1")
         shutil.copyfile(source, work / "src/lib.rs")
-        for module in ("content_db.rs", "content_offline_db.rs"):
+        for module in ("content_db.rs", "content_offline_db.rs", "local_note_upload_db.rs"):
             shutil.copyfile(ROOT / "src-tauri/src" / module, work / "src" / module)
         (work / "Cargo.lock").write_bytes(original_lock)
         (work / "Cargo.toml").write_text('''[package]
@@ -50,6 +50,7 @@ rusqlite = { version = "=''' + direct["rusqlite"] + '''", features = ["bundled"]
 serde = { version = "=''' + direct["serde"] + '''", features = ["derive"] }
 serde_json = "=''' + direct["serde_json"] + '''"
 uuid = { version = "=''' + direct["uuid"] + '''", features = ["v4"] }
+sha2 = "=''' + direct["sha2"] + '''"
 ''')
         env = dict(os.environ, CARGO_TARGET_DIR=str(work / "target"))
         # The temporary root package differs, so a one-time lockfile prune is

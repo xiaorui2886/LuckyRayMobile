@@ -1192,6 +1192,22 @@ pub(crate) async fn hint_websocket_connect(
         })
 }
 
+/// Scope headers are immutable for the life of this socket. Foundation events
+/// deliberately keep their original transport and never inherit these headers.
+async fn hint_scoped_websocket_connect(url: &str, authorization: &str, fp: &str,
+    library: Option<&str>, vault: Option<&str>) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, String> {
+    let config = crate::pinning::build_pinned_client_config(fp)?;
+    let mut request = websocket_request(url, authorization)?;
+    for (name, value) in [("x-luckyray-material-library", library), ("x-luckyray-knowledge-vault", vault)] {
+        if let Some(value) = value {
+            request.headers_mut().insert(name, HeaderValue::from_str(value).map_err(|_| "CONTENT_SCOPE_INVALID")?);
+        }
+    }
+    tokio_tungstenite::connect_async_tls_with_config(request, None, false,
+        Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config))))
+        .await.map(|(socket, _)| socket).map_err(|_| "SERVICE_UNAVAILABLE".into())
+}
+
 /// Run the Services hint worker until the scope is retired or the socket ends.
 ///
 /// The loop selects on THREE things (P1-H4): the generation-scoped cancellation
@@ -1211,6 +1227,8 @@ pub(crate) async fn run_hint_worker(
     generation: u64,
     shared: crate::SharedState,
     owner: String,
+    library: Option<String>,
+    vault: Option<String>,
 ) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -1229,7 +1247,7 @@ pub(crate) async fn run_hint_worker(
 
     // Dial under cancellation too: a retire while dialling must not leave a
     // socket opening in the background.
-    let dial = hint_websocket_connect(&url, &authorization, &fingerprint);
+    let dial = hint_scoped_websocket_connect(&url, &authorization, &fingerprint, library.as_deref(), vault.as_deref());
     tokio::pin!(dial);
     let mut socket = tokio::select! {
         biased;
@@ -1284,6 +1302,11 @@ pub(crate) async fn run_hint_worker(
                     Message::Text(text) => {
                         match crate::services_hints::parse_hint(&text) {
                             Ok(Some(hint)) => {
+                                // A mismatched scope cannot wake the current library's consumers.
+                                if hint.get("materialLibraryId").and_then(|v| v.as_str()).is_some_and(|id| Some(id) != library.as_deref())
+                                    || hint.get("vaultId").and_then(|v| v.as_str()).is_some_and(|id| vault.as_deref().is_some_and(|selected| id != selected)) {
+                                    continue;
+                                }
                                 if !state.publish(generation, Some(hint)) {
                                     // Retired while in flight: stop this worker.
                                     state.finish(generation, false);

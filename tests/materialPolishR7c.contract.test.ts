@@ -130,7 +130,7 @@ test("R7c-10 — the page drives anchor/endpoint through the shared helper", () 
   assert.match(lib, /const endpointRef = useRef<number \| null>\(null\);/u, "the endpoint");
   assert.match(lib, /const orderedDesktopIds = useMemo\(/u, "the rendered order both indices address");
   // The long press anchors.
-  const lp = lib.slice(lib.indexOf('onLongPress={domain === "desktop" ? (id) => {'));
+  const lp = lib.slice(lib.indexOf('onLongPress={domain === "desktop" && writeGranted ? (id) => {'));
   assert.match(lp.slice(0, 700), /rangeDragRef\.current = \{ anchorIndex: idx, baseline: selectedIds \};/u,
     "the press records anchor + baseline");
   assert.match(lp.slice(0, 700), /selectionWithRange\(\{ anchorIndex: idx, baseline: prev \}, idx, orderedDesktopIds\)/u,

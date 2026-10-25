@@ -16,12 +16,15 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import {
-  ServicesError, mapLocalRefusal, type ServicesRequest,
+  ServicesError, mapLocalRefusal, errorCodeOf, type ServicesRequest,
   type ServicesResponse, type ServicesTransport,
 } from "./transport.ts";
+import { createKnowledgeDiagnostics, nativeKnowledgeTraceSink } from "./knowledgeDiagnostics.ts";
+
+const knowledgeDiagnostics = createKnowledgeDiagnostics(import.meta.env?.VITE_LR_KNOWLEDGE_DIAGNOSTICS === "1", {sink: nativeKnowledgeTraceSink(invoke)});
 
 /** Raw shape the Rust command returns (mirrors `ServicesResponse`). */
-type RustReply = { status: number; body: unknown };
+type RustReply = { status: number; body: unknown; retry_after_ms?: number };
 
 /** Raw shape a pre-wire refusal returns (`ServicesRefusal`). */
 type RustRefusal = { code: string };
@@ -47,11 +50,16 @@ export function base64Of(bytes: Uint8Array): string {
  */
 export function createTauriServicesTransport(
   invokeRef: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> = invoke,
+  scope?: Readonly<{library?: string; vault?: string}>,
 ): ServicesTransport {
+  const capturedScope = scope ? {...scope} : undefined;
   return {
     async request(req: ServicesRequest): Promise<ServicesResponse> {
+      const finishTrace = knowledgeDiagnostics.begin(req.operationId, req.vault ?? capturedScope?.vault);
       const payload: Record<string, unknown> = {
         instance: req.instance,
+        library: req.library ?? capturedScope?.library,
+        vault: req.vault ?? capturedScope?.vault,
         operationId: req.operationId,
         method: req.method,
         path: req.path,
@@ -82,15 +90,21 @@ export function createTauriServicesTransport(
         if (isRefusal(error)) {
           // ONE mapping boundary: internal Rust vocabulary -> canonical client
           // vocabulary. No unchecked cast can reach a caller.
-          throw new ServicesError(mapLocalRefusal(error.code), 0);
+          const code = mapLocalRefusal(error.code);
+          finishTrace({phase: "refusal", status: 0, code});
+          throw new ServicesError(code, 0);
         }
+        finishTrace({phase: "refusal", status: 0, code: "TRANSPORT_FAILED"});
         throw new ServicesError("TRANSPORT_FAILED", 0);
       }
       const typed = reply as RustReply;
       if (!typed || typeof typed.status !== "number") {
+        finishTrace({phase: "invalid-reply", status: 0, code: "MALFORMED_RESPONSE"});
         throw new ServicesError("MALFORMED_RESPONSE", 0);
       }
-      return { status: typed.status, body: typed.body };
+      finishTrace({phase: "reply", status: typed.status,
+        code: typed.status >= 200 && typed.status < 300 ? undefined : errorCodeOf(typed.body), body: typed.body});
+      return { status: typed.status, body: typed.body, ...(typeof typed.retry_after_ms === "number" && Number.isFinite(typed.retry_after_ms) && typed.retry_after_ms >= 0 ? {retryAfterMs: typed.retry_after_ms} : {}) };
     },
   };
 }

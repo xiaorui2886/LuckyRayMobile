@@ -1,3 +1,4 @@
+import { desktopLibraries } from "./desktopLibraries.ts";
 // SyncCoordinator — single-flight durable sync with exponential backoff.
 // Triggers: cold start, pairing, foreground, WS reconnect, outbox enqueue,
 // manual pull. WS is a hint only; durable cursor sync is the source of truth.
@@ -5,6 +6,14 @@
 
 import { api } from "./client.ts";
 import { dataStore } from "./dataStore.ts";
+import { managedVault, subscribeManagedVaultMutations } from "./managedVault.ts";
+import { ManagedSyncSchedule, type ManagedSyncTarget, type ScheduleStorage } from "./managedSyncSchedule.ts";
+
+export interface ManagedSyncOptions {
+  targets(instance: string): Promise<{ items: ManagedSyncTarget[]; legacyFallback?: boolean }>;
+  storage?: ScheduleStorage;
+  now?: () => number;
+}
 
 export type SyncStatus = "idle" | "syncing" | "offline" | "error";
 
@@ -15,7 +24,7 @@ export interface SyncSnapshot {
   desktopBusyNotes: readonly string[];
 }
 
-type RunFn = () => Promise<unknown>;
+type RunFn = (instance?: string, vault?: string) => Promise<unknown>;
 
 export class SyncCoordinator {
   private inflight: Promise<unknown> | null = null;
@@ -35,12 +44,18 @@ export class SyncCoordinator {
   // content adapter, which negotiates capabilities before accessing notes.
   private foundationBlocked = true;
   private contentOnly: boolean;
+  private managed?: ManagedSyncOptions;
+  private schedule: ManagedSyncSchedule;
+  private disposed = false;
+  private mutationTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     runFn: RunFn = () => api.syncRun(),
-    opts?: { foundationBlocked?: boolean; contentOnly?: boolean }
+    opts?: { foundationBlocked?: boolean; contentOnly?: boolean; managed?: ManagedSyncOptions }
   ) {
     this.runFn = runFn;
+    this.managed = opts?.managed;
+    this.schedule = new ManagedSyncSchedule(opts?.managed?.storage, opts?.managed?.now);
     // Keep the historical sync_run/capture/AI path opt-in for test callers.
     this.foundationBlocked = opts?.foundationBlocked ?? true;
     this.contentOnly = opts?.contentOnly ?? false;
@@ -48,40 +63,87 @@ export class SyncCoordinator {
 
   /** Single-flight: concurrent calls share the in-flight run. */
   run(): Promise<unknown> {
-    if (this.foundationBlocked) return Promise.resolve(null); // P1-1 gate
+    if (this.foundationBlocked || this.disposed || (this.managed && !this.owner)) return Promise.resolve(null); // P1-1 gate
     if (this.inflight) return this.inflight;
     const ownerEpoch = this.ownerEpoch;
     this.setStatus("syncing");
     this.error = null;
     this.notify();
-    const p = this.runFn()
+    const owner = this.owner;
+    let vault: string | undefined;
+    let target: ManagedSyncTarget | undefined;
+    let targets: ManagedSyncTarget[] = [];
+    let managedRound = false;
+    const current = () => ownerEpoch === this.ownerEpoch && !this.disposed;
+    const execute = async () => {
+      if (this.managed) {
+        const batch = await this.managed.targets(owner);
+        if (!current()) return null;
+        targets = batch.items.filter(t => t.instanceId === owner);
+        managedRound = !batch.legacyFallback;
+        if (managedRound) {
+          this.pendingOutbox = targets.reduce((sum, t) => sum + Math.max(0, t.pendingCount), 0);
+          target = this.schedule.choose(owner, targets);
+          if (!target) return null;
+          vault = target.vaultId;
+        }
+      }
+      if (!managedRound) {
+        const selected = desktopLibraries.snapshot(owner);
+        vault = selected.catalog?.scopeSelectionVersion === 1 ? selected.vault : undefined;
+      }
+      if (!current()) return null;
+      return this.runFn(owner || undefined, vault);
+    };
+    const p = execute()
       .then(async (result) => {
-        if (ownerEpoch !== this.ownerEpoch) return;
+        if (!current()) return;
         this.status = "idle";
         this.backoffMs = 1000;
         if (this.contentOnly) {
-          const content = result as { continuation?: boolean; applied?: number; pushed?: number; instanceId?: string; vaultId?: string; desktopBusyNoteIds?: string[]; attentionRequired?: boolean } | null;
+          const content = result as { continuation?: boolean; applied?: number; pushed?: number; instanceId?: string; vaultId?: string; desktopBusyNoteIds?: string[]; attentionRequired?: boolean; pairingReviewRequired?: boolean; warningCode?: string; retryAfterMs?: number } | null;
           if (this.owner && content?.instanceId && content.instanceId !== this.owner) return;
-          this.desktopBusyNotes = content?.instanceId && content.vaultId
-            ? (content.desktopBusyNoteIds ?? []).map(id => JSON.stringify([content.instanceId, content.vaultId, id])) : [];
-          if (content?.attentionRequired === true) {
+          if (target && content && (content.instanceId !== owner || content.vaultId !== target.vaultId)) throw new Error("CONTENT_SCOPE_MISMATCH");
+          if (target) this.schedule.complete(owner, target, !!content?.continuation, !!content?.desktopBusyNoteIds?.length, content?.retryAfterMs);
+          if (content?.instanceId && content.vaultId) {
+            const retained = managedRound ? this.desktopBusyNotes.filter(value => {
+              const [instance, scope] = JSON.parse(value);
+              return instance === owner && scope !== content.vaultId;
+            }) : [];
+            this.desktopBusyNotes = [...retained, ...(content.desktopBusyNoteIds ?? []).map(id => JSON.stringify([content.instanceId, content.vaultId, id]))];
+          }
+          if (content?.pairingReviewRequired === true) {
+            this.status = "error";
+            this.error = "CONTENT_PAIRING_REVIEW_REQUIRED";
+          } else if (content?.attentionRequired === true) {
             this.status = "error";
             this.error = "CONTENT_SYNC_REQUIRES_ATTENTION";
           }
           if (content?.applied || content?.pushed || content?.continuation) dataStore.bump();
-          if (content?.continuation && !this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = null; this.trigger(); }, 100);
+          // The local file views do not subscribe to the legacy SQLite list store.
+          // Only a validated completed managed scope may announce a refresh; the
+          // native commit can also update attachment completeness without text changes.
+          if (target && content && typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("luckyray:managed-vault-change", {detail: {localVaultId: target.localVaultId}}));
+          }
+          if (!managedRound && content?.continuation && !this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = null; this.trigger(); }, 100);
         } else await this.refreshOutboxStatus();
       })
       .catch((e: any) => {
-        if (ownerEpoch !== this.ownerEpoch) return;
+        if (!current()) return;
         const msg = String(e ?? "");
         this.error = msg;
         // offline-ish errors -> backoff retry; other errors also retry with backoff
         this.status = /offline|connection|timed out|failed to send/i.test(msg) ? "offline" : "error";
-        this.scheduleRetry();
+        if (target) this.schedule.fail(owner, target, msg);
+        else this.scheduleRetry();
       })
       .finally(() => {
         this.inflight = null;
+        if (current() && managedRound && !this.retryTimer) {
+          const delay = this.schedule.delay(owner, targets);
+          if (delay !== undefined) this.retryTimer = setTimeout(() => { this.retryTimer = null; this.trigger(); }, delay);
+        }
         this.notify();
         if (this.wakePending) {
           this.wakePending = false;
@@ -111,11 +173,32 @@ export class SyncCoordinator {
     this.trigger();
   }
 
+  /** Only an authenticated reconnect/grant-change hint clears authorization retirement. */
+  authorizationChanged(instance: string): void {
+    if (!instance || instance !== this.owner) return;
+    this.ownerEpoch += 1;
+    this.desktopBusyNotes = [];
+    this.schedule.authorizationChanged(instance);
+    this.wake();
+  }
+
+  /** Post-local-commit hint, never synchronous network or one HTTP per keystroke. */
+  localMutation(instance: string | null): void {
+    if (!this.owner || (instance && instance !== this.owner) || this.disposed) return;
+    if (this.mutationTimer) clearTimeout(this.mutationTimer);
+    const epoch = this.ownerEpoch;
+    this.mutationTimer = setTimeout(() => {
+      this.mutationTimer = null;
+      if (epoch === this.ownerEpoch) this.wake();
+    }, 700);
+  }
+
   /** Runtime projection only; a retired Desktop cannot report busy on its successor. */
   setOwner(instance: string): void {
     if (this.owner === instance) return;
     this.owner = instance;
     this.ownerEpoch += 1;
+    if (this.mutationTimer) { clearTimeout(this.mutationTimer); this.mutationTimer = null; }
     this.wakePending = false;
     this.desktopBusyNotes = [];
     this.status = "idle";
@@ -172,6 +255,9 @@ export class SyncCoordinator {
 
   /** Clear scheduled retry (used by tests / teardown). */
   dispose(): void {
+    this.disposed = true;
+    this.ownerEpoch += 1;
+    if (this.mutationTimer) { clearTimeout(this.mutationTimer); this.mutationTimer = null; }
     this.wakePending = false;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
@@ -195,4 +281,20 @@ export class SyncCoordinator {
 
 // Native content_sync negotiates domain capabilities and never calls the legacy
 // sync_run/capture/AI paths. The class's legacy/test gate remains explicit.
-export const syncCoordinator = new SyncCoordinator(() => api.contentSync(), { foundationBlocked: false, contentOnly: true });
+export const syncCoordinator = new SyncCoordinator((instance,vault) => api.contentSync(instance,vault), {
+  foundationBlocked: false, contentOnly: true,
+  managed: {
+    targets: async instance => {
+      const result = await managedVault.syncTargets(instance);
+      if (result.items.length) return result;
+      const migration = await managedVault.migrationStatus();
+      return { ...result, legacyFallback: migration.state !== "ready" };
+    },
+    storage: {
+      getItem: key => { try { return localStorage.getItem(key); } catch { return null; } },
+      setItem: (key, value) => { try { localStorage.setItem(key, value); } catch { /* optional mirror */ } },
+    },
+  },
+});
+
+subscribeManagedVaultMutations(event => syncCoordinator.localMutation(event.instanceId));

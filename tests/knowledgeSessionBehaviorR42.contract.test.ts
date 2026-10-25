@@ -107,7 +107,7 @@ test("R42-1 — cold load suspended mid-flight resumes with EXACTLY ONE fresh re
   assert.equal(calls, 2, "EXACTLY ONE fresh list request on resume");
 });
 
-test("R42-1b — a READY retained same-query snapshot resumes with ZERO requests", async () => {
+test("R42-1b — a READY retained same-query snapshot resumes without a cold frame", async () => {
   let calls = 0;
   const { session } = makeSession({ listCalls: () => { calls += 1; } });
   session.desktop.setConnection(online("A"));
@@ -115,11 +115,14 @@ test("R42-1b — a READY retained same-query snapshot resumes with ZERO requests
   assert.equal(session.desktop.snapshot().phase, "ready");
   const before = calls;
 
+  const beforeRows = session.desktop.snapshot().rows;
   session.desktop.suspend();
   session.desktop.setConnection(online("A"));
+  assert.strictEqual(session.desktop.snapshot().rows, beforeRows, "the cached rows paint synchronously before background work");
+  assert.equal(session.desktop.snapshot().phase, "ready", "no loading status or remount on return");
   session.desktop.activate();
   await settledQ();
-  assert.equal(calls, before, "cache-first return: zero fresh requests");
+  assert.equal(calls, before + 1, "one background revalidation, no duplicate activation read");
   assert.equal(session.desktop.snapshot().phase, "ready");
 });
 

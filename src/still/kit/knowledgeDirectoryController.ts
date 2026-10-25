@@ -50,6 +50,8 @@ export type DirectoryPhase =
   | "not-granted" | "temporarily-unavailable" | "unsupported" | "error";
 
 export type DirectorySnapshot = {
+  refreshing?: boolean;
+  stale?: boolean;
   phase: DirectoryPhase;
   instanceId: string;
   vaultId: string;
@@ -73,7 +75,7 @@ export type DirectoryIdentity = {
 };
 
 export function directoryIdentityKey(id: DirectoryIdentity): string {
-  return ["dir", id.instanceId, id.vaultId, id.directory, id.query.trim()].join("|");
+  return JSON.stringify(["dir", id.instanceId, id.vaultId, id.directory, id.query.trim()]);
 }
 
 const EMPTY: DirectorySnapshot = {
@@ -105,6 +107,40 @@ export class KnowledgeDirectoryController {
   private activeEpoch = 0;
   private replicaRefreshPending = false;
   private snap: DirectorySnapshot = EMPTY;
+  private readonly retained = new Map<string, DirectorySnapshot>();
+  private readonly cold = new Map<string, DirectorySnapshot>();
+  private needsRevalidation = false;
+  private readonly revisions = new Map<string, number>();
+  private activeRevision = 0;
+  private readonly scopeRevision: (instance: string, vault: string) => number;
+
+  /** Render reads its exact scope before the effect commits the active owner. */
+  snapshotFor(id: DirectoryIdentity): DirectorySnapshot {
+    const key = directoryIdentityKey(id);
+    const revision = this.scopeRevision(id.instanceId, id.vaultId);
+    const valid = this.revisions.get(key) === revision;
+    if (this.snap.identity === key && (valid || this.snap.page === 0)) return this.snap;
+    const retained = valid ? this.retained.get(key) : undefined;
+    if (retained) return retained;
+    let cold = this.cold.get(key);
+    if (!cold) {
+      cold = { ...EMPTY, ...id, query: id.query.trim(), identity: key, phase: "loading" };
+      this.cold.set(key, cold);
+    }
+    return cold;
+  }
+
+  invalidateScope(instance: string, vault?: string): void {
+    for (const [key, snap] of this.retained) {
+      if (snap.instanceId === instance && (vault === undefined || snap.vaultId === vault)) this.retained.delete(key);
+    }
+    if (this.snap.instanceId === instance && (vault === undefined || this.snap.vaultId === vault)) {
+      ++this.epoch; this.clearTimer(); this.activeEpoch = 0; this.needsRevalidation = true;
+      this.activeRevision = this.scopeRevision(this.snap.instanceId, this.snap.vaultId);
+      this.snap = { ...this.snap, phase: "not-granted", rows: [], page: 0, hasMore: false, refreshing: false };
+      this.emit();
+    }
+  }
   private readonly listeners = new Set<() => void>();
   private readonly pageSize: number;
   private readonly debounceMs: number;
@@ -115,11 +151,22 @@ export class KnowledgeDirectoryController {
 
   constructor(
     fetchPage: DirectoryFetchPage,
-    opts: { pageSize?: number; debounceMs?: number } = {},
+    opts: { pageSize?: number; debounceMs?: number; scopeRevision?: (instance: string, vault: string) => number; subscribe?: (listener: () => void) => () => void } = {},
   ) {
     this.fetchPage = fetchPage;
     this.pageSize = opts.pageSize ?? 50;
     this.debounceMs = opts.debounceMs ?? 260;
+    this.scopeRevision = opts.scopeRevision ?? (() => 0);
+    opts.subscribe?.(() => {
+      if (this.snap.identity && this.activeRevision !== this.scopeRevision(this.snap.instanceId, this.snap.vaultId)) {
+        this.invalidateScope(this.snap.instanceId, this.snap.vaultId);
+      }
+      for (const [key, snapshot] of this.retained) {
+        if (this.revisions.get(key) !== this.scopeRevision(snapshot.instanceId, snapshot.vaultId)) {
+          this.invalidateScope(snapshot.instanceId, snapshot.vaultId);
+        }
+      }
+    });
   }
 
   subscribe(fn: () => void): () => void {
@@ -133,6 +180,10 @@ export class KnowledgeDirectoryController {
   }
 
   private emit(): void {
+    if (this.snap.phase === "ready" && !this.snap.refreshing && this.snap.identity) {
+      this.retained.set(this.snap.identity, this.snap);
+      this.revisions.set(this.snap.identity, this.scopeRevision(this.snap.instanceId, this.snap.vaultId));
+    }
     for (const fn of this.listeners) fn();
     if (this.replicaRefreshPending && this.activeEpoch !== this.epoch && !this.suspended) {
       this.replicaRefreshPending = false;
@@ -146,6 +197,7 @@ export class KnowledgeDirectoryController {
     this.binding = binding;
     this.suspended = false;
     if (!binding.paired || !binding.instanceId) {
+      this.retained.clear();
       if (prev && (prev.paired || prev.instanceId)) {
         this.epoch += 1;
         this.snap = { ...EMPTY, phase: "unpaired" };
@@ -222,7 +274,9 @@ export class KnowledgeDirectoryController {
     if (!b?.paired || !b.instanceId) return;
     this.epoch += 1;
     this.clearTimer();
-    this.snap = { ...this.snap, query: trimmed, rows: [], page: 0, hasMore: false };
+    const identity = this.currentKey();
+    this.snap = this.retained.get(identity) ?? { ...this.snap, identity, query: trimmed, rows: [], page: 0, hasMore: false, phase: "loading" };
+    this.needsRevalidation = true;
     this.emit();
     // REPAIR-R1.1: while offline the truthful projection is the V1 cache
     // fallback (never a live query debounce that pretends freshness).
@@ -254,16 +308,23 @@ export class KnowledgeDirectoryController {
     if (!this.snap.directory) return;
     if (this.activeEpoch === this.epoch && this.epoch > 0) return; // live request
     const snap = this.snap;
-    if (b.localReplica && snap.phase === "ready" && snap.identity === this.currentKey()) return;
+    if (!this.needsRevalidation && b.localReplica && snap.phase === "ready" && snap.identity === this.currentKey()) return;
     // Cache-first ONLY for a snapshot the gateway actually produced while
     // live: an offline-degraded or cache-origin page must re-prove itself on
     // reconnect (one fresh page-1), never keep a cached label as truth.
-    if (b.connected && snap.phase === "ready" && snap.source === "live"
+    if (!this.needsRevalidation && b.connected && snap.phase === "ready" && snap.source === "live"
       && snap.identity === this.currentKey()) {
       return; // cache-first
     }
-    if (!b.connected) return; // offline truth; setOwner owns the offline flip
-    this.startPage1(b);
+    if (!b.connected) {
+      if (this.needsRevalidation || snap.page === 0) {
+        this.needsRevalidation = false;
+        if (b.localReplica && snap.page > 0) this.revalidateReplica();
+        else this.runOffline(b, snap.vaultId, snap.directory);
+      }
+      return;
+    }
+    this.startPage1(b, snap.identity === this.currentKey() && snap.page > 0 ? snap.rows : undefined);
   }
 
   /** Content V1 page-N load more (never canonical afterId). */
@@ -275,27 +336,27 @@ export class KnowledgeDirectoryController {
     const page = snap.page + 1;
     const epoch = ++this.epoch;
     this.activeEpoch = epoch;
+    const revision = this.scopeRevision(b.instanceId, snap.vaultId); this.activeRevision = revision;
     const identity = this.currentKey();
     this.snap = { ...snap, phase: "loading-more" };
     this.emit();
     void this.fetchPage(b.instanceId, snap.vaultId, snap.query, page, snap.directory)
       .then((r) => {
-        if (epoch !== this.epoch || !this.live()) return;
+        if (epoch !== this.epoch || !this.live() || revision !== this.scopeRevision(b.instanceId, snap.vaultId)) return;
         const rows = [...snap.rows, ...toRows(b.instanceId, snap.vaultId, r.items ?? [], snap.query)];
         this.activeEpoch = 0;
         this.snap = {
           ...this.snap, phase: "ready", rows, page,
           hasMore: Boolean(r.hasMore),
-          source: r.source === "cache" ? "cache" : "live",
+          source: r.source === "cache" || snap.source === "cache" ? "cache" : "live",
           identity,
         };
         this.emit();
       })
       .catch((error: unknown) => {
-        if (epoch !== this.epoch || !this.live()) return;
+        if (epoch !== this.epoch || !this.live() || revision !== this.scopeRevision(b.instanceId, snap.vaultId)) return;
         this.activeEpoch = 0;
-        this.snap = { ...this.snap, phase: "ready", errorCode: brief(error) };
-        this.emit();
+        this.fail(error, this.snap);
       });
   }
 
@@ -351,25 +412,25 @@ export class KnowledgeDirectoryController {
     if (this.activeEpoch === this.epoch && this.epoch > 0) { this.replicaRefreshPending = true; return; }
     const epoch = ++this.epoch;
     this.activeEpoch = epoch;
+    const revision = this.scopeRevision(b.instanceId, snap.vaultId); this.activeRevision = revision;
     void (async () => {
       const rows: DirectoryRow[] = [];
       let page = 1, hasMore = false;
       for (; page <= Math.max(1, snap.page); page++) {
         const result = await this.fetchPage(b.instanceId, snap.vaultId, snap.query, page, snap.directory);
-        if (epoch !== this.epoch || !this.live()) return;
+        if (epoch !== this.epoch || !this.live() || revision !== this.scopeRevision(b.instanceId, snap.vaultId)) return;
         rows.push(...toRows(b.instanceId, snap.vaultId, result.items ?? [], snap.query));
         hasMore = Boolean(result.hasMore);
         if (!hasMore) break;
       }
-      if (epoch !== this.epoch || !this.live()) return;
+      if (epoch !== this.epoch || !this.live() || revision !== this.scopeRevision(b.instanceId, snap.vaultId)) return;
       this.activeEpoch = 0;
       this.snap = {...snap, phase: "ready", rows, page: Math.min(page, Math.max(1, snap.page)), hasMore, source: "cache", errorCode: ""};
       this.emit();
     })().catch(error => {
-      if (epoch !== this.epoch || !this.live()) return;
+      if (epoch !== this.epoch || !this.live() || revision !== this.scopeRevision(b.instanceId, snap.vaultId)) return;
       this.activeEpoch = 0;
-      this.snap = {...snap, errorCode: brief(error)};
-      this.emit();
+      this.fail(error, snap);
     });
   }
 
@@ -398,19 +459,16 @@ export class KnowledgeDirectoryController {
     this.clearTimer();
     const vault = vaultId ?? this.snap.vaultId;
     const dir = directory ?? this.snap.directory;
-    this.snap = {
+    const identity = directoryIdentityKey({ instanceId: b.instanceId, vaultId: vault, directory: dir, query: this.query });
+    this.snap = this.retained.get(identity) ?? {
       ...EMPTY, phase, instanceId: b.instanceId, vaultId: vault,
-      directory: dir, query: this.query,
-      identity: directoryIdentityKey({ instanceId: b.instanceId, vaultId: vault, directory: dir, query: this.query }),
+      directory: dir, query: this.query, identity,
     };
+    this.needsRevalidation = true;
+    this.activeRevision = this.scopeRevision(b.instanceId, vault);
     this.emit();
-    if (!b.connected) {
-      // Offline: the truthful cache fallback IS the Content V1 behavior —
-      // the same command serves the note_cache projection when the gateway
-      // is unreachable, with source:"cache".
-      this.runOffline(b, vault, dir);
-      return;
-    }
+    // The complete owner/vault/directory feed is committed before activate
+    // issues a read, offline too. Intermediate scopes never reach the wire.
     // Connected: activate() owns THE single start — the page feeds
     // owner/vault/directory and then activates once, so an identity feed
     // can never triple-fire page-1.
@@ -418,12 +476,14 @@ export class KnowledgeDirectoryController {
 
   /** Offline truth: the V1 command's cache fallback, labeled cache. */
   private runOffline(b: DirectoryOwnerBinding, vault: string, dir: string): void {
+    if (!vault || !dir) return;
     const epoch = this.epoch;
     this.activeEpoch = epoch;
+    const revision = this.scopeRevision(b.instanceId, vault); this.activeRevision = revision;
     const identity = this.currentKey();
     void this.fetchPage(b.instanceId, vault, this.query, 1, dir)
       .then((r) => {
-        if (epoch !== this.epoch || !this.live()) return;
+        if (epoch !== this.epoch || !this.live() || revision !== this.scopeRevision(b.instanceId, vault)) return;
         this.activeEpoch = 0;
         this.snap = {
           ...this.snap, phase: "ready",
@@ -435,55 +495,70 @@ export class KnowledgeDirectoryController {
         this.emit();
       })
       .catch(() => {
-        if (epoch !== this.epoch) return;
+        if (epoch !== this.epoch || revision !== this.scopeRevision(b.instanceId, vault)) return;
         this.activeEpoch = 0;
         this.snap = { ...this.snap, phase: "offline" };
         this.emit();
       });
   }
 
+  private fail(error: unknown, keep: DirectorySnapshot): void {
+    const code = String((error as { code?: string })?.code ?? brief(error));
+    const status = Number((error as { status?: number })?.status);
+    if (status === 401 || status === 403 || /GRANT_REQUIRED|AUTH_REVOKED|SCOPE_DENIED|PAIRING_REQUIRED|CONTENT_READ_NOT_GRANTED|CONTENT_NOT_GRANTED|UNAUTHORIZED|FORBIDDEN|HTTP[_ :/-]*(401|403)\b/i.test(code)) {
+      this.invalidateScope(keep.instanceId, status === 401 || /AUTH_REVOKED|PAIRING_REQUIRED|UNAUTHORIZED|HTTP[_ :/-]*401\b/i.test(code) ? undefined : keep.vaultId);
+      return;
+    }
+    this.snap = { ...keep, phase: keep.page > 0 ? "ready" : "error", refreshing: false, stale: keep.page > 0, errorCode: brief(error) };
+    this.emit();
+  }
+
   private startPage1(b: DirectoryOwnerBinding, keepRows?: DirectoryRow[]): void {
-    this.clearTimer();
+    this.clearTimer(); this.needsRevalidation = false;
     const epoch = ++this.epoch;
     this.activeEpoch = epoch;
-    const vault = this.snap.vaultId;
-    const dir = this.snap.directory;
+    const vault = this.snap.vaultId, dir = this.snap.directory;
+    if (!vault || !dir) { this.activeEpoch = 0; return; }
+    const revision = this.scopeRevision(b.instanceId, vault); this.activeRevision = revision;
     const identity = this.currentKey();
+    const keep = this.snap.identity === identity && this.snap.page > 0 && keepRows !== undefined ? this.snap : undefined;
     this.snap = {
-      ...EMPTY,
-      phase: "loading", instanceId: b.instanceId, vaultId: vault,
-      directory: dir, query: this.query,
-      rows: keepRows ?? [], page: keepRows ? this.snap.page : 0,
-      hasMore: keepRows ? this.snap.hasMore : false,
-      identity,
+      ...EMPTY, ...keep,
+      phase: keep ? "ready" : "loading", refreshing: Boolean(keep), instanceId: b.instanceId, vaultId: vault,
+      directory: dir, query: this.query, identity,
     };
+    const pending = this.snap;
     this.emit();
-    void this.fetchPage(b.instanceId, vault, this.query, 1, dir)
-      .then((r) => {
-        if (epoch !== this.epoch || !this.live()) return;
-        this.activeEpoch = 0;
-        this.snap = {
-          ...this.snap, phase: "ready",
-          rows: toRows(b.instanceId, vault, r.items ?? [], this.query),
-          page: 1, hasMore: Boolean(r.hasMore),
-          source: r.source === "cache" ? "cache" : "live",
-          identity, errorCode: "",
-        };
-        this.emit();
-      })
-      .catch((error: unknown) => {
-        if (epoch !== this.epoch || !this.live()) return;
-        this.activeEpoch = 0;
-        this.snap = { ...EMPTY, phase: "error", instanceId: b.instanceId, vaultId: vault, directory: dir, query: this.query, errorCode: brief(error), identity };
-        this.emit();
-      });
+    void (async () => {
+      const rows: DirectoryRow[] = [];
+      let page = 0, hasMore = false, sawCache = false;
+      const extent = Math.max(1, keep?.page ?? 1);
+      while (page < extent) {
+        const result = await this.fetchPage(b.instanceId, vault, pending.query, page + 1, dir);
+        if (epoch !== this.epoch || !this.live() || revision !== this.scopeRevision(b.instanceId, vault)) return;
+        rows.push(...toRows(b.instanceId, vault, result.items ?? [], pending.query));
+        page += 1; hasMore = Boolean(result.hasMore);
+        sawCache = result.source === "cache" || sawCache;
+        if (!hasMore) break;
+      }
+      if (epoch !== this.epoch || !this.live() || revision !== this.scopeRevision(b.instanceId, vault)) return;
+      this.activeEpoch = 0;
+      this.snap = { ...pending, phase: "ready", refreshing: false, stale: false, rows, page, hasMore, source: sawCache ? "cache" : "live", errorCode: "" };
+      this.emit();
+    })().catch((error: unknown) => {
+      if (epoch !== this.epoch || !this.live() || revision !== this.scopeRevision(b.instanceId, vault)) return;
+      this.activeEpoch = 0;
+      this.fail(error, keep ?? pending);
+    });
   }
+
 }
 
 function toRows(instanceId: string, vaultId: string, items: any[], query = ""): DirectoryRow[] {
   const rows: DirectoryRow[] = [];
   for (const n of items) {
     if (!n || n.deleted) continue;
+    if ((n.instanceId && n.instanceId !== instanceId) || (n.vaultId && n.vaultId !== vaultId)) throw new Error("CONTENT_SOURCE_CHANGED");
     const noteId = n.noteId || n.note_id || "";
     if (!noteId) continue;
     rows.push({

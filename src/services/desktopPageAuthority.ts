@@ -1,36 +1,12 @@
-// MATERIAL-LIBRARY-INSTANT-R1 REPAIR-R5 — ONE authority for the Desktop page.
-//
-// The permanent "正在读取素材…" on the physical device had a single root cause:
-// the page had TWO independent effects that both advanced the same generation
-// counter. The page-1 request effect ran `++gen` and issued its request, and the
-// owner-lifecycle effect then ran `++gen` again to invalidate the page. Whichever
-// order React happened to run them in, the owner bind could retire the request
-// the SAME commit had just started, so the response was dropped on arrival and
-// nothing re-issued it — the page stayed pending until the user pressed Refresh,
-// which changed `reloadKey` and started a fresh request.
-//
-// The fix is structural rather than a reordering: ONE object owns the Desktop
-// owner lifecycle AND the request sequencing, and the ordering that used to be
-// left to effect declaration order is now an explicit, testable transition
-// inside it:
-//
-//   bind(owner)   -- retire the previous page and its rows immediately
-//                 -- THEN start the current identity's page-1, as the FIRST
-//                    request for the new owner, which nothing can retire
-//   request(...)  -- ordinary page-1 for the CURRENT identity (query/folder/tag
-//                    change, explicit refresh, Desktop-domain store event)
-//   loadMore(...) -- append, only while the caller's identity is still active
-//
-// Currentness is fail-closed exactly as before: a request may only commit while
-// BOTH its own generation and the live owner match. Desktop A -> B therefore
-// drops any late A response and lets B's first request commit on its own.
-//
-// The authority owns no React state and no timers: it is an ordinary object the
-// page subscribes to, which is what makes the ordering directly testable.
+// One authority owns both the active material-page request and retained views.
+// Views are keyed by every source axis; navigation restores only that exact
+// view while a generation-guarded read revalidates its already-loaded extent.
+// Unpairing and verified access loss are destructive boundaries, not refreshes.
 
 export type DesktopSource = {
   /** Required: the Desktop instance the request is issued against. */
   owner: string;
+  library?: string;
   query: string;
   folder: string;
   tag: string;
@@ -43,7 +19,7 @@ export type DesktopPage = { items: DesktopRow[]; page?: number; hasMore: boolean
 export type DesktopSnapshot = {
   /** The owner that produced `rows`. "" means "no committed page". */
   owner: string;
-  /** The exact identity (owner+query+folder+tag) that produced `rows`. */
+  /** The exact identity (owner+library+query+folder+tag+kind) that produced `rows`. */
   identity: string;
   rows: DesktopRow[];
   /** A request for the CURRENT identity is in flight. */
@@ -56,15 +32,35 @@ export type DesktopSnapshot = {
   cold: boolean;
   page: number;
   hasMore: boolean;
+  /** Continuation returned by the source; may be non-consecutive. */
+  nextPage: number | null;
   error: string;
 };
 
 /** The identity string every request and every commit is keyed by. */
 export function desktopIdentityOf(source: DesktopSource): string {
-  const axes=["desktop", source.owner, (source.query || "").trim(), source.folder || "", source.tag || ""];
-  if(source.kind) axes.push(`kind:${source.kind}`);
+  // Opaque source axes may contain "|" or marker-like text. Encoding every
+  // axis prevents two distinct scopes from sharing a retained snapshot.
+  const axes = ["desktop", ...[source.owner, (source.query || "").trim(), source.folder || "", source.tag || ""].map(encodeURIComponent)];
+  if (source.library) axes.push(`library:${encodeURIComponent(source.library)}`);
+  if (source.kind) axes.push(`kind:${encodeURIComponent(source.kind)}`);
   return axes.join("|");
 }
+
+type RetainedView = {
+  owner: string;
+  library: string;
+  loadedExtent: number;
+  snapshot: DesktopSnapshot;
+};
+
+// A shared stable miss is important for useSyncExternalStore before effects
+// bind the selected identity. Never return the active scope's unrelated rows.
+const COLD_SNAPSHOT: DesktopSnapshot = {
+  owner: "", identity: "", rows: [], refreshing: false, stale: false,
+  settled: false, cold: true, page: 0, hasMore: false, nextPage: null, error: "",
+};
+const MAX_RETAINED_VIEWS = 24;
 
 export class DesktopPageAuthority {
   private generation = 0;
@@ -88,6 +84,8 @@ export class DesktopPageAuthority {
   private listeners = new Set<() => void>();
   /** Stable snapshot identity for React: only replaced when truth changes. */
   private cached: DesktopSnapshot | null = null;
+  /** Settled, inactive views in navigation-recency order; never persisted. */
+  private retained = new Map<string, RetainedView>();
 
   /** The real Desktop page-1 read: (owner, source) -> rows. */
   private readonly fetchPage: (owner: string, source: DesktopSource, page: number) => Promise<DesktopRow[] | DesktopPage>;
@@ -107,10 +105,10 @@ export class DesktopPageAuthority {
     return () => { this.listeners.delete(fn); };
   }
 
-  private emit(): void {
+  private emit(invalidateCurrent = true): void {
     // The snapshot object is replaced only on a real truth change, so
     // useSyncExternalStore never sees a spurious new value.
-    this.cached = null;
+    if (invalidateCurrent) this.cached = null;
     for (const fn of this.listeners) fn();
   }
 
@@ -129,10 +127,98 @@ export class DesktopPageAuthority {
         cold: this.cold,
         page: this.page,
         hasMore: this.hasMore,
+        nextPage: this.nextPage,
         error: this.error,
       };
     }
     return this.cached;
+  }
+
+  /** Synchronous render gate, including the render BEFORE a navigation effect. */
+  snapshotFor(identity: string): DesktopSnapshot {
+    if (identity && identity === this.identity && this.owner) return this.snapshot();
+    return this.retained.get(identity)?.snapshot || COLD_SNAPSHOT;
+  }
+
+  private remember(): void {
+    if (!this.committed || !this.settled) return;
+    const snapshot = this.snapshot();
+    this.retained.delete(this.identity);
+    this.retained.set(this.identity, {
+      owner: this.owner,
+      library: this.source.library || "",
+      loadedExtent: this.loadedExtent,
+      // The request is retired by navigation, so do not retain a stuck spinner.
+      snapshot: snapshot.refreshing ? { ...snapshot, refreshing: false } : snapshot,
+    });
+    while (this.retained.size > MAX_RETAINED_VIEWS) {
+      this.retained.delete(this.retained.keys().next().value!);
+    }
+  }
+
+  private resetPage(): void {
+    this.committed = "";
+    this.rows = [];
+    this.refreshing = false;
+    this.stale = false;
+    this.settled = false;
+    this.cold = true;
+    this.page = 0;
+    this.loadedExtent = 0;
+    this.hasMore = false;
+    this.nextPage = null;
+    this.error = "";
+    this.cached = null;
+  }
+
+  private activate(owner: string, source: Omit<DesktopSource, "owner">): void {
+    const identity = desktopIdentityOf({ ...source, owner });
+    // Pin the destination before saving the old view: at capacity the view
+    // being revisited may itself be the oldest retained entry.
+    const destination = this.retained.get(identity);
+    if (destination) this.retained.delete(identity);
+    this.remember();
+    this.owner = owner;
+    this.identity = identity;
+    this.source = { ...source };
+    this.resetPage();
+    const retained = destination || this.retained.get(this.identity);
+    if (!retained) return;
+    const snapshot = retained.snapshot;
+    this.committed = snapshot.owner;
+    this.rows = snapshot.rows;
+    this.stale = snapshot.stale;
+    this.settled = snapshot.settled;
+    this.cold = snapshot.cold;
+    this.page = snapshot.page;
+    this.loadedExtent = retained.loadedExtent;
+    this.hasMore = snapshot.hasMore;
+    this.nextPage = snapshot.nextPage;
+    this.error = snapshot.error;
+    this.cached = snapshot;
+    // The live view is held in the active fields, not twice in the LRU.
+    this.retained.delete(this.identity);
+  }
+
+  private purgeScope(owner: string, library?: string): boolean {
+    let changed = false;
+    for (const [identity, view] of this.retained) {
+      if (view.owner === owner && (library === undefined || view.library === library)) {
+        this.retained.delete(identity);
+        changed = true;
+      }
+    }
+    if (owner && this.owner === owner && (library === undefined || (this.source.library || "") === library)) {
+      this.generation += 1;
+      this.resetPage();
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** Revoke all views of an owner, or only one exact library (including ""). */
+  invalidateScope(owner: string, library?: string): void {
+    if (this.purgeScope(owner, library)) this.emit(false);
   }
 
   /** The owner whose rows are currently committed ("" if none). */
@@ -146,32 +232,22 @@ export class DesktopPageAuthority {
   }
 
   /**
-   * The owner lifecycle AND the first request, in one ordered transition.
-   *
-   * Retire-then-request is the whole point: the invalidation happens while the
-   * generation is bumped for the retirement, and the new request takes the NEXT
-   * generation. No second effect can bump the counter afterwards, so the first
-   * request for a freshly bound owner cannot be invalidated by its own bind.
+   * Retire old work before starting the newly bound scope. Even a same-scope
+   * bind reissues work because native retirement may have cancelled its read.
+   * Only an unpair clears protected history; ordinary navigation retains it.
    */
   bind(owner: string, source: Omit<DesktopSource, "owner">): boolean {
-    // 1. Retire unconditionally: A's rows, A's staleness and A's identity all
-    //    stop being renderable the moment the owner changes. B never inherits
-    //    them, even for the one render before the new response lands.
-    this.owner = owner;
-    this.committed = "";
-    this.identity = desktopIdentityOf({ ...source, owner });
-    this.rows = [];
-    this.refreshing = false;
-    this.stale = false;
-    this.settled = false;
-    this.cold = true;
-    this.page = 0; this.loadedExtent=0; this.hasMore = false; this.nextPage = null;
-    this.error="";
     this.generation += 1;
-    this.emit();
-    // 2. Then issue the current identity's page-1 as the FIRST request for this
-    //    owner. This is the request that used to get retired by step 1.
-    if (!owner) return false;
+    if (!owner) {
+      this.retained.clear();
+      this.owner = "";
+      this.identity = "";
+      this.source = { ...source };
+      this.resetPage();
+      this.emit();
+      return false;
+    }
+    this.activate(owner, source);
     this.request(source);
     return true;
   }
@@ -204,17 +280,11 @@ export class DesktopPageAuthority {
     // Checked BEFORE mutating anything, so a coalesced call cannot retire the
     // call it is coalescing onto.
     if (!force && this.refreshing && identity === this.identity) return;
-    // A request whose identity differs from the bound one is an identity
-    // change: the previous rows no longer answer this request.
-    if (identity !== this.identity) {
-      this.identity = identity;
-      this.committed = "";
-      this.rows = [];
-      this.settled = false;
-      this.cold = true;
-      this.page = 0; this.loadedExtent=0; this.hasMore = false; this.nextPage = null;
-    }
-    this.source = { ...source };
+    // Restore an exact visited view, never carry rows across identity axes.
+    if (identity !== this.identity) this.activate(owner, source);
+    // Capture inputs: later caller mutation cannot retarget subsequent pages.
+    source = { ...source };
+    this.source = source;
     const extent = Math.max(1, this.loadedExtent);
     const gen = ++this.generation;
     this.refreshing = true;
@@ -224,21 +294,23 @@ export class DesktopPageAuthority {
     // Revalidate only the extent the user already loaded, not the whole library.
     // Swap it atomically so deleted rows disappear without dropping to page1.
     const read = async () => {
-      let rows: DesktopRow[] = [], last: DesktopPage = {items:[],hasMore:false}, page=1, count=0;
+      let rows: DesktopRow[] = [], last: DesktopPage = {items:[],hasMore:false}, page=1, count=0, cached=false;
       while (true) {
         if (gen !== this.generation || this.owner !== owner) return null;
         const value = await this.fetchPage(owner, { ...source, owner }, page);
+        if (gen !== this.generation || this.owner !== owner || this.identity !== identity) return null;
         last = this.pageOf(value, page);
         count++;
+        cached ||= Boolean(last.cached || last.source === "cache");
         rows = this.merge(rows, last.items);
-        if (count >= extent || !last.hasMore) return { ...last, items:rows, page, count };
+        if (count >= extent || !last.hasMore) return { ...last, items:rows, page, count, cached };
         page = last.nextPage!;
       }
     };
     read().then((value) => {
       // Fail-closed currentness: the generation must still be the live one AND
       // the owner must still be the bound one.
-      if (!value || gen !== this.generation || this.owner !== owner) return;
+      if (!value || gen !== this.generation || this.owner !== owner || this.identity !== identity) return;
       this.rows = value.items;
       this.loadedExtent=value.count;
       this.page = value.page; this.hasMore = value.hasMore; this.nextPage = value.nextPage || null;
@@ -251,7 +323,7 @@ export class DesktopPageAuthority {
       this.error="";
       this.emit();
     }).catch((error: unknown) => {
-      if (gen !== this.generation || this.owner !== owner) return;
+      if (gen !== this.generation || this.owner !== owner || this.identity !== identity) return;
       // A failed refresh KEEPS the last-good rows for this exact identity and
       // only adds a quiet stale flag — the grid is never blanked by a
       // transient error, and a failure is never reported as a settled empty.
@@ -273,11 +345,20 @@ export class DesktopPageAuthority {
     return {...value, items:value.items || [], page, nextPage:value.hasMore ? next : null};
   }
 
-  private failAccess(error:unknown):void {
-    this.error=String(error);
-    if (/401|403|404|410|FORBIDDEN|REVOKED|NOT_FOUND|SOURCE_CHANGED/.test(this.error)) {
-      this.rows=[];this.committed="";this.settled=false;this.loadedExtent=0;this.page=0;this.hasMore=false;this.nextPage=null;
+  private failAccess(error: unknown): void {
+    const message = String(error);
+    // Transport failures may be Errors, strings, or structured service errors.
+    const details = error && typeof error === "object" ? error as { code?: unknown; status?: unknown; httpStatus?: unknown } : {};
+    const code = [message, details.code, details.status, details.httpStatus].join(" ").toUpperCase();
+    const authDenied = /(?:^|\D)401(?:\D|$)|UNAUTHORIZED|AUTH_REVOKED|PAIRING_REQUIRED|NOT_PAIRED/.test(code);
+    const scopeDenied = /(?:^|\D)(?:403|404|410)(?:\D|$)|FORBIDDEN|REVOKED|NOT_FOUND|READ_NOT_GRANTED|GRANT_REQUIRED|SCOPE_DENIED|SCOPE_UNAVAILABLE|LIBRARY_NOT_AVAILABLE|PERMISSION_REQUIRED/.test(code);
+    if (authDenied || scopeDenied) {
+      this.purgeScope(this.owner, authDenied ? undefined : this.source.library || "");
+      this.refreshing = false;
+      this.stale = true;
+      this.cold = false;
     }
+    this.error = message;
   }
 
   private merge(base: DesktopRow[], next: DesktopRow[]): DesktopRow[] {
@@ -294,13 +375,13 @@ export class DesktopPageAuthority {
     this.refreshing=true; this.emit();
     try {
       const value=this.pageOf(await this.fetchPage(owner,{...this.source,owner},page),page);
-      if (gen!==this.generation || owner!==this.owner) return;
+      if (gen!==this.generation || owner!==this.owner || identity!==this.identity) return;
       const rows=this.merge(this.rows,value.items);
       if (value.hasMore && rows.length===this.rows.length) throw new Error("MATERIAL_PAGE_NO_PROGRESS");
       this.rows=rows; this.page=page; this.loadedExtent++; this.hasMore=value.hasMore; this.nextPage=value.nextPage || null;
-      this.refreshing=false; this.error="";this.stale=Boolean(value.cached || value.source==="cache"); this.emit();
+      this.refreshing=false; this.error="";this.stale=this.stale || Boolean(value.cached || value.source==="cache"); this.emit();
     } catch(error) {
-      if (gen!==this.generation || owner!==this.owner) return;
+      if (gen!==this.generation || owner!==this.owner || identity!==this.identity) return;
       this.refreshing=false; this.stale=true;this.failAccess(error); this.emit(); this.onError(error);
     }
   }
@@ -327,7 +408,10 @@ export class DesktopPageAuthority {
   dispose(): void {
     this.generation += 1;
     this.listeners.clear();
-    this.cached = null;
+    this.retained.clear();
+    this.owner = "";
+    this.identity = "";
+    this.resetPage();
   }
 }
 

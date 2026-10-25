@@ -1,0 +1,58 @@
+// Production bridge rendered with real React; only native/service seams are synthetic.
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {readFile,mkdtemp,rm} from 'node:fs/promises';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+import path from 'node:path';
+const require=createRequire(import.meta.url), repo=path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const tools=process.env.LR_DOM_TEST_TOOLS?createRequire(path.join(path.resolve(process.env.LR_DOM_TEST_TOOLS),'harness.cjs')):require;
+const {JSDOM}=tools('jsdom'),{build}=createRequire(require.resolve('vite/package.json'))('esbuild');
+const dir=await mkdtemp(path.join(repo,'tests/.managed-import-'));
+try {
+ const source=await readFile(path.join(repo,'src/still/kit/LocalNoteImportBridge.tsx'),'utf8');
+ const body=source.slice(source.indexOf('let picking:'));
+ const code=`import {useEffect,useRef,useState} from 'react';
+ import {ManagedImportIntents,snapshotManagedImportTarget,currentManagedImportTarget,setManagedImportTarget,invalidateManagedImportTarget} from ${JSON.stringify(path.join(repo,'src/services/managedImportIntents.ts'))};
+ const api=globalThis.__import.api,managedVault=globalThis.__import.managedVault;
+ const useStillNav=()=>({open:(...args)=>globalThis.__import.opens.push(args)});
+ const listen=async()=>()=>{}; const toast={error:()=>{},success:()=>{}};const noteImportFailure=()=>'';const localDataStore={publish:()=>{}};
+ const managedNoteRoute=(v,n)=>'vault:'+v+':'+n;
+ ${body}
+ export {setManagedImportTarget,invalidateManagedImportTarget};`;
+ await build({stdin:{contents:code,resolveDir:repo,loader:'tsx'},outfile:path.join(dir,'test.mjs'),bundle:true,format:'esm',platform:'node',jsx:'automatic',plugins:[{name:'react-identity',setup(b){b.onResolve({filter:/^(react|react\/jsx-runtime)$/},a=>({path:pathToFileURL(require.resolve(a.path)).href,external:true}));}}]});
+ const dom=new JSDOM('<!doctype html><div id="root"></div>',{url:'https://test.invalid/',pretendToBeVisual:true});
+ for(const name of ['window','document','HTMLElement','Event','localStorage'])globalThis[name]=dom.window[name];
+ globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+ let receipts=[],picked=0, release,failCopy=false;const aliases=new Map();const adopted=[],acks=[],opens=[];
+ const id=n=>`00000000-0000-0000-0000-${String(n).padStart(12,'0')}`;
+ const receipt=n=>({requestId:id(n),source:'picker',status:'imported',noteId:'note-import-'+id(n),title:'Test'});
+ globalThis.__import={opens,api:{localNoteImportPick:()=>{picked++;return new Promise(ok=>{release=ok;});},localNoteImportPending:async()=>({items:[...receipts]}),localNoteImportAck:async ids=>{acks.push(...ids);receipts=receipts.filter(x=>!ids.includes(x.requestId));}},managedVault:{resolveLegacy:async n=>aliases.get(n)||null,get:async(v,n)=>({localVaultId:v,noteId:n,title:"Existing",bodyState:"ready"}),select:async()=>{},list:async()=>({items:[{localVaultId:'A',name:'A',migrationState:'ready'},{localVaultId:'B',name:'B',migrationState:'ready',binding:{instanceId:'desktop',remoteVaultId:'remote-b'}}]}),importLegacyReceipt:async(v,n,folder)=>{if(failCopy)throw Error('COPY_UNCONFIRMED');adopted.push([v,n,folder]);return{localVaultId:v,noteId:n,title:'Test',bodyState:'ready'};}}};
+ const React=await import('react'),{act}=React,{createRoot}=await import('react-dom/client');
+ const bridge=await import(pathToFileURL(path.join(dir,'test.mjs')).href),root=createRoot(document.getElementById('root'));
+ const flush=async()=>act(async()=>{window.dispatchEvent(new Event('luckyray:import-drain'));await new Promise(ok=>setTimeout(ok,0));});
+ await act(async()=>root.render(React.createElement(bridge.LocalNoteImportBridge)));
+ bridge.setManagedImportTarget('A','Captured Folder');
+ const launch=bridge.pickLocalNoteFile();await bridge.pickLocalNoteFile();assert.equal(picked,1,'overlapping launches must not replace capture');
+ receipts=[receipt(1)];await act(async()=>{release({status:'launched',requestId:id(1)});await launch;await new Promise(ok=>setTimeout(ok,0));});
+ assert.deepEqual(adopted,[['A',receipt(1).noteId,'Captured Folder']]);assert.deepEqual(acks,[id(1)]);assert.match(opens[0][1],/^vault:A:/);
+ const staleLaunch=bridge.pickLocalNoteFile();bridge.invalidateManagedImportTarget();bridge.setManagedImportTarget('B');
+ receipts=[receipt(2)];await act(async()=>{release({status:'launched',requestId:id(2)});await staleLaunch;await new Promise(ok=>setTimeout(ok,0));});
+ assert.equal(adopted.length,1,'source switch must retire automatic grant');assert.equal(acks.length,1,'unadopted receipt must survive');
+ assert(document.querySelector('select[aria-label="导入目标笔记库"]'));assert.equal(document.querySelector('select').value,'','recovery must never guess selected vault');
+ await flush();assert.equal(adopted.length,1,'repeated delivery must not bypass recovery');
+ assert(document.querySelector('option[value="B"]'), 'a bound vault remains an explicit import target');
+ const select=document.querySelector('select');await act(async()=>{select.value='B';select.dispatchEvent(new Event('change',{bubbles:true}));});
+ await act(async()=>{[...document.querySelectorAll('button')].find(x=>x.textContent==='保存到所选库').click();await new Promise(ok=>setTimeout(ok,0));});
+ assert.deepEqual(adopted[1],['B',receipt(2).noteId,'']);assert.equal(acks.length,2);
+ receipts=[{...receipt(3),source:'view'}];await flush();assert.equal(adopted.length,2,'ACTION_VIEW never inherits selected vault');
+ aliases.set(receipt(3).noteId,{localVaultId:'A',noteId:'existing'});
+ await flush();assert.equal(adopted.length,2,'exact replay resolves alias without new adoption');assert.equal(acks.length,3);assert.equal(opens.at(-1)[1],'vault:A:existing');
+ const cancelled=bridge.pickLocalNoteFile();receipts=[{requestId:id(4),source:'picker',status:'cancelled'}];
+ await act(async()=>{release({status:'launched',requestId:id(4)});await cancelled;await new Promise(ok=>setTimeout(ok,0));});
+ assert(acks.includes(id(4)));assert.equal(adopted.length,2,'cancel never adopts');
+ failCopy=true;const failed=bridge.pickLocalNoteFile();receipts=[receipt(5)];
+ await act(async()=>{release({status:'launched',requestId:id(5)});await failed;await new Promise(ok=>setTimeout(ok,0));});
+ assert(!acks.includes(id(5)),'failed managed copy must retain receipt');assert(document.querySelector('select'));
+ await act(async()=>root.unmount());
+ console.log('PASS: real React import capture, overlap, source switch, retained unmatched receipt, explicit adoption, ACTION_VIEW');
+} finally {await rm(dir,{recursive:true,force:true});}

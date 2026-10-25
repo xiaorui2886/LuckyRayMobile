@@ -135,7 +135,7 @@ test("failed folder pagination cannot overwrite a previously complete cache or p
   const refresh = catalog.activate(scope, true, true);
   await tick();
   assert.deepEqual(catalog.snapshot(scope).paths, certified.paths);
-  assert.match(folderStatus(catalog.snapshot(scope), true), /上次目录/);
+  assert.equal(folderStatus(catalog.snapshot(scope), true), "", "retained background refresh does not insert a status line");
   tail.reject(new ServicesError("SERVICE_UNAVAILABLE", 503));
   await refresh;
   assert.equal(catalog.snapshot(scope).phase, "error");
@@ -687,7 +687,7 @@ function discoveryCatalog(instance = scope.instance, permissionRevision = 1, sta
 test("real registry invalidation notifies navigation subscribers and prevents an in-flight page becoming current", async () => {
   const tail = deferred<KnowledgeRelationPage>();
   const registry = new ServiceRegistry({ request: async () => ({ status: 200, body: discoveryCatalog() }) });
-  await registry.refreshAdopting(scope.instance);
+  await registry.refreshAdopting(scope.instance, {vault:scope.vault});
   const reader = createKnowledgeNavigationReader({ relations: async () => tail.promise } as unknown as KnowledgeClient, registry);
   let notifications = 0;
   const stop = reader.subscribe(() => { notifications++; });
@@ -699,14 +699,14 @@ test("real registry invalidation notifies navigation subscribers and prevents an
   tail.resolve(relationPage([wiki()]));
   await assert.rejects(old, { code: "SOURCE_CHANGED" });
   stop();
-  await registry.refreshAdopting(scope.instance);
+  await registry.refreshAdopting(scope.instance, {vault:scope.vault});
   assert.equal(notifications, 1);
 });
 
 test("real registry permission invalidation retires a late discovery without resurrecting its catalog", async () => {
   const discovery = deferred<any>();
   const registry = new ServiceRegistry({ request: async () => discovery.promise });
-  const pending = registry.refreshAdopting(scope.instance);
+  const pending = registry.refreshAdopting(scope.instance, {vault:scope.vault});
   assert.equal(registry.invalidateForPermissionRevision(2), true);
   discovery.resolve({ status: 200, body: discoveryCatalog(scope.instance, 1) });
   await assert.rejects(pending, /superseded/);
@@ -730,12 +730,12 @@ test("initial directory discovery uses the existing in-flight request without du
 test("explicit navigation refresh rediscovers grants even when the desktop identity is unchanged", async () => {
   let revision = 1, state = "notGranted", discoveries = 0, reads = 0;
   const registry = new ServiceRegistry({ request: async () => { discoveries++; return { status: 200, body: discoveryCatalog(scope.instance, revision, state) }; } });
-  await registry.refreshAdopting(scope.instance);
+  await registry.refreshAdopting(scope.instance, {vault:scope.vault});
   const reader = createKnowledgeNavigationReader({ directories: async () => { reads++; return folders([]); } } as unknown as KnowledgeClient, registry);
   assert.equal(reader.denied(scope.instance, "directories"), true);
   await assert.rejects(reader.directories(scope.instance, scope.vault), { code: "GRANT_REQUIRED" });
   revision = 2; state = "implemented";
-  await reader.refresh(scope.instance);
+  await reader.refresh(scope.instance, scope.vault);
   assert.equal(discoveries, 2);
   assert.equal(reader.denied(scope.instance, "directories"), false);
   await reader.directories(scope.instance, scope.vault);
@@ -745,7 +745,7 @@ test("explicit navigation refresh rediscovers grants even when the desktop ident
 test("explicit folder refresh recovers a restored grant with one complete directory request", async () => {
   let revision = 1, state = "notGranted", discoveries = 0, reads = 0;
   const registry = new ServiceRegistry({ request: async () => { discoveries++; return { status: 200, body: discoveryCatalog(scope.instance, revision, state) }; } });
-  await registry.refreshAdopting(scope.instance);
+  await registry.refreshAdopting(scope.instance, {vault:scope.vault});
   const reader = createKnowledgeNavigationReader({ directories: async () => { reads++; return folders(["Now authorized"]); } } as unknown as KnowledgeClient, registry);
   const catalog = new KnowledgeFolderCatalog(reader, async () => { assert.fail("denial cannot use note fallback"); });
   await catalog.activate(scope, true);
@@ -790,7 +790,7 @@ test("a servicesChanged live hint revokes folders and pending relations on the s
   t.mock.timers.enable({ apis: ["setInterval"] });
   let revision = 1, grant = "implemented", reads = 0, wakes = 0;
   const registry = new ServiceRegistry({ request: async () => ({ status: 200, body: discoveryCatalog(scope.instance, revision, grant) }) });
-  await registry.refreshAdopting(scope.instance);
+  await registry.refreshAdopting(scope.instance, {vault:scope.vault});
   const relationTail = deferred<KnowledgeRelationPage>(), storage = memoryStorage();
   const navigation = createKnowledgeNavigationReader({
     directories: async () => { reads++; return folders(["Private/empty"]); },
@@ -882,8 +882,8 @@ test("real navigation client uses only GET routes and preserves the empty root c
   await client.directories(scope.instance, scope.vault, { limit: 100, afterPath: "" });
   await client.relations(scope.instance, scope.vault, noteScope.note, { limit: 100, after: "opaque" });
   assert.deepEqual(calls, [
-    { instance: scope.instance, operationId: "knowledge.directories", method: "GET", path: "/v1/services/knowledge/vaults/vault-A/directories", query: { limit: 100, afterPath: "" } },
-    { instance: scope.instance, operationId: "knowledge.relations", method: "GET", path: "/v1/services/knowledge/notes/note-A/relations", query: { vault: scope.vault, limit: 100, after: "opaque" } },
+    { instance: scope.instance, vault: scope.vault, operationId: "knowledge.directories", method: "GET", path: "/v1/services/knowledge/vaults/vault-A/directories", query: { limit: 100, afterPath: "" } },
+    { instance: scope.instance, vault: scope.vault, operationId: "knowledge.relations", method: "GET", path: "/v1/services/knowledge/notes/note-A/relations", query: { vault: scope.vault, limit: 100, after: "opaque" } },
   ]);
 });
 

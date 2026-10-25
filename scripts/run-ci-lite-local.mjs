@@ -22,3 +22,12 @@ execFileSync(process.execPath, ["--experimental-strip-types", "--test", ...files
   cwd: appRoot, stdio: "inherit",
 });
 console.log("\nCI Lite equivalent: PASS");
+
+
+// DOM checks need an existing pinned jsdom test-tools installation; they are
+// not part of the public workflow and this script never installs packages.
+if (process.argv.includes("--with-managed-dom")) {
+  execFileSync(process.execPath, ["scripts/check-managed-dom.mjs"], { cwd: appRoot, stdio: "inherit" });
+} else {
+  console.log("Managed React DOM suites NOT_RUN. Run with --with-managed-dom and LR_DOM_TEST_TOOLS pointing to a pinned jsdom 26.1.0 node_modules directory.");
+}

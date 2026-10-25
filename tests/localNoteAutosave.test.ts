@@ -323,3 +323,22 @@ test("LocalNoteAutosaveCoordinator — resetBase preserves single-flight while a
   assert.equal(coordinator.getStatus(), "saved");
   coordinator.dispose();
 });
+
+test("LocalNoteAutosaveCoordinator — old pre-reset receipt cannot acknowledge a post-reset edit", async () => {
+  const saves: NoteSnapshot[] = [];
+  let releaseFirst!: () => void;
+  const coordinator = new LocalNoteAutosaveCoordinator("n1", {title: "Base", content: "", tags: []}, async snapshot => {
+    saves.push(snapshot);
+    if (saves.length === 1) await new Promise<void>(resolve => { releaseFirst = resolve; });
+  }, 1000);
+  coordinator.updateSnapshot({title: "Before reset", content: "A", tags: []});
+  const drain = coordinator.flush();
+  coordinator.resetBase({title: "Reloaded", content: "base", tags: []});
+  coordinator.updateSnapshot({title: "After reset", content: "B", tags: []});
+  const finalDrain = coordinator.flush();
+  releaseFirst();
+  await Promise.all([drain, finalDrain]);
+  coordinator.dispose();
+  assert.deepEqual(saves.map(snapshot => snapshot.content), ["A", "B"]);
+  assert.equal(coordinator.isDirty(), false);
+});

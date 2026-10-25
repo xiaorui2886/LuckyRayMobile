@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+const read=(p:string)=>readFileSync(new URL('../'+p,import.meta.url),'utf8');
+test('live directory GET reuses negotiated metadata policy, preserving exact scope and error semantics',()=>{
+ const code=read('src-tauri/src/content/notes.rs');
+ const body=code.slice(code.indexOf('pub(crate) async fn content_notes('),code.indexOf('pub(crate) async fn content_notes(')+5500);
+ assert.ok(body.length>100);
+ assert.match(body,/Source::capture_expected\(&state, &instance\).*s\.scoped\(None, Some\(&vault\)\)/);
+ assert.match(body,/source\.ensure_scope_protocol\(&state\)\.await\?/);
+ assert.match(body,/\.metadata_get\(&state, &format!\(/);
+ assert.match(body,/\/v1\/notes\?vault=\{\}&q=\{\}&page=\{page\}&limit=50\{directory_query\}/);
+ assert.match(body,/Err\(e\) if e == "CONTENT_OFFLINE" => \{\}/);
+ assert.match(body,/Err\(e\) => return Err\(e\)/);
+ assert.match(body,/source\.with_db\(&state/);
+ const helper=read('src-tauri/src/content/scope_probe.rs');
+ assert.match(helper,/for attempt in 0\.\.3/);assert.match(helper,/Duration::from_secs\(20\)/);
+ assert.match(helper,/Ok\(\(503, value\)\)/);assert.match(helper,/value\["code"\] == "CONTENT_UNAVAILABLE"/);
+ const authority=read('src-tauri/src/content.rs');assert.match(authority,/if self\.scoped_v1_proven\(\)/);
+});

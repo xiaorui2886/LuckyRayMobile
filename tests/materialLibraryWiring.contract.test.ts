@@ -24,7 +24,7 @@ test("P2 — StillLibrary actually consumes LibrarySession", () => {
   const lib = LIB();
   assert.match(lib, /new LibrarySession\(\)/u, "the page constructs the session");
   assert.match(lib, /session\.bind\("local"/u, "Local identity is bound");
-  assert.match(lib, /session\.view<any>\("local"\)/u, "Local view is read for presentation");
+  assert.match(lib, /session\.view<any>\("local", localIdentity\(\)\)/u, "Local view is read for presentation");
   assert.match(lib, /session\.setScroll\(/u, "per-source scroll is written");
   // REPAIR-R5: the Desktop source has its OWN authority now (it owns the owner
   // lifecycle AND the request sequencing in one object), so the page reads the
@@ -32,7 +32,7 @@ test("P2 — StillLibrary actually consumes LibrarySession", () => {
   // session. The retention guarantee is unchanged — see the R5 suite.
   assert.match(lib, /new DesktopPageAuthority\(/u, "the Desktop page has one authority");
   assert.match(lib, /desktopAuthority\.bind\(/u, "whose bind owns the owner lifecycle");
-  assert.match(lib, /session\.view<any>\("desktop"\)/u, "and the session still tracks Desktop scroll");
+  assert.match(lib, /session\.view<any>\("desktop", currentDesktopIdentity\)/u, "and the session still tracks Desktop scroll");
 });
 
 // 1. the real Local effect does not invalidate/reload on a domain toggle
@@ -186,7 +186,7 @@ test("P12 — retry issues one forced source-qualified re-query", () => {
     "the Desktop retry FORCES the re-query (not blocked by the retained URL)");
   assert.match(lib, /const requestDesktopThumb = useCallback\(\(\s*\n?\s*owner: string, desktopAssetId: string, force = false,/u,
     "the requester accepts an explicit force flag");
-  assert.match(lib, /if \(!force && desktopThumbsRef\.current\[desktopAssetId\] && desktopThumbVersions\.current\[desktopAssetId\]\s*===\s*revision\) return;/u,
+  assert.match(lib, /if \(!force && desktopThumbsRef\.current\[thumbId\] && desktopThumbVersions\.current\[thumbId\]\s*===\s*revision\) return;/u,
     "only a same-version retained URL blocks an unforced request");
   assert.match(lib, /requestLocalThumb\(aid,\s*true\)/u,
     "the Local retry forces exactly its own shared requester");
@@ -316,7 +316,7 @@ test("R2-7/8 — list mode queues a bounded window with visible work first", () 
   assert.match(lib, /const LIST_NEAR_COUNT = 8;/u, "a bounded first screen");
   assert.match(lib, /const LIST_THUMB_WINDOW = 20;/u, "and a bounded prefetch window");
   // The scheduler still serves near before tail under the global limit.
-  assert.match(lib, /enqueue\(desktopThumbKey\(owner,\s*desktopAssetId,\s*revision\),\s*\(\)\s*=>\s*api\.assetThumbnail\(owner,\s*desktopAssetId,\s*force,\s*false,\s*revision\),\s*priority\)/u,
+  assert.match(lib, /enqueue\(desktopThumbKey\(owner,\s*desktopAssetId,\s*revision,false,library\),\s*\(\)\s*=>\s*scopedApi\.assetThumbnail\(owner,\s*desktopAssetId,\s*force,\s*false,\s*revision\),\s*priority\)/u,
     "the priority and owner/version are passed through the single scheduler");
 });
 
@@ -334,7 +334,7 @@ test("R2-10/11 — the retry refetches exactly one owner+asset and only once", (
   const lib = LIB();
   assert.match(lib, /requestDesktopThumb\(committedDesktopOwner, aid, true\)/u,
     "the Desktop retry forces the refetch for the captured owner");
-  assert.match(lib, /setDesktopThumbs\(\(prev\) => \{[\s\S]{0,220}?delete next\[aid\];/u,
+  assert.match(lib, /setDesktopThumbs\(\(prev\) => \{[\s\S]{0,220}?delete next\[thumbId\];/u,
     "the retained URI is dropped first so the same value can propagate again");
   const tile = strip(read("src", "still", "kit", "mediaTile.tsx"));
   assert.match(tile, /setRetried\(true\)/u, "the retry budget is spent exactly once");
@@ -357,9 +357,9 @@ test("R2-12 — a stale Desktop A retry cannot touch B", () => {
   const idx = lib.indexOf("requestDesktopThumb = useCallback(");
   const tail = lib.slice(idx, idx + 1400);
   const requester = tail.slice(0, tail.indexOf("}, [") + 6);
-  assert.match(requester, /if \(desktopOwnerRef\.current !== owner \|\| !t\?\.uri\) return;/u,
+  assert.match(requester, /if \(desktopOwnerRef\.current !== owner \|\| libraryRef\.current !== library \|\| !t\?\.uri\) return;/u,
     "the commit is fenced by the live owner");
-  assert.match(requester, /desktopThumbKey\(owner,\s*desktopAssetId,\s*revision\)/u,
+  assert.match(requester, /desktopThumbKey\(owner,\s*desktopAssetId,\s*revision,false,library\)/u,
     "keys stay owner- and version-qualified");
   assert.match(requester, /materialImageVersion\(current\)\s*!==\s*revision/u,
     "a late old-version result cannot commit to the current asset");
@@ -367,7 +367,7 @@ test("R2-12 — a stale Desktop A retry cannot touch B", () => {
   const native = read("src-tauri", "src", "lib.rs");
   const sig = native.slice(native.indexOf("async fn asset_thumbnail("));
   const body = sig.slice(0, 6000);
-  assert.match(body, /let instance = owner\.instance\(\)\.to_string\(\);/u,
+  assert.match(body, /let instance = owner\.cache_owner\(\);/u,
     "the captured owner names the instance used for the cache row");
   assert.doesNotMatch(body, /clear_all_thumbnails|thumbnail_cache_clear\(\)/u,
     "there is no global cache purge");

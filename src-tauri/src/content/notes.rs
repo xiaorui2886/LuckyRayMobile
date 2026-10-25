@@ -1,11 +1,14 @@
 use super::*;
 pub(crate) mod uploads;
 mod mutation;
+pub(crate) mod linked_import;
 mod bootstrap;
+mod replica_resources;
 pub(crate) mod offline;
+pub(crate) mod local_upload;
 use mutation::Outcome;
 
-static SYNC_GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+pub(crate) static SYNC_GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 async fn remote_note(source: &Source, vault: &str, id: &str) -> Result<Value, String> {
     let (status, value) = source
@@ -83,17 +86,23 @@ mod rollback_tests {
 }
 
 #[tauri::command]
-pub(crate) async fn content_sync(state: State<'_, SharedState>) -> Result<Value, String> {
+pub(crate) async fn content_sync(state: State<'_, SharedState>, app: tauri::AppHandle, instance: Option<String>, vault: Option<String>) -> Result<Value, String> {
+    let source = match instance.as_deref() {
+        Some(instance) => Source::capture_expected(&state, instance)?,
+        None if vault.is_none() => Source::capture(&state)?,
+        None => return Err("CONTENT_SOURCE_CHANGED".into()),
+    }.scoped(None, vault.as_deref())?.knowledge();
     let _gate = SYNC_GATE
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
-    let source = Source::capture(&state)?;
+    source.check(&state)?;
+    let requested_vault = vault;
     let capabilities = offline::capabilities(&source, &state).await?;
     let vaults = source.gateway.content_get("/v1/vaults").await?;
     let vault = vaults["items"]
         .as_array()
-        .and_then(|rows| rows.first())
+        .and_then(|rows| rows.iter().find(|row| requested_vault.as_deref().is_none_or(|id| row["vaultId"] == id)))
         .ok_or("CONTENT_VAULT_UNAVAILABLE")?;
     let vault_id = vault["vaultId"]
         .as_str()
@@ -110,10 +119,25 @@ pub(crate) async fn content_sync(state: State<'_, SharedState>) -> Result<Value,
         let rows = db.offline_libraries(&source.instance)?;
         Ok(rows.as_array().and_then(|rows| rows.iter().find(|row| row["confirmed"] == true)).cloned())
     })?;
-    if selected.as_ref().is_some_and(|library| library["vaultId"] != vault_id) {
+    if requested_vault.is_none() && selected.as_ref().is_some_and(|library| library["vaultId"] != vault_id) {
         // The Desktop's current-vault protocol cannot serve this scope now.
         // Never send its pending work to the new vault or switch Desktop UI.
         return Ok(json!({"continuation":false,"pushed":0,"applied":0,"instanceId":source.instance,"vaultId":selected.unwrap()["vaultId"],"waitingCurrent":true}));
+    }
+    let pairing_review = match source.with_db(&state, |db| db.content_pairing_review(&source.instance, vault_id)) {
+        Ok(()) => false,
+        Err(code) if code == "CONTENT_PAIRING_REVIEW_REQUIRED" => true,
+        Err(code) => return Err(code),
+    };
+    let mut folder_applied=0;let mut folder_more=false;
+    if capabilities["knowledgeFolders"]["version"]==1 {
+        let after=source.with_db(&state,|db|db.managed_folder_scan_cursor(&source.instance,vault_id))?;
+        let mut path=format!("/v1/services/knowledge/vaults/{}/directories?limit=100",encode(vault_id));
+        if !after.is_empty(){path.push_str(&format!("&afterPath={}",encode(&after)));}
+        let (status,page)=source.gateway.content_request(reqwest::Method::GET,&path,None).await?;
+        source.check(&state)?;
+        if status==200 {(folder_applied,folder_more)=source.with_db(&state,|db|db.managed_folder_observe_page(&source.instance,vault_id,&page))?;}
+        else if status!=404 {return Err(format!("CONTENT_FOLDER_READ_HTTP_{status}"));}
     }
     let mut pushed = 0;
     let mut desktop_busy_note_ids: Vec<String> = Vec::new();
@@ -134,6 +158,37 @@ pub(crate) async fn content_sync(state: State<'_, SharedState>) -> Result<Value,
         source.check(&state)?;
         let unique_create = catalog_result.as_ref().ok()
             .and_then(|(status, catalog)| mutation::create_route_capability(*status, catalog, &source.instance));
+        // Empty-folder publication is additive: old servers keep local pending
+        // folders intact, without guessing another endpoint or acknowledging them.
+        if capabilities["knowledgeFolders"]["version"]==1 && capabilities["knowledgeFolders"]["create"]==true {
+            let folders=source.with_db(&state,|db|db.managed_pending_folders(&source.instance,vault_id))?;
+            for op in folders {
+                if source.with_db(&state,|db|db.managed_mutation_blocked(&source.instance,vault_id,"folder",&op.relative_path))? {continue;}
+                if !source.with_db(&state,|db|db.managed_folder_parent_ready(&source.instance,vault_id,&op.parent_relative_path))? {continue;}
+                let (status,receipt)=source.mutate(&state,"/v1/notes/folders",reqwest::Method::POST,&op.payload()).await?;
+                if status!=200 && status!=201 {
+                    if matches!(status,400|409|422) {source.with_db(&state,|db|db.managed_mutation_block(&source.instance,vault_id,"folder",&op.relative_path,"folder-review-required"))?;continue;}
+                    return Err(format!("CONTENT_FOLDER_HTTP_{status}"));
+                }
+                source.with_db(&state,|db|db.managed_folder_ack(&op,&receipt))?;
+                pushed+=1;
+            }
+        }
+        // Durable offline moves use the same serialized scope and exact payload
+        // on every retry. UI vault selection never owns their execution.
+        let moves=source.with_db(&state,|db|db.managed_pending_moves(&source.instance,vault_id))?;
+        for (id,request) in moves {
+            if source.with_db(&state,|db|db.managed_mutation_blocked(&source.instance,vault_id,"move",&id))? {continue;}
+            if !source.with_db(&state,|db|db.managed_folder_parent_ready(&source.instance,vault_id,request["parentRelativePath"].as_str().ok_or("VAULT_MOVE_INTENT_INVALID")?))? {continue;}
+            let path=format!("/v1/services/knowledge/notes/{}/move",encode(&id));
+            let (status,receipt)=source.mutate(&state,&path,reqwest::Method::PATCH,&request).await?;
+            if status!=200 {
+                if matches!(status,400|404|409|422) {source.with_db(&state,|db|db.managed_mutation_block(&source.instance,vault_id,"move",&id,"move-review-required"))?;continue;}
+                return Err(format!("CONTENT_MOVE_HTTP_{status}"));
+            }
+            source.with_db(&state,|db|db.managed_move_ack(&source.instance,vault_id,&id,&request,&receipt))?;
+            pushed+=1;
+        }
         let operations = source.with_db(&state, |db| {
             db.content_prepare_available_operations(&source.instance, vault_id, unique_create)
         })?;
@@ -146,9 +201,16 @@ pub(crate) async fn content_sync(state: State<'_, SharedState>) -> Result<Value,
             let op_id = operation["opId"]
                 .as_str()
                 .ok_or("CONTENT_OPERATION_INVALID")?;
-            let gateway = &source.gateway;
+            if prepared.route == crate::db::content_db::NoteOperationRoute::KnowledgeImportPlanned
+                && (capabilities["knowledgeImportPlan"]["version"]!=1 || capabilities["knowledgeImportPlan"]["exactPaths"]!=true) {
+                // A downgrade/absent capability never selects a generic create.
+                desktop_busy_note_ids.push(id.to_owned());
+                continue;
+            }
+            let source_ref = &source;
+            let state_ref = &state;
             let (outcome, result) = mutation::dispatch(&prepared, |path, method, payload| async move {
-                gateway.content_mutate(&path, method, &payload).await
+                source_ref.mutate(state_ref, &path, method, &payload).await
             }).await?;
             source.check(&state)?;
             if outcome == Outcome::Ack {
@@ -189,6 +251,10 @@ pub(crate) async fn content_sync(state: State<'_, SharedState>) -> Result<Value,
                 continue;
             } else {
                 let Outcome::Refused(status) = outcome else { return Err("CONTENT_OPERATION_INVALID".into()); };
+                if prepared.route == crate::db::content_db::NoteOperationRoute::KnowledgeImportPlanned && matches!(status,400|404|409|422) {
+                    source.with_db(&state,|db|db.managed_linked_block(&source.instance,vault_id,id))?;
+                    continue;
+                }
                 if source.with_db(&state, |db| db.content_pause_blank_rename(&source.instance, vault_id, &prepared, status, &result))? {
                     // Keep the old submitted bytes in both active storage and
                     // pause audit. No old-op automatic replay, no fake ACK;
@@ -248,7 +314,7 @@ pub(crate) async fn content_sync(state: State<'_, SharedState>) -> Result<Value,
                 Some((page["nextId"].as_str().unwrap_or(""), done)),
             )
         })?;
-        return Ok(json!({"continuation":true,"pushed":pushed,"applied":documents.len(),"autoRenamed":auto_renamed,"instanceId":source.instance,"vaultId":vault_id,"desktopBusyNoteIds":desktop_busy_note_ids}));
+        return Ok(json!({"continuation":true,"pushed":pushed,"applied":documents.len(),"autoRenamed":auto_renamed,"instanceId":source.instance,"vaultId":vault_id,"pairingReviewRequired":pairing_review,"warningCode":if pairing_review { "CONTENT_PAIRING_REVIEW_REQUIRED" } else { "" },"desktopBusyNoteIds":desktop_busy_note_ids}));
     }
 
     let cursor = position["cursor"].as_i64().unwrap_or(0);
@@ -265,7 +331,7 @@ pub(crate) async fn content_sync(state: State<'_, SharedState>) -> Result<Value,
             source.with_db(&state, |db| {
                 db.content_resnapshot(&source.instance, vault_id)
             })?;
-            return Ok(json!({"continuation":true,"pushed":pushed,"applied":0,"instanceId":source.instance,"vaultId":vault_id,"desktopBusyNoteIds":desktop_busy_note_ids}));
+            return Ok(json!({"continuation":true,"pushed":pushed,"applied":0,"instanceId":source.instance,"vaultId":vault_id,"pairingReviewRequired":pairing_review,"warningCode":if pairing_review { "CONTENT_PAIRING_REVIEW_REQUIRED" } else { "" },"desktopBusyNoteIds":desktop_busy_note_ids}));
         }
         Err(error) => return Err(error),
     };
@@ -274,7 +340,7 @@ pub(crate) async fn content_sync(state: State<'_, SharedState>) -> Result<Value,
         .ok_or("CONTENT_RESPONSE_INVALID")?;
     // Multiple changes for one note are safely coalesced to its current value;
     // the cursor and all resulting documents commit in the same transaction.
-    let (documents, deferred) = offline::change_documents(changes, vault_id, selected.is_some(), |id| {
+    let (documents, deferred) = offline::change_documents(changes, vault_id, source.with_db(&state,|db|db.offline_selected(&source.instance,vault_id))?, |id| {
         let source = &source;
         async move { remote_note(source, vault_id, &id).await }
     }).await?;
@@ -289,8 +355,9 @@ pub(crate) async fn content_sync(state: State<'_, SharedState>) -> Result<Value,
         )
     })?;
     let (prepared, preparation_more) = offline::prepare_one(&source, &state, vault_id).await?;
+    let resource_more = replica_resources::prepare_one(&source, state.clone(), &app, vault_id, &capabilities).await?;
     Ok(
-        json!({"continuation":page["hasMore"]==true || pushed>0 || create_retry_pending || preparation_more,"pushed":pushed,"applied":documents.len()+usize::from(prepared),"autoRenamed":auto_renamed,"createRetryPending":create_retry_pending,"instanceId":source.instance,"vaultId":vault_id,"desktopBusyNoteIds":desktop_busy_note_ids,"attentionRequired":source.with_db(&state, |db| db.content_sync_attention(&source.instance, vault_id))?}),
+        json!({"continuation":page["hasMore"]==true || pushed>0 || create_retry_pending || preparation_more || resource_more || folder_more,"pushed":pushed,"applied":documents.len()+usize::from(prepared)+folder_applied,"autoRenamed":auto_renamed,"createRetryPending":create_retry_pending,"instanceId":source.instance,"vaultId":vault_id,"pairingReviewRequired":pairing_review,"warningCode":if pairing_review { "CONTENT_PAIRING_REVIEW_REQUIRED" } else { "" },"desktopBusyNoteIds":desktop_busy_note_ids,"attentionRequired":source.with_db(&state, |db| db.content_sync_attention(&source.instance, vault_id))?}),
     )
 }
 
@@ -333,13 +400,16 @@ pub(crate) async fn content_notes(
     // A0-closure: a directory filter alone must also hit the live gateway
     // (previously only a non-empty q triggered the live path).
     if !q.trim().is_empty() || !directory.trim().is_empty() {
-        if let Some(source) = Source::capture(&state)
+        if let Some(source) = Source::capture_expected(&state, &instance).and_then(|s| s.scoped(None, Some(&vault)))
             .ok()
             .filter(|s| s.instance == instance)
         {
+            source.ensure_scope_protocol(&state).await?;
+            // This is a scoped metadata GET, like capabilities and Services
+            // discovery: use their existing bounded transient-response policy.
+            // Never retry permission/identity errors or silently fall back.
             match source
-                .gateway
-                .content_get(&format!(
+                .metadata_get(&state, &format!(
                     "/v1/notes?vault={}&q={}&page={page}&limit=50{directory_query}",
                     encode(&vault),
                     encode(&q)
@@ -418,6 +488,7 @@ async fn refresh_cold_note(
     vault: &str,
     id: &str,
 ) -> Result<Option<Value>, String> {
+    let cache_generation = source.with_db(state, |db| db.content_cache_generation(instance, vault))?;
     bootstrap::fetch_if_missing(
         || source.with_db(state, |db| db.content_note_cached(instance, vault, id).map(|n| n.is_some())),
         || async {
@@ -425,6 +496,7 @@ async fn refresh_cold_note(
             public_id(vault)?;
             source.verify_owner(state)?;
             source.check(state)?;
+            source.ensure_scope_protocol(state).await?;
             // A missing server note remains a failed read, not a synthetic
             // tombstone or an editable empty baseline.
             let document = source.gateway.content_get(
@@ -435,6 +507,9 @@ async fn refresh_cold_note(
             Ok(document)
         },
         |document| source.with_db(state, |db| {
+            if db.content_cache_generation(instance, vault)? != cache_generation {
+                return Err("CONTENT_CACHE_CHANGED".into());
+            }
             db.content_cache_bootstrap(instance, vault, id, &document)
         }),
     ).await
@@ -463,7 +538,8 @@ pub(crate) async fn content_note_prefetch(state: State<'_, SharedState>, instanc
     if expected_revision.len() > 4096 { return Err("CONTENT_ID_INVALID".into()); }
     static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
     let _slot = SLOTS.try_acquire().map_err(|_| "CONTENT_BUSY")?;
-    let source = Source::capture_expected(&state, &instance)?;
+    let source = Source::capture_expected(&state, &instance)?.scoped(None, Some(&vault))?;
+    if source.with_db(&state, |db| db.content_cache_paused(&instance,&vault))? { return Ok(json!({"changed":false})); }
     let observed = source.with_db(&state, |db| db.content_note_cached(&instance,&vault,&id))?;
     if !Db::content_prefetch_eligible(&observed) { return Ok(json!({"changed":false})); }
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -496,7 +572,7 @@ pub(crate) async fn content_note_refresh(
     id: String,
 ) -> Result<Value, String> {
     public_id(&id)?;
-    let source = Source::capture_expected(&state, &instance)?;
+    let source = Source::capture_expected(&state, &instance)?.scoped(None, Some(&vault))?;
     // Cold canonical rows need a readonly baseline first. Never allocate an
     // editor epoch across this await: the renderer must still own the page
     // before issuing the separate, synchronous content_note_begin.
@@ -515,17 +591,15 @@ pub(crate) async fn content_note_refresh(
     if pending_unpublished {
         return source.with_db(&state, |db| db.content_note(&instance, &vault, &id));
     }
+    let cache_generation = source.with_db(&state, |db| db.content_cache_generation(&instance, &vault))?;
+    let expected = source.with_db(&state, |db| db.content_note_cached(&instance, &vault, &id))?;
     let document = remote_note(&source, &vault, &id).await?;
-    // Refresh a single body without changing the synchronization position.
+    // A late GET cannot replace an edit, ACK or newer observation that
+    // committed while it was in flight. Always return today's local truth.
     source.with_db(&state, |db| {
-        let position = db.content_sync_position(&instance, &vault)?;
-        db.content_apply_batch(
-            &instance,
-            &vault,
-            std::slice::from_ref(&document),
-            position["cursor"].as_i64().unwrap_or(0),
-            None,
-        )?;
+        if db.content_cache_generation(&instance, &vault)? == cache_generation {
+            db.content_refresh_adopt(&instance, &vault, &id, &expected, &document)?;
+        }
         db.content_note(&instance, &vault, &id)
     })
 }
@@ -559,7 +633,7 @@ pub(crate) async fn content_note_resume_paused(
     paused_op_id: String, epoch: i64, generation: i64,
 ) -> Result<Value, String> {
     let _gate = SYNC_GATE.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
-    let source = Source::capture_expected(&state, &instance)?;
+    let source = Source::capture_expected(&state, &instance)?.scoped(None, Some(&vault))?;
     source.with_db(&state, |db| db.content_resume_paused(&instance, &vault, &id, &paused_op_id, epoch, generation))
 }
 
@@ -651,7 +725,7 @@ pub(crate) async fn content_hydrate_directories(
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
-    let source = Source::capture(&state)?;
+    let source = Source::capture_expected(&state, &instance)?.scoped(None, Some(&vault))?;
     // Exact owner fence: the captured pairing must BE the requested instance.
     if source.instance != instance {
         return Err("CONTENT_SOURCE_CHANGED".into());
@@ -693,7 +767,7 @@ pub(crate) async fn content_note_create_authority(
         Ok(rows.as_array().and_then(|rows| rows.iter().find(|row| row["confirmed"] == true && row["vaultId"] == vault)).map(|row|
             json!({"usable":row["writeState"]=="granted","reason":if row["writeState"]=="granted" {""} else {"CONTENT_OFFLINE_WRITE_UNAVAILABLE"},"vaultId":vault,"localReplica":true})))
     })? { return Ok(authority); }
-    let source = Source::capture(&state)?;
+    let source = Source::capture_expected(&state, &instance)?.scoped(None, Some(&vault))?;
     if source.instance != instance {
         return Ok(json!({"usable": false, "reason": "CONTENT_SOURCE_CHANGED"}));
     }

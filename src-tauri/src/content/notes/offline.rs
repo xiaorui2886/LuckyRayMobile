@@ -9,6 +9,7 @@ pub(super) fn local_owner(db: &Db, instance: &str) -> Result<(), String> {
 }
 
 pub(super) async fn capabilities(source: &Source, state: &SharedState) -> Result<Value, String> {
+    source.ensure_scope_protocol(state).await?;
     let (status, value) = source
         .gateway
         .content_request(reqwest::Method::GET, "/v1/capabilities", None)
@@ -94,7 +95,7 @@ pub(crate) async fn content_offline_control(
     if action != "start" {
         return Err("CONTENT_INPUT_INVALID".into());
     }
-    let source = Source::capture_expected(&state, &instance)?;
+    let source = Source::capture_expected(&state, &instance)?.scoped(None, Some(&vault))?;
     let caps = capabilities(&source, &state).await?;
     let vaults = source.gateway.content_get("/v1/vaults").await?;
     let current = vaults["items"]
@@ -392,4 +393,15 @@ mod tests {
             empty
         );
     }
+}
+
+/// Local maintenance intentionally accepts historical owners, not only the
+/// currently paired Desktop. Never sends requests or removes original files.
+#[tauri::command]
+pub(crate) fn content_cache_libraries(state: State<'_, SharedState>) -> Result<Value, String> {
+    with_db(&state, |db| db.content_cache_libraries())
+}
+#[tauri::command]
+pub(crate) fn content_cache_clear(state: State<'_, SharedState>, instance: String, vault: String) -> Result<Value, String> {
+    with_db(&state, |db| db.content_cache_clear(&instance, &vault))
 }

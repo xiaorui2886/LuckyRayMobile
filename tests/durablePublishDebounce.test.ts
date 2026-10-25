@@ -1,3 +1,4 @@
+import { trackKnowledgeWrite } from "../src/services/knowledgeCacheSafety.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -30,7 +31,7 @@ function editorHarness() {
   });
   const edit = runInNewContext(`${editCode}\nedit;`, {
     api: { contentNoteEdit: (args: any) => new Promise((resolve, reject) => saves.push({ args, resolve, reject })) },
-    owner, failed, pending, navigationActivity: { current: 0 },
+    trackKnowledgeWrite, owner, failed, pending, navigationActivity: { current: 0 },
     editGeneration: { current: 0 }, epoch: { current: 7 }, displayedRevision: { current: "r1" },
     publisher: { current: publisher }, editingLease: { current: { committed: () => leaseCommits++ } },
     session2: { projection: { upsert: (value: any) => projections.push(value) } },

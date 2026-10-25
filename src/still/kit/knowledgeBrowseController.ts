@@ -67,8 +67,13 @@ export type KnowledgeBrowseRow = {
 };
 
 export type KnowledgeBrowseSnapshot = {
+  /** Diagnostic request scope only, never authority for rows or operations. */
+  requestedVaultId?: string;
   /** Explicitly confirmed, persisted single-vault scope; not connection truth. */
   replica?: KnowledgeReplicaLibrary;
+  /** Background work never changes the mounted retained view into loading. */
+  refreshing?: boolean;
+  stale?: boolean;
   phase: KnowledgeBrowsePhase;
   instanceId: string;
   /** The resolved ACTIVE vault (identity of the rows on screen). */
@@ -126,6 +131,76 @@ function phaseForOperation(state: OperationState): KnowledgeBrowsePhase {
 }
 
 export class KnowledgeBrowseController {
+  private selectedVault = "";
+  private selectionReadable = true;
+  private selectionEpoch = 0;
+  selectVault(vaultId: string, readable = true, selectionEpoch = this.selectionEpoch): void {
+    if (this.selectedVault === vaultId && this.selectionReadable === readable && this.selectionEpoch === selectionEpoch) return;
+    this.selectionEpoch = selectionEpoch;
+    this.selectionReadable = readable;
+    this.selectedVault = vaultId;
+    this.epoch += 1; this.clearTimer(); this.loadingMore = false;
+    this.certified = null; this.moveVault = null; this.replicaMoveToken += 1; this.replicaMoveKey = "";
+    const instance = this.binding?.instanceId || "";
+    if (!readable) { this.discardScope(instance, vaultId); this.blockedScopes.add(this.permissionKey(instance, vaultId)); }
+    const keep = readable ? this.restore(instance, vaultId) : undefined;
+    this.snap = keep ? { ...keep, refreshing: true } : {
+      ...EMPTY, instanceId: instance, query: this.query, phase: readable ? "waiting-catalog" : "not-granted",
+    };
+    this.emit();
+    if (readable && this.binding?.paired && !this.suspended) void this.discoverAndList(this.query, this.epoch, keep);
+  }
+  private readonly retained = new Map<string, { snapshot: KnowledgeBrowseSnapshot; pages: number; revocation: number; security: number }>();
+  private readonly deniedViews = new Map<string, KnowledgeBrowseSnapshot>();
+  private activeRevocation = 0;
+  private activeSecurity = 0;
+  private readonly blockedScopes = new Set<string>();
+  private permissionKey(instance: string, vault: string): string { return JSON.stringify([instance, vault]); }
+  private loadedPages = 1;
+  private scopeKey(instance: string, vault: string, query = this.query): string {
+    return JSON.stringify([instance, vault, query]);
+  }
+  private scopedRegistry(instance = this.binding?.instanceId || "", vault = this.selectedVault): ServiceRegistry {
+    return this.registry.forScope?.(instance, vault ? { vault } : undefined) ?? this.registry;
+  }
+  private discardScope(instance: string, vault?: string): void {
+    for (const [key, { snapshot }] of this.retained) {
+      if (snapshot.instanceId === instance && (vault === undefined || snapshot.vaultId === vault || snapshot.requestedVaultId === vault)) this.retained.delete(key);
+    }
+  }
+  /** Exact-owner synchronous render lookup, including before selection effects run. */
+  snapshotFor(instance: string, vault = this.selectedVault, query = this.query): KnowledgeBrowseSnapshot | undefined {
+    const registry = this.scopedRegistry(instance, vault);
+    const denied = registry.snapshot?.() && ["knowledge.vaults", "knowledge.registeredList"].some(op => registry.operation(op).state === "notGranted");
+    if (denied) {
+      const key = this.scopeKey(instance, vault, query);
+      let view = this.deniedViews.get(key);
+      if (!view) {
+        view = { ...EMPTY, instanceId: instance, requestedVaultId: vault, query, phase: "not-granted", remoteCode: "GRANT_REQUIRED" };
+        this.deniedViews.set(key, view);
+      }
+      return view;
+    }
+    const snap = this.snap;
+    if (this.activeSecurity === (registry.currentSecurityRevision?.() ?? 0)
+      && this.activeRevocation === (registry.currentRevocationRevision?.() ?? 0)
+      && snap.instanceId === instance && snap.query === query
+      && (vault ? snap.vaultId === vault || (!snap.vaultId && snap.requestedVaultId === vault) : snap.requestedVaultId === "")) return snap;
+    const retained = this.retained.get(this.scopeKey(instance, vault, query));
+    return retained && retained.security === (registry.currentSecurityRevision?.() ?? 0) && retained.revocation === (registry.currentRevocationRevision?.() ?? 0) ? retained.snapshot : undefined;
+  }
+  private restore(instance: string, vault = this.selectedVault): KnowledgeBrowseSnapshot | undefined {
+    const registry = this.scopedRegistry(instance, vault);
+    this.activeRevocation = registry.currentRevocationRevision?.() ?? 0;
+    this.activeSecurity = registry.currentSecurityRevision?.() ?? 0;
+    const candidate = this.retained.get(this.scopeKey(instance, vault));
+    const retained = candidate?.revocation === this.activeRevocation && candidate.security === this.activeSecurity ? candidate : undefined;
+    this.loadedPages = retained?.pages ?? 1;
+    this.replicaPage = retained?.pages ?? 1;
+    this.afterId = retained?.snapshot.nextAfterId ?? null;
+    return retained?.snapshot;
+  }
+
   private readonly replica?: KnowledgeReplicaReader;
   private replicaPage = 1;
   private replicaRefreshPending = false;
@@ -180,6 +255,33 @@ export class KnowledgeBrowseController {
     this.knowledge = deps.knowledge;
     this.pageSize = deps.pageSize ?? 50;
     this.debounceMs = deps.debounceMs ?? 260;
+    this.registry.subscribe?.(() => {
+      for (const [key, saved] of this.retained) {
+        const scope = this.scopedRegistry(saved.snapshot.instanceId, saved.snapshot.requestedVaultId ?? "");
+        if (saved.security !== (scope.currentSecurityRevision?.() ?? 0) || saved.revocation !== (scope.currentRevocationRevision?.() ?? 0)
+          || (scope.snapshot?.() && ["knowledge.vaults", "knowledge.registeredList"].some(op => scope.operation(op).state === "notGranted"))) {
+          this.retained.delete(key);
+          this.blockedScopes.add(this.permissionKey(saved.snapshot.instanceId, saved.snapshot.requestedVaultId ?? ""));
+        }
+      }
+      const b = this.binding;
+      if (!b?.paired || !b.instanceId) return;
+      const scope = this.scopedRegistry();
+      const denied = Boolean(scope.snapshot?.() && ["knowledge.vaults", "knowledge.registeredList"].some(op => scope.operation(op).state === "notGranted"));
+      const revoked = this.activeRevocation !== (scope.currentRevocationRevision?.() ?? 0);
+      if (!denied && !revoked && this.activeSecurity === (scope.currentSecurityRevision?.() ?? 0)) return;
+      this.blockedScopes.add(this.permissionKey(b.instanceId, this.selectedVault));
+      this.activeRevocation = scope.currentRevocationRevision?.() ?? 0;
+      this.activeSecurity = scope.currentSecurityRevision?.() ?? 0;
+      this.epoch += 1; this.clearTimer(); this.loadingMore = false;
+      this.certified = null; this.moveVault = null; this.replicaMoveToken += 1;
+      this.snap = { ...EMPTY, instanceId: b.instanceId, query: this.query, phase: denied || revoked ? "not-granted" : "waiting-catalog" };
+      this.emit();
+      if (!denied && !revoked && this.selectionReadable && b.connected && !this.suspended) {
+        const epoch = this.epoch;
+        queueMicrotask(() => { if (epoch === this.epoch && this.live()) void this.discoverAndList(this.query, epoch); });
+      }
+    });
   }
 
   subscribe(fn: (s: KnowledgeBrowseSnapshot) => void): () => void {
@@ -193,7 +295,15 @@ export class KnowledgeBrowseController {
   }
 
   private emit(): void {
-    this.snap = { ...this.snap };
+    this.snap = { ...this.snap, requestedVaultId: this.selectedVault };
+    if ((this.snap.phase === "ready" || (this.snap.phase === "offline" && this.snap.replica))
+      && !this.snap.refreshing && this.snap.instanceId && this.snap.vaultId) {
+      this.retained.set(this.scopeKey(this.snap.instanceId, this.selectedVault), {
+        snapshot: this.snap, pages: this.snap.replica ? this.replicaPage : this.loadedPages,
+        revocation: this.scopedRegistry().currentRevocationRevision?.() ?? 0,
+        security: this.scopedRegistry().currentSecurityRevision?.() ?? 0,
+      });
+    }
     for (const fn of this.listeners) fn(this.snap);
   }
 
@@ -201,74 +311,25 @@ export class KnowledgeBrowseController {
   setConnection(binding: KnowledgeBrowseBinding): void {
     const prev = this.binding;
     const wasSuspended = this.suspended;
+    this.binding = binding;
     this.suspended = false;
     if (prev && !wasSuspended && prev.instanceId === binding.instanceId
-      && prev.paired === binding.paired
-      && prev.connected === binding.connected) return;
-    this.binding = binding;
-    if (this.replica && binding.paired && binding.instanceId && (!prev || wasSuspended
-      || prev.instanceId !== binding.instanceId || prev.connected !== binding.connected || prev.paired !== binding.paired)) {
-      const keep = this.snap.instanceId === binding.instanceId ? this.snap : undefined;
-      if (!prev || prev.instanceId !== binding.instanceId || prev.connected !== binding.connected || prev.paired !== binding.paired) {
-        this.replicaMoveKey = ""; this.replicaMoveToken++; this.moveVault = null; this.certified = null;
-      }
-      this.epoch += 1; this.clearTimer(); this.loadingMore = false;
-      this.snap = {...EMPTY, ...keep, instanceId: binding.instanceId, query: this.query,
-        phase: binding.connected ? "loading" : "offline"};
-      this.emit();
-      void this.discoverAndList(this.query, this.epoch, keep);
-      return;
+      && prev.paired === binding.paired && prev.connected === binding.connected) return;
+    this.epoch += 1; this.clearTimer(); this.loadingMore = false;
+    this.certified = null; this.moveVault = null; this.replicaMoveKey = ""; this.replicaMoveToken += 1;
+    if (!binding.paired || !binding.instanceId) {
+      this.retained.clear(); this.afterId = null;
+      if (prev?.paired) this.registry.invalidate();
+      this.snap = { ...EMPTY, phase: "unpaired", instanceId: binding.instanceId, query: this.query };
+      this.emit(); return;
     }
-    // R1-REPAIR (2): a connected true->false flip for the SAME Desktop is a
-    // HARD retire — the rows came from a live gateway that is now gone, so
-    // keeping them would pretend fresh. Bump the epoch (any in-flight
-    // page-1/page-N can no longer commit), drop the rows/token, and land as
-    // a truthful offline state.
-    const sameDesktop = prev && prev.instanceId === binding.instanceId && prev.paired === binding.paired;
-    if (sameDesktop && prev!.connected && !binding.connected) {
-      this.certified = null; // R1.5-C: an offline flip decertifies the fast path
-      this.epoch += 1;
-      this.clearTimer();
-      this.loadingMore = false;
-      this.afterId = null;
-      this.snap = {
-        ...EMPTY, phase: "offline", query: this.query,
-        instanceId: binding.instanceId, vaultId: "", vaultName: "",
-      };
-      this.emit();
-      return;
-    }
-    // R1-REPAIR (2b): the ws came back for the SAME Desktop — fresh discover
-    // + list, exactly like reconnect() (the page's ws-edge signal covers the
-    // normal path, but the synchronous flip must not dead-end in offline).
-    if (sameDesktop && prev!.connected === false && binding.connected) {
-      this.certified = null; // reconnect re-proves everything
-      this.epoch += 1;
-      this.clearTimer();
-      this.loadingMore = false;
-      this.afterId = null;
-      this.registry.invalidate();
-      this.snap = { ...EMPTY, query: this.query, phase: "waiting-catalog", instanceId: binding.instanceId };
-      this.emit();
-      void this.discoverAndList(this.query, this.epoch);
-      return;
-    }
-    // Pairing/instance change is a hard retire as well.
-    if (!prev || prev.instanceId !== binding.instanceId || prev.paired !== binding.paired) {
-      this.certified = null; // owner/pairing change decertifies
-      this.epoch += 1;
-      this.clearTimer();
-      this.loadingMore = false;
-      this.afterId = null;
-      if (!binding.paired || !binding.instanceId) {
-        this.snap = { ...EMPTY, phase: "unpaired", instanceId: binding.instanceId, query: this.query };
-        this.emit();
-        return;
-      }
-      this.snap = { ...EMPTY, phase: binding.connected ? "waiting-catalog" : "offline", instanceId: binding.instanceId, query: this.query };
-      this.emit();
-      if (binding.connected) void this.discoverAndList(this.query, this.epoch);
-    }
+    const keep = this.selectionReadable ? this.restore(binding.instanceId) : undefined;
+    this.snap = { ...EMPTY, ...keep, instanceId: binding.instanceId, query: this.query,
+      phase: !this.selectionReadable ? "not-granted" : !binding.connected ? "offline" : keep?.phase ?? "waiting-catalog",
+      refreshing: this.selectionReadable && Boolean(keep) && binding.connected,
+      stale: Boolean(keep) && !binding.connected };
+    this.emit();
+    if (this.selectionReadable && (binding.connected || this.replica)) void this.discoverAndList(this.query, this.epoch, keep);
   }
 
   /** The user's query (debounced). A→B retires A's rows immediately. */
@@ -337,8 +398,8 @@ export class KnowledgeBrowseController {
     if (!b || !b.paired || !b.instanceId || !b.connected) return;
     const { vaultId, vaultName } = this.snap;
     if (!vaultId) return;
-    const keep = (this.snap.phase === "ready" || this.snap.phase === "error")
-      && this.snap.instanceId === b.instanceId && this.snap.query === query ? this.snap : undefined;
+    const keep = this.snap.instanceId === b.instanceId && this.snap.query === query
+      && this.snap.phase !== "searching" ? this.snap : undefined;
     this.activeEpoch = epoch;
     try {
       const page = await this.knowledge.registeredList(b.instanceId, vaultId, {
@@ -346,9 +407,10 @@ export class KnowledgeBrowseController {
       });
       if (epoch !== this.epoch || !this.live()) return;
       this.afterId = page.nextAfterId ?? null;
+      this.loadedPages = 1;
       this.loadingMore = false;
       this.snap = {
-        ...this.snap, phase: "ready", query,
+        ...this.snap, phase: "ready", refreshing: false, stale: false, query,
         rows: pageItems(b.instanceId, vaultId, vaultName, page.items ?? []),
         nextAfterId: page.nextAfterId ?? null,
         hasMore: Boolean(page.hasMore),
@@ -377,9 +439,8 @@ export class KnowledgeBrowseController {
     this.epoch += 1;
     this.clearTimer();
     this.loadingMore = false;
-    this.registry.invalidate();
-    const kept = this.snap;
-    this.snap = { ...kept, phase: "loading", loadingMore: false, errorCode: "", remoteCode: "" };
+    const kept = this.restore(b.instanceId) ?? this.snap;
+    this.snap = { ...kept, refreshing: true, loadingMore: false, errorCode: "", remoteCode: "" };
     this.emit();
     void this.discoverAndList(this.query, this.epoch, kept);
   }
@@ -430,8 +491,8 @@ export class KnowledgeBrowseController {
     this.epoch += 1;
     this.clearTimer();
     this.loadingMore = false;
-    const kept = snap.instanceId === b.instanceId && sameQuery && snap.phase === "error" ? snap : undefined;
-    this.snap = { ...EMPTY, ...kept, query: this.query, phase: "waiting-catalog", instanceId: b.instanceId };
+    const kept = snap.instanceId === b.instanceId && sameQuery ? this.restore(b.instanceId) : undefined;
+    this.snap = { ...EMPTY, ...kept, query: this.query, phase: kept?.phase ?? "waiting-catalog", refreshing: Boolean(kept), instanceId: b.instanceId };
     this.emit();
     void this.discoverAndList(this.query, this.epoch, kept);
   }
@@ -466,10 +527,10 @@ export class KnowledgeBrowseController {
     this.clearTimer();
     this.loadingMore = false;
     this.afterId = null;
-    this.registry.invalidate();
-    this.snap = { ...EMPTY, query: this.query, phase: "waiting-catalog", instanceId: b.instanceId };
+    const keep = this.restore(b.instanceId);
+    this.snap = { ...EMPTY, ...keep, query: this.query, phase: keep?.phase ?? "waiting-catalog", refreshing: Boolean(keep), instanceId: b.instanceId };
     this.emit();
-    void this.discoverAndList(this.query, this.epoch);
+    void this.discoverAndList(this.query, this.epoch, keep);
   }
 
   /** The Desktop's active vault changed (page-driven signal). Retires the old
@@ -501,7 +562,7 @@ export class KnowledgeBrowseController {
     }
     const b = this.binding;
     if (!b?.paired || !b.instanceId || !b.connected) return;
-    if (this.loadingMore || !this.snap.hasMore || !this.afterId) return;
+    if (this.loadingMore || this.activeEpoch === this.epoch || !this.snap.hasMore || !this.afterId) return;
     const epoch = this.epoch;
     const { vaultId, vaultName } = this.snap;
     const query = this.query;
@@ -519,9 +580,10 @@ export class KnowledgeBrowseController {
           ...pageItems(b.instanceId, vaultId, vaultName, page.items ?? []),
         ];
         this.afterId = page.nextAfterId ?? null;
+        this.loadedPages += 1;
         this.loadingMore = false;
         this.snap = {
-          ...this.snap, phase: "ready", rows,
+          ...this.snap, phase: "ready", refreshing: false, stale: false, rows,
           nextAfterId: page.nextAfterId ?? null,
           hasMore: Boolean(page.hasMore),
           loadingMore: false,
@@ -564,7 +626,7 @@ export class KnowledgeBrowseController {
     try {
       const libraries = await this.replica.libraries(instance);
       if (epoch !== this.epoch || !this.live()) return true;
-      const library = libraries.find(library => library.confirmed && library.instanceId === instance);
+      const library = libraries.find(library => library.confirmed && library.instanceId === instance && (!this.selectedVault || library.vaultId === this.selectedVault));
       if (!library) return false;
       const same = this.snap.instanceId === instance && this.snap.vaultId === library.vaultId && this.snap.query === query;
       const targetPages = same ? pages : 1;
@@ -603,7 +665,7 @@ export class KnowledgeBrowseController {
       vaultId: this.moveVault?.vaultId ?? "",
       vaultName: this.moveVault?.vaultName ?? "",
       writeGranted: this.moveVault?.writeGranted === true,
-      moveState: this.registry.operation("knowledge.move").state,
+      moveState: this.scopedRegistry().operation("knowledge.move").state,
     };
   }
 
@@ -647,11 +709,13 @@ export class KnowledgeBrowseController {
     // it is a permission fact, not a generic error.
     if (message instanceof ServicesError) {
       const code = message.code;
-      if (code === "SOURCE_CHANGED") { keepRows = undefined; this.certified = null; }
+      if (code === "SOURCE_CHANGED") { keepRows = undefined; this.certified = null; this.discardScope(this.binding?.instanceId ?? "", this.selectedVault); }
       if (code === "GRANT_REQUIRED" || code === "AUTH_REVOKED" || code === "SCOPE_DENIED" || code === "PAIRING_REQUIRED") {
         this.epoch += 1;
         this.certified = null; // R1.5-C: a permission fact decertifies the fast path
-        this.registry.invalidate();
+        this.blockedScopes.add(this.permissionKey(this.binding?.instanceId ?? "", this.selectedVault));
+        this.discardScope(this.binding?.instanceId ?? "", code === "AUTH_REVOKED" || code === "PAIRING_REQUIRED" ? undefined : this.selectedVault);
+        this.scopedRegistry().invalidate();
         this.snap = {
           ...EMPTY, phase: "not-granted", query: this.query,
           instanceId: this.binding?.instanceId ?? "",
@@ -663,7 +727,7 @@ export class KnowledgeBrowseController {
       if (code === "SERVICE_UNAVAILABLE") {
         this.certified = null; // capability truth changed: re-certify on recovery
         this.snap = {
-          ...EMPTY, phase: "temporarily-unavailable", query: this.query,
+          ...EMPTY, ...keepRows, phase: "temporarily-unavailable", refreshing: false, stale: Boolean(keepRows?.rows?.length), query: this.query,
           instanceId: this.binding?.instanceId ?? "",
           remoteCode: code,
         };
@@ -671,6 +735,7 @@ export class KnowledgeBrowseController {
         return;
       }
       if (code === "VERSION_UNSUPPORTED") {
+        this.discardScope(this.binding?.instanceId ?? "", this.selectedVault);
         this.certified = null; // capability truth changed: re-certify on recovery
         this.snap = {
           ...EMPTY, phase: "unsupported", query: this.query,
@@ -682,7 +747,7 @@ export class KnowledgeBrowseController {
       }
     }
     this.snap = {
-      ...EMPTY, ...keepRows, phase: "error", query: this.query,
+      ...EMPTY, ...keepRows, phase: "error", refreshing: false, stale: Boolean(keepRows?.rows?.length), query: this.query,
       instanceId: this.binding?.instanceId ?? "",
       errorCode: String((message as any)?.message ?? message).slice(0, 60),
       // Rows from a kept refresh survive a generic failure (truthful error
@@ -712,8 +777,25 @@ export class KnowledgeBrowseController {
   }
 
   private async discoverAndListInner(query: string, epoch: number, keep?: KnowledgeBrowseSnapshot): Promise<void> {
+    if (!this.selectionReadable) return;
     const b = this.binding;
     if (!b || !b.paired || !b.instanceId) return;
+    const selectedVault = this.selectedVault;
+    const registry = this.scopedRegistry(b.instanceId, selectedVault);
+    const permissionKey = this.permissionKey(b.instanceId, selectedVault);
+    if (this.replica && this.blockedScopes.has(permissionKey)) {
+      // A saved replica is not permission proof after an observed revocation.
+      if (!b.connected) { this.fail(epoch, new ServicesError("GRANT_REQUIRED", 403)); return; }
+      try {
+        await registry.refreshAdopting(b.instanceId, selectedVault ? { vault: selectedVault } : undefined);
+        if (epoch !== this.epoch || !this.live()) return;
+        const page = await this.knowledge.vaults(b.instanceId, selectedVault || undefined);
+        if (epoch !== this.epoch || !this.live()) return;
+        const allowed = page.items.find(v => selectedVault ? v.vaultId === selectedVault : v.activeInDesktop);
+        if (!allowed?.readGranted || registry.operation("knowledge.registeredList").state !== "implemented") throw new ServicesError("GRANT_REQUIRED", 403);
+        this.blockedScopes.delete(permissionKey);
+      } catch (error) { this.fail(epoch, error); return; }
+    }
     if (this.replica) {
       try {
         if (await this.readReplica(query, epoch, keep?.replica && keep.query === query ? this.replicaPage : 1)) {
@@ -723,10 +805,10 @@ export class KnowledgeBrowseController {
           if (b.connected && epoch === this.epoch && this.replicaMoveKey !== moveKey) {
             this.replicaMoveKey = moveKey;
             const moveToken = ++this.replicaMoveToken, scopeVault = this.snap.vaultId;
-            void this.registry.refreshAdopting(b.instanceId).then(() => this.knowledge.vaults(b.instanceId)).then(page => {
+            void registry.refreshAdopting(b.instanceId, selectedVault ? {vault:selectedVault} : undefined).then(() => this.knowledge.vaults(b.instanceId, scopeVault)).then(page => {
               if (moveToken !== this.replicaMoveToken || this.replicaMoveKey !== moveKey || !this.live()
                 || this.binding?.instanceId !== b.instanceId || !this.binding.connected || this.snap.vaultId !== scopeVault) return;
-              const active = page.items.find(v => v.activeInDesktop);
+              const active = page.items.find(v => v.vaultId === scopeVault);
               this.moveVault = active ? {vaultId: active.vaultId, vaultName: active.displayName, writeGranted: active.writeGranted === true} : null;
               this.emit();
             }).catch(() => { if (moveToken === this.replicaMoveToken && this.replicaMoveKey === moveKey && this.live()) { this.moveVault = null; this.emit(); } });
@@ -740,12 +822,12 @@ export class KnowledgeBrowseController {
     // R4.1: a kept (same-owner) snapshot rides along so a refresh can show
     // truthful progress phases WITHOUT dropping the last-good rows.
     let keepRows: Partial<KnowledgeBrowseSnapshot> = keep && keep.instanceId === b.instanceId && keep.query === query
-      ? { rows: keep.rows, vaultId: keep.vaultId, vaultName: keep.vaultName, hasMore: keep.hasMore, nextAfterId: keep.nextAfterId }
+      ? { ...keep, refreshing: true, loadingMore: false }
       : {};
-    this.snap = { ...EMPTY, ...keepRows, query, phase: "waiting-catalog", instanceId: b.instanceId };
+    this.snap = { ...EMPTY, ...keepRows, query, phase: keep ? keep.phase : "waiting-catalog", instanceId: b.instanceId };
     this.emit();
     try {
-      const catalog = await this.registry.refreshAdopting(b.instanceId);
+      const catalog = await registry.refreshAdopting(b.instanceId, selectedVault ? {vault:selectedVault} : undefined);
       if (epoch !== this.epoch || !this.live()) return;
       // R1-REPAIR (3) + R2-REPAIR (3): canonical permission truth PER
       // OPERATION. `registry.operation(op).state` maps an operation MISSING
@@ -753,24 +835,25 @@ export class KnowledgeBrowseController {
       // operation that is absent never reaches the wire and never falls back
       // to a vault/list call.
       for (const op of ["knowledge.vaults", "knowledge.registeredList"] as const) {
-        const state = this.registry.operation(op).state;
+        const state = registry.operation(op).state;
         if (state !== "implemented") {
           this.certified = null;
           this.moveVault = null;
+          if (state === "notGranted" || state === "unsupported") { this.discardScope(b.instanceId, selectedVault); keepRows = {}; }
           this.snap = {
-            ...EMPTY, query, phase: phaseForOperation(state),
+            ...EMPTY, ...keepRows, refreshing: false, stale: Boolean(keepRows.rows?.length), query, phase: phaseForOperation(state),
             instanceId: b.instanceId, remoteCode: "",
           };
           this.emit();
           return;
         }
       }
-      this.snap = { ...EMPTY, ...keepRows, query, phase: "discovering-vault", instanceId: b.instanceId };
+      this.snap = { ...EMPTY, ...keepRows, query, phase: keep ? keep.phase : "discovering-vault", instanceId: b.instanceId };
       this.emit();
-      const vaultPage = await this.knowledge.vaults(b.instanceId);
+      const vaultPage = await this.knowledge.vaults(b.instanceId, selectedVault || undefined);
       if (epoch !== this.epoch || !this.live()) return;
       const vaults = vaultPage?.items ?? [];
-      const active = vaults.find((v) => v.activeInDesktop) ?? null;
+      const active = vaults.find((v) => selectedVault ? v.vaultId === selectedVault : v.activeInDesktop) ?? null;
       // The move authority's vault facts are recorded from the SAME
       // discovery that owns the rows (writeGranted is only ever the
       // canonical truth, never a default).
@@ -783,10 +866,12 @@ export class KnowledgeBrowseController {
         : null;
       if (!active) {
         this.certified = null;
-        // Truthful: nothing is active. No rows, no fake tree. (A kept refresh
-        // also lands here with its rows REMOVED — the vault is gone.)
+        // An explicitly selected target missing from discovery is unavailable,
+        // not a successful empty library. Otherwise the selected-vault view
+        // fence turns this resolved, vault-less ready state into endless waiting.
+        // Legacy discovery with no explicit choice still permits an empty result.
         this.snap = {
-          ...EMPTY, query, phase: "ready", instanceId: b.instanceId,
+          ...EMPTY, query, phase: selectedVault ? "temporarily-unavailable" : "ready", instanceId: b.instanceId,
           remoteCode: "",
         };
         this.emit();
@@ -797,6 +882,7 @@ export class KnowledgeBrowseController {
       // show the real permission state instead.
       if (!active.readGranted) {
         this.certified = null;
+        this.discardScope(b.instanceId, active.vaultId);
         this.snap = {
           ...EMPTY, query, phase: "not-granted",
           instanceId: b.instanceId, vaultId: active.vaultId,
@@ -811,28 +897,36 @@ export class KnowledgeBrowseController {
         // never bring the previous vault back under this new authority.
         this.certified = null;
         keepRows = { rows: [], vaultId: active.vaultId, vaultName: active.displayName || "LuckyRay 知识库" };
+        keep = undefined; this.loadedPages = 1;
       }
       this.snap = {
-        ...EMPTY, query, phase: "loading", instanceId: b.instanceId,
+        ...EMPTY, query, phase: keep ? keep.phase : "loading", refreshing: Boolean(keep), instanceId: b.instanceId,
         vaultId: active.vaultId, vaultName: active.displayName || "LuckyRay 知识库",
         // Rows from a kept refresh stay painted through the loading phase.
         rows: keepRows.rows ?? [], hasMore: keepRows.hasMore ?? false,
         nextAfterId: keepRows.nextAfterId ?? null,
       };
       this.emit();
-      const page = await this.knowledge.registeredList(b.instanceId, active.vaultId, {
-        q: query || undefined, limit: this.pageSize,
-      });
-      if (epoch !== this.epoch || !this.live()) return;
-      this.afterId = page.nextAfterId ?? null;
-      this.loadingMore = false;
+      // Refresh the already-visible extent atomically, not just page one.
+      // Otherwise a return from a scrolled page would shrink the list and jump.
+      const rows: KnowledgeBrowseRow[] = [];
+      let nextAfterId: string | null = null, hasMore = false, pages = 0;
+      const extent = keep ? this.loadedPages : 1;
+      for (; pages < extent;) {
+        const page = await this.knowledge.registeredList(b.instanceId, active.vaultId, {
+          q: query || undefined, limit: this.pageSize, afterId: nextAfterId ?? undefined,
+        });
+        if (epoch !== this.epoch || !this.live()) return;
+        rows.push(...pageItems(b.instanceId, active.vaultId, active.displayName || "LuckyRay 知识库", page.items ?? []));
+        pages += 1; nextAfterId = page.nextAfterId ?? null; hasMore = Boolean(page.hasMore);
+        if (!hasMore || !nextAfterId) break;
+      }
+      this.loadedPages = pages; this.afterId = nextAfterId; this.loadingMore = false;
       this.snap = {
-        ...this.snap, phase: "ready",
-        rows: pageItems(b.instanceId, active.vaultId, active.displayName || "LuckyRay 知识库", page.items ?? []),
-        nextAfterId: page.nextAfterId ?? null,
-        hasMore: Boolean(page.hasMore),
-        loadingMore: false, errorCode: "",
+        ...this.snap, phase: "ready", refreshing: false, stale: false,
+        rows, nextAfterId, hasMore, loadingMore: false, errorCode: "", remoteCode: "",
       };
+      this.blockedScopes.delete(permissionKey);
       // R1.5-C: this owner+vault is now a CERTIFIED browse authority —
       // subsequent ordinary query changes take the single-list fast path.
       this.certified = {
@@ -855,6 +949,7 @@ function pageItems(
   instanceId: string, vaultId: string, vaultName: string,
   items: Array<{ vaultId?: string; noteId: string; title?: string; parentRelativePath?: string; revision?: string }>,
 ): KnowledgeBrowseRow[] {
+  if (items.some(n => n.vaultId && n.vaultId !== vaultId)) throw new Error("CONTENT_SOURCE_CHANGED");
   return items.map((n) => ({
     instanceId,
     vaultId: n.vaultId || vaultId,

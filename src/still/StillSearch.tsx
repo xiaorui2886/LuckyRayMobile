@@ -1,3 +1,6 @@
+import { managedVault, managedNoteRoute, type ManagedNote } from "../services/managedVault";
+import { noteSearchEvidence } from "./kit/noteSearch";
+import { useDesktopLibraries } from "./kit/DesktopLibraryPicker";
 // STILL-01.1 — 搜索 page: 本机 + 电脑 real content.
 //
 // SERVICES-SEARCH-R1: the Desktop search half now runs through the canonical
@@ -11,7 +14,7 @@ import { useUnifiedSearch } from "../services/unifiedSearch";
 import { searchResultKey } from "../services/searchContract";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../services/client";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useMemo, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { desktopAssetRoute } from "./kit/materialOrganization";
 import {
   deriveSearchPagePresentation,
@@ -33,6 +36,34 @@ export function StillSearch() {
   const { conn, open, back } = useStillNav();
   const { state, setQuery, loadMore } = useUnifiedSearch();
   const q = state.query.trim();
+  const [managedSearch, setManagedSearch] = useState<{ query: string; vault: string; items: ManagedNote[]; page: number; hasMore: boolean; loading: boolean; error: boolean }>({ query: "", vault: "", items: [], page: 0, hasMore: false, loading: false, error: false });
+  const managedGeneration = useRef(0);
+  const [managedVersion, setManagedVersion] = useState(0);
+  useEffect(() => { const changed = () => setManagedVersion(value => value + 1); window.addEventListener("luckyray:managed-vault-change", changed); return () => window.removeEventListener("luckyray:managed-vault-change", changed); }, []);
+  useEffect(() => {
+    const generation = ++managedGeneration.current;
+    setManagedSearch({ query: q, vault: "", items: [], page: 0, hasMore: false, loading: Boolean(q), error: false });
+    if (!q) return;
+    void (async () => {
+      try {
+        const vaults = await managedVault.list();
+        const selected = vaults.items.find(vault => vault.localVaultId === vaults.selectedVaultId && vault.migrationState === "ready");
+        const result = selected ? await managedVault.notes({ localVaultId: selected.localVaultId, q, page: 1, limit: 50 }) : { items: [], hasMore: false };
+        if (managedGeneration.current === generation) setManagedSearch({ query: q, vault: selected?.localVaultId || "", items: result.items, page: 1, hasMore: result.hasMore, loading: false, error: false });
+      } catch { if (managedGeneration.current === generation) setManagedSearch(previous => ({ ...previous, loading: false, error: true })); }
+    })();
+    return () => { ++managedGeneration.current; };
+  }, [q, managedVersion]);
+  async function moreManaged() {
+    if (managedSearch.loading || !managedSearch.vault || managedSearch.query !== q) return;
+    const generation = managedGeneration.current;
+    setManagedSearch(previous => ({ ...previous, loading: true }));
+    try {
+      const result = await managedVault.notes({ localVaultId: managedSearch.vault, q, page: managedSearch.page + 1, limit: 50 });
+      if (managedGeneration.current === generation) setManagedSearch(previous => ({ ...previous, items: [...previous.items, ...result.items], page: previous.page + 1, hasMore: result.hasMore, loading: false, error: false }));
+    } catch { if (managedGeneration.current === generation) setManagedSearch(previous => ({ ...previous, loading: false, error: true })); }
+  }
+  const managedItems = managedSearch.query === q ? managedSearch.items : [];
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const mountedRef = useRef(true);
 
@@ -41,17 +72,12 @@ export function StillSearch() {
 
   // One production composition for the page's lifetime; the controller owns
   // all canonical Desktop search truth (discovery/permission/session).
-  const servicesRef = useRef<ReturnType<typeof createProductionServices> | null>(null);
-  if (!servicesRef.current) servicesRef.current = createProductionServices();
-  const services = servicesRef.current;
-  const ctrlRef = useRef<SearchServicesController | null>(null);
-  if (!ctrlRef.current) {
-    ctrlRef.current = new SearchServicesController({
-      registry: services.registry,
-      session: new SearchSession(createTauriServicesTransport()),
-    });
-  }
-  const controller = ctrlRef.current;
+  const libraries = useDesktopLibraries(instanceId,conn?.ws?.state === "connected");
+  const library = libraries.catalog?.scopeSelectionVersion === 1 ? libraries.material : undefined;
+  const vault = libraries.catalog?.scopeSelectionVersion === 1 ? libraries.vault : undefined;
+  const services = useMemo(() => createProductionServices({library,vault}), [library,vault]);
+  const controller = useMemo(() => new SearchServicesController({registry:services.registry,
+    session:new SearchSession(createTauriServicesTransport(undefined,{library,vault}))}), [services,library,vault]);
   const remote = useSyncExternalStore<RemoteSearchSnapshot>(
     (fn) => controller.subscribe(fn),
     () => controller.snapshot()
@@ -109,7 +135,7 @@ export function StillSearch() {
     const timer = setInterval(() => { void tick(); }, 15000);
     return () => { alive = false; clearInterval(timer); };
   }, [services, controller, paired, instanceId]);
-  useEffect(() => () => { mountedRef.current = false; controller.retire(); }, [controller]);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; controller.retire(); }; }, [controller]);
 
   useEffect(() => {
     let alive = true;
@@ -122,10 +148,23 @@ export function StillSearch() {
     return () => { alive = false; };
   }, [state.items, thumbs]);
 
-  const localNotes = state.items.filter((r) => r.resultType === "note");
+  const [searchAliases, setSearchAliases] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let alive = true;
+    const routes = [...state.items.filter(row => row.resultType === "note").map(row => row.id), ...remote.hits.flatMap(hit => hit.domain === "knowledge" ? [`desktop:${encodeURIComponent(remote.instanceId)}:${encodeURIComponent(hit.vaultId)}:${encodeURIComponent(hit.noteId)}`] : [])];
+    void Promise.all(routes.map(async route => {
+      try { const target = await managedVault.resolveLegacy(route); return [route, target ? managedNoteRoute(target.localVaultId, target.noteId) : ""] as const; }
+      catch { return [route, ""] as const; } // Keep unverified legacy results visible; opening still fails closed.
+    })).then(aliases => { if (alive) setSearchAliases(Object.fromEntries(aliases)); });
+    return () => { alive = false; };
+  }, [state.items, remote.hits, remote.instanceId, managedVersion]);
+  // A migrated alias no longer owns search truth, even when its stale SQLite
+  // text matches a query that the authoritative file no longer matches.
+  const localNotes = state.items.filter((r) => r.resultType === "note" && !searchAliases[r.id]);
+  const visibleRemote = { ...remote, hits: remote.hits.filter(hit => hit.domain !== "knowledge" || !searchAliases[`desktop:${encodeURIComponent(remote.instanceId)}:${encodeURIComponent(hit.vaultId)}:${encodeURIComponent(hit.noteId)}`]) };
   const localAssets = state.items.filter((r) => r.resultType === "asset");
   const localEntries = state.items.filter((r) => r.resultType !== "note" && r.resultType !== "asset");
-  const localCount = localNotes.length + localAssets.length + localEntries.length;
+  const localCount = managedItems.length + localNotes.length + localAssets.length + localEntries.length;
 
   // Combined presentation: local + canonical remote must BOTH be settled
   // before the page may claim emptiness.
@@ -145,7 +184,7 @@ export function StillSearch() {
   function openHit(hit: SearchHit): void {
     const instance = remote.instanceId;
     if (hit.domain === "materials") {
-      open("asset", desktopAssetRoute(instance, hit.assetId));
+      open("asset", desktopAssetRoute(instance, hit.assetId, library));
       return;
     }
     open("note", `desktop:${encodeURIComponent(instance)}:${encodeURIComponent(hit.vaultId)}:${encodeURIComponent(hit.noteId)}`);
@@ -162,9 +201,13 @@ export function StillSearch() {
           <Empty title="搜索中…" />
         ) : (
           <>
+            {managedItems.length ? <><SectionTitle>笔记</SectionTitle>{managedItems.map(note => <Row key={managedNoteRoute(note.localVaultId, note.noteId)} title={note.title || "未命名笔记"} meta={note.relativePath} onClick={() => open("note", managedNoteRoute(note.localVaultId, note.noteId), { noteSearch: noteSearchEvidence(q, note.content) })} />)}</> : null}
+            {managedSearch.loading ? <p role="status">正在查找本地文件…</p> : null}
+            {managedSearch.error ? <Button kind="quiet" onClick={() => setManagedVersion(value => value + 1)}>重试本地文件搜索</Button> : null}
+            {managedSearch.hasMore ? <Button kind="quiet" disabled={managedSearch.loading} onClick={() => void moreManaged()}>更多笔记</Button> : null}
             {localNotes.length ? (
               <>
-                <SectionTitle>本机笔记</SectionTitle>
+                <SectionTitle>原有笔记</SectionTitle>
                 {localNotes.map((res) => (
                   <Row key={searchResultKey(res)} title={res.title || "未命名笔记"} meta={res.snippet || "本机笔记"}
                     onClick={() => open("note", res.id)} />
@@ -190,12 +233,12 @@ export function StillSearch() {
               </>
             ) : null}
             <DesktopResultsSection
-              remote={remote}
+              remote={visibleRemote}
               localCount={localCount}
               onOpenHit={openHit}
               onLoadMore={() => controller.loadMore()}
             />
-            {presentation.empty ? <Empty title="没有找到相关内容" body={emptyBody} /> : null}
+            {presentation.empty && !managedSearch.loading && !managedSearch.error ? <Empty title="没有找到相关内容" body={emptyBody} /> : null}
             {state.hasMore ? (
               <div style={{ marginTop: 14 }}>
                 <Button kind="quiet" disabled={state.loading} onClick={() => loadMore()}>
@@ -210,3 +253,4 @@ export function StillSearch() {
   );
 
 }
+

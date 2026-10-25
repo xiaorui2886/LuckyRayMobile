@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "source": "Complete LuckyRay original artwork, including its authored blue-purple bevel",
+  "sourceRevision": "8479bbf20cf01d608b2415e746d74fe12b4081e7",
+  "sourceDirectory": "luckyray-app/src-tauri/icons",
+  "regeneration": "python scripts/generate-android-icons.py with Pillow==12.3.0; builds verify and copy outputs",
+  "androidGeometry": {
+    "revision": 8,
+    "kind": "complete-artwork-bitmap",
+    "background": "source-transparency",
+    "source": "luckyray-original.png",
+    "derivedSource": "luckyray-android.png",
+    "sourceCanvas": [
+      1254,
+      1254
+    ],
+    "legacySizes": {
+      "mdpi": 48,
+      "hdpi": 72,
+      "xhdpi": 96,
+      "xxhdpi": 144,
+      "xxxhdpi": 192
+    },
+    "resourceMinApi": 21,
+    "contentBounds": [
+      177,
+      128,
+      1098,
+      1054
+    ],
+    "artworkSize": [
+      926,
+      926
+    ],
+    "transparentPad": [
+      2,
+      0
+    ],
+    "artworkResampled": false,
+    "completePerimeter": true,
+    "adaptiveWrapper": false,
+    "perimeterControlPoints": [
+      [
+        181,
+        513
+      ],
+      [
+        185,
+        513
+      ],
+      [
+        203,
+        513
+      ],
+      [
+        650,
+        138
+      ],
+      [
+        1067,
+        600
+      ],
+      [
+        650,
+        1047
+      ]
+    ],
+    "defringe": {
+      "method": "nearest-opaque-edge-rgb",
+      "radiusPx": 8,
+      "opaqueAlphaMin": 250,
+      "alphaUnchanged": true
+    }
+  },
+  "files": [
+    {
+      "path": "android/drawable-nodpi/ic_launcher_artwork.png",
+      "bytes": 757251,
+      "sha256": "0d5dbbf909a7acfb3767a90ff8eaa6e783ffac77127c87bf7e670157ac4529c3"
+    },
+    {
+      "path": "android/mipmap-anydpi-v21/ic_launcher.xml",
+      "bytes": 223,
+      "sha256": "9ca77dd82e0bf2b4a3b7340b973af967dff8d998cf01f50dfc95cdd74889ca93"
+    },
+    {
+      "path": "android/mipmap-hdpi/ic_launcher.png",
+      "bytes": 5873,
+      "sha256": "41d598a90e24384c380cd12f720cb2816c1c5c02f9548cccc4a199df40079ef6"
+    },
+    {
+      "path": "android/mipmap-hdpi/ic_launcher_round.png",
+      "bytes": 5873,
+      "sha256": "41d598a90e24384c380cd12f720cb2816c1c5c02f9548cccc4a199df40079ef6"
+    },
+    {
+      "path": "android/mipmap-mdpi/ic_launcher.png",
+      "bytes": 3300,
+      "sha256": "2c912b3a92d2539768ec535ddd7c100bae2953eecf1cfcd61e2f38d2ebf94897"
+    },
+    {
+      "path": "android/mipmap-mdpi/ic_launcher_round.png",
+      "bytes": 3300,
+      "sha256": "2c912b3a92d2539768ec535ddd7c100bae2953eecf1cfcd61e2f38d2ebf94897"
+    },
+    {
+      "path": "android/mipmap-xhdpi/ic_launcher.png",
+      "bytes": 9002,
+      "sha256": "983a6a06e4d1fb6b93935c70499ca7e62fe996af13ae5d5b88c8b764e4158d4a"
+    },
+    {
+      "path": "android/mipmap-xhdpi/ic_launcher_round.png",
+      "bytes": 9002,
+      "sha256": "983a6a06e4d1fb6b93935c70499ca7e62fe996af13ae5d5b88c8b764e4158d4a"
+    },
+    {
+      "path": "android/mipmap-xxhdpi/ic_launcher.png",
+      "bytes": 16580,
+      "sha256": "6180de2116dffcc50665576ae36791c5eb28ce1ae301b71e5e6e3b1a893e4d21"
+    },
+    {
+      "path": "android/mipmap-xxhdpi/ic_launcher_round.png",
+      "bytes": 16580,
+      "sha256": "6180de2116dffcc50665576ae36791c5eb28ce1ae301b71e5e6e3b1a893e4d21"
+    },
+    {
+      "path": "android/mipmap-xxxhdpi/ic_launcher.png",
+      "bytes": 26002,
+      "sha256": "7c15b045a50a150743b1484bb81d09cec8aafbcd1844295a4cf94a0f902a5ac6"
+    },
+    {
+      "path": "android/mipmap-xxxhdpi/ic_launcher_round.png",
+      "bytes": 26002,
+      "sha256": "7c15b045a50a150743b1484bb81d09cec8aafbcd1844295a4cf94a0f902a5ac6"
+    },
+    {
+      "path": "icon.png",
+      "bytes": 154869,
+      "sha256": "fed987e1689e8bdb15eaad881e18e0f5d38bda3bc83fc17c2a10a4b977fd0a0c"
+    },
+    {
+      "path": "luckyray-android.png",
+      "bytes": 835163,
+      "sha256": "1b7c606c3ffaffd29f5bf6bb6f45f955fd7e08040cead348fcc7dd32cc12cbd3"
+    },
+    {
+      "path": "luckyray-original.png",
+      "bytes": 904941,
+      "sha256": "74924112feeb2451c738b8a21fb252d501c0e4b94ab4d75b16846cb0f5e666ae"
+    }
+  ]
+}

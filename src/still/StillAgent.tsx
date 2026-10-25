@@ -10,8 +10,10 @@ import { failureCopy } from "../services/feedback";
 import { toast } from "../services/toast";
 import { relativeDay } from "./stillData";
 import { AgentCapabilityController, type AgentSnapshot } from "./kit/agentCapability";
-import { LshSurfaceController, lshErrorCopy } from "./kit/lshSurface";
+import { LshSurfaceController, lshErrorCopy, lshDiagnosticCode } from "./kit/lshSurface";
 import { PageDataFence } from "./kit/pageDataFence";
+import { lshDeadline } from './kit/lshEmbedded';
+import { EmbeddedLshView, retireEmbeddedLsh, hideEmbeddedLsh, prepareEmbeddedLshRevalidation, confirmEmbeddedLshRevalidation } from "./kit/EmbeddedLshView";
 import { useStillNav } from "./StillShell";
 
 
@@ -40,7 +42,8 @@ function useAgentCapability(conn: ConnState | null): { snap: AgentSnapshot; retr
     (fn) => controller.subscribe(fn),
     () => controller.snapshot()
   );
-  return { snap, retry: () => controller.retry() };
+  const retry = useCallback(() => controller.retry(), [controller]);
+  return { snap, retry };
 }
 
 function stillStatus(status: string): RunItem["status"] {
@@ -60,7 +63,7 @@ function stateCopy(status: string): string {
   }
 }
 
-export function StillAgent({ conn }: { conn: ConnState | null }) {
+export function StillAgent({ conn, active = true }: { conn: ConnState | null; active?: boolean }) {
   const { open } = useStillNav();
   const [runs, setRuns] = useState<RunItem[]>([]);
   const { snap, retry } = useAgentCapability(conn);
@@ -84,17 +87,81 @@ export function StillAgent({ conn }: { conn: ConnState | null }) {
   }, [lsh, snap.instanceId, snap.canUseLsh]);
   // Phase-4: once capability is advertised, ask the Desktop for the real
   // per-device grant/runtime truth — capability alone never means 可以使用.
+  const [retainedOwner, setRetainedOwner] = useState("");
+  const [permissionRejected, setPermissionRejected] = useState(false);
+  const [continuityExpired, setContinuityExpired] = useState(false);
+  const rememberReady = useCallback((owner: string) => setRetainedOwner(owner), []);
+  const [permissionRefresh, setPermissionRefresh] = useState(0);
+  const permissionEpoch = useRef(0);
+  const revalidateNative = useCallback(() => {
+    setPermissionLoading(true);
+    setPermissionRefresh(n => n + 1);
+  }, []);
+  const [foreground, setForeground] = useState(() => document.visibilityState !== "hidden");
+  // Revalidate before showing retained native content; unknown is not revoked.
   useEffect(() => {
-    if (!snap.canUseLsh || !snap.instanceId) return;
-    let alive = true;
-    api
-      .lshSurfaceState(snap.instanceId)
-      .then((r) => {
-        if (alive) lsh.setPermissionTruth(r?.granted === true, r?.runtimeAvailable === true);
-      })
-      .catch(() => { if (alive) lsh.setPermissionTruth(false, false); });
-    return () => { alive = false; };
-  }, [lsh, snap.instanceId, snap.canUseLsh]);
+    const visibility = () => {
+      ++permissionEpoch.current;
+      const visible = document.visibilityState !== "hidden";
+      setForeground(visible);
+      if (!visible) void hideEmbeddedLsh();
+      setPermissionLoading(true);
+      if (visible) setPermissionRefresh(n => n + 1);
+    };
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("luckyray:foreground", visibility);
+    return () => { document.removeEventListener("visibilitychange", visibility); window.removeEventListener("luckyray:foreground", visibility); };
+  }, []);
+  const [permissionError, setPermissionError] = useState("");
+  const [permissionLoading, setPermissionLoading] = useState(true);
+  const [visitActive, setVisitActive] = useState(active);
+  // Invalidate before child effects commit: a return must not briefly issue
+  // layout with the previous visit's permission while the new probe starts.
+  if (visitActive !== active) {
+    setVisitActive(active);
+    if (active) setPermissionLoading(true);
+  }
+  useEffect(() => {
+    if (!active || !foreground || !snap.canUseLsh || !snap.instanceId) return;
+    const epoch = ++permissionEpoch.current;
+    let alive = true, pending = false, initialProbe = true;
+    setPermissionLoading(true);
+    setPermissionError("");
+    const probe = async () => {
+      if (pending || document.visibilityState === "hidden") return;
+      pending = true;
+      try {
+        const generation = initialProbe ? await prepareEmbeddedLshRevalidation(snap.instanceId) : null;
+        initialProbe = false;
+        if (!alive || epoch !== permissionEpoch.current) return;
+        const r = await lshDeadline(api.lshSurfaceState(snap.instanceId), 20000, 'LSH_STATE_TIMEOUT');
+        if (!alive || epoch !== permissionEpoch.current) return;
+        if (r?.granted === true && r?.runtimeAvailable === true) confirmEmbeddedLshRevalidation(snap.instanceId, generation);
+        setPermissionError("");
+        setPermissionLoading(false);
+        setPermissionRejected(r?.granted !== true || r?.runtimeAvailable !== true);
+        lsh.setPermissionTruth(r?.granted === true, r?.runtimeAvailable === true);
+        if (r?.granted !== true || r?.runtimeAvailable !== true) void retireEmbeddedLsh();
+      } catch (e) {
+        if (alive && epoch === permissionEpoch.current) {
+          setPermissionError(lshErrorCopy(e)); setPermissionLoading(false);
+          const code = lshDiagnosticCode(e);
+          if (['LSH_NOT_GRANTED', 'CONTENT_SOURCE_CHANGED', 'LSH_SOURCE_CHANGED', 'CONTENT_DISCONNECTED'].includes(code)) void retireEmbeddedLsh();
+          else void hideEmbeddedLsh();
+        }
+      } finally { pending = false; }
+    };
+    void probe();
+    const timer = window.setInterval(() => void probe(), 10000);
+    return () => { alive = false; ++permissionEpoch.current; clearInterval(timer); };
+  }, [lsh, active, foreground, snap.instanceId, snap.canUseLsh, permissionRefresh]);
+  const capabilityRetries = useRef(0);
+  useEffect(() => { capabilityRetries.current = 0; }, [active, foreground, snap.instanceId]);
+  useEffect(() => {
+    if (!active || !foreground || snap.state !== 'probe-error' || capabilityRetries.current >= 3) return;
+    const timer = window.setTimeout(() => { capabilityRetries.current += 1; retry(); }, [1000, 3000, 10000][capabilityRetries.current]);
+    return () => clearTimeout(timer);
+  }, [active, foreground, snap.state, retry]);
   const lshSnap = useSyncExternalStore(
     (fn) => lsh.subscribe(fn),
     () => lsh.snapshot()
@@ -165,34 +232,71 @@ export function StillAgent({ conn }: { conn: ConnState | null }) {
   //   D capability, grant OFF   → LightSeek panel, waiting-for-grant
   //   E grant ON, runtime down  → LightSeek panel, starting/unavailable
   //   F grant ON + runtime up   → LightSeek panel IS the page, primary entry
-  const lshReady = snap.canUseLsh && lshSnap.granted && lshSnap.runtimeAvailable;
+  const lshReady = !permissionLoading && !permissionError && foreground && conn?.paired === true && conn.ws.state === "connected" && conn.identity?.instanceId === snap.instanceId && snap.canUseLsh && lshSnap.identity === snap.instanceId && lshSnap.granted && lshSnap.runtimeAvailable;
+  // Retain the SAME host only after native readiness, and only through unknown
+  // revalidation. Explicit failure never borrows the previous positive grant.
+  const terminalConnection = !conn?.paired || !['connected', 'connecting', 'reconnecting'].includes(conn.ws.state);
+  const capabilityRejected = snap.connected && (snap.state === 'unavailable' || snap.state === 'ready') && !snap.canUseLsh;
+  const sameRetainedOwner = !!retainedOwner && retainedOwner === conn?.identity?.instanceId;
+  const continuityAllowed = sameRetainedOwner && !terminalConnection && !capabilityRejected && !permissionRejected && !permissionError && !continuityExpired;
+  const revalidating = !lshReady;
+  useEffect(() => {
+    if (!active || !foreground || !continuityAllowed || !revalidating) return;
+    // Fixed wall-clock budget for this uninterrupted recovery, not renewed by
+    // duplicate native/focus events or successful capability-only probes.
+    const timer = window.setTimeout(() => setContinuityExpired(true), 20000);
+    return () => clearTimeout(timer);
+  }, [active, foreground, continuityAllowed, revalidating]);
+  useEffect(() => {
+    if (lshReady) setContinuityExpired(false);
+    if (!sameRetainedOwner || terminalConnection || capabilityRejected || permissionRejected || permissionError || continuityExpired) setRetainedOwner('');
+  }, [lshReady, sameRetainedOwner, terminalConnection, capabilityRejected, permissionRejected, permissionError, continuityExpired]);
+  useEffect(() => {
+    // Use the real connection snapshot, not the capability controller's first
+    // render (initially unpaired). Transient WSS recovery is not grant revocation.
+    if (!conn) return;
+    if (!conn.paired || conn.ws.state === "stopped" || conn.ws.state === "re_pair_required" ||
+        (snap.connected && (snap.state === "unavailable" || snap.state === "ready") && !snap.canUseLsh)) void retireEmbeddedLsh();
+    else if (conn.ws.state !== "connected" && !continuityAllowed) void hideEmbeddedLsh();
+  }, [conn, snap.state, snap.canUseLsh, snap.connected, continuityAllowed]);
+  const embeddedIdentity = useRef(conn?.identity?.instanceId || "");
+  useEffect(() => {
+    const next = conn?.identity?.instanceId || "";
+    if (embeddedIdentity.current && embeddedIdentity.current !== next) void retireEmbeddedLsh();
+    embeddedIdentity.current = next;
+  }, [conn?.identity?.instanceId]);
 
   // ONE structured LightSeek section for EVERY canUseLsh state, independent of
   // Runs availability (REPAIR-R1 P1-AI1). The old gating
   // (`canUseLsh && !canUseRuns`) fell back to the orphaned inline button block
   // whenever a Desktop advertised BOTH capabilities, reintroducing the exact
   // defect this task removed.
-  const lshLine = !lshSnap.granted
+  const lshLine = permissionLoading ? "正在连接电脑上的 LightSeek…"
+    : permissionError || (!lshSnap.granted
     ? "这台电脑还没有授权本手机使用 LightSeek 远程面。请在电脑的「LSH 远程」设置里为这台手机开启权限。"
     : !lshSnap.runtimeAvailable
       ? "电脑端 LightSeek 正在启动或暂时不可用，稍后可再试。"
-      : "电脑上正在运行的 LightSeek 会话，在手机上直接查看与操作（同一会话）。";
+      : "电脑上正在运行的 LightSeek 会话，在手机上直接查看与操作（同一会话）。");
   const lshSection = (
     <div className="st-lsh-panel">
       <span className="st-lsh-mark" aria-hidden="true"><Icon name="ai" size={30} /></span>
       <h2>LightSeek</h2>
       <p>{lshLine}</p>
-      {lshReady ? (
+      {permissionLoading ? null : lshReady ? (
         <Button disabled={lshSnap.busy || lshLaunching} onClick={() => void enterLsh()}>
           {lshSnap.busy || lshLaunching ? "正在进入…" : "进入 LightSeek"}
         </Button>
       ) : !lshSnap.granted ? (
-        <Button kind="quiet" disabled onClick={() => {}}>等待电脑授权</Button>
+        <Button kind="quiet" onClick={() => setPermissionRefresh(n => n + 1)}>重新检查授权</Button>
       ) : (
-        <Button kind="quiet" disabled onClick={() => {}}>暂时不可用</Button>
+        <Button kind="quiet" onClick={() => setPermissionRefresh(n => n + 1)}>重新连接</Button>
       )}
     </div>
   );
+
+  // The LSH tab itself is the conversation surface; no intermediate launch
+  // button or separate Android Activity. All chat authority remains in DSH.
+  if (lshReady || continuityAllowed) return <div className="st-view"><EmbeddedLshView owner={lshReady ? snap.instanceId : retainedOwner} active={active && foreground} suspended={!lshReady} onReady={rememberReady} onRevalidationRequired={revalidateNative} /></div>;
 
   // Runs-unsupported: LightSeek leads and Runs is a footnote.
   if (snap.canUseLsh && !snap.canUseRuns) {
@@ -229,8 +333,20 @@ export function StillAgent({ conn }: { conn: ConnState | null }) {
     );
   }
 
+  if (snap.state === "ready") return (
+      <AgentView
+        paired={paired}
+        connected={connected}
+        runs={runs}
+        onOpen={(id) => open("run", id)}
+        onConnect={() => open("connect")}
+        onRefresh={() => { void load(); if (!connected) toast.info("电脑未连接，暂时读不到新任务"); }}
+      />
+  );
+
   return (
-    <>
+    <div className="st-view">
+      <div className="st-scroll st-lsh-home st-agent-state">
       {snap.state === "unavailable" ? (
         <Empty icon="ai" title="当前桌面版本尚未开放手机任务控制"
           body="这台电脑的 LuckyRay 版本还没有开放手机端任务查看与控制；后续版本将通过 Desktop Agent Gateway 提供。本机内容不受影响。">
@@ -242,23 +358,19 @@ export function StillAgent({ conn }: { conn: ConnState | null }) {
           <Button kind="quiet" onClick={retry}>重试</Button>
         </Empty>
       ) : snap.state === "offline" ? (
-        <Empty icon="monitor" title="电脑暂时不在线"
-          body="重新连接后再查看任务；当前不会显示为“没有任务”。">
+        <Empty icon="monitor" title={conn?.ws.state === "reconnecting" || conn?.ws.state === "connecting" ? "正在恢复电脑连接…" : "电脑暂时不在线"}
+          body="连接恢复后会自动返回；本机内容仍可正常使用。">
           <Button kind="quiet" onClick={() => open("connect")}>查看连接</Button>
         </Empty>
       ) : snap.state === "probing" ? (
         <Empty icon="ai" title="正在确认电脑能力…" />
       ) : (
-      <AgentView
-        paired={paired}
-        connected={connected}
-        runs={runs}
-        onOpen={(id) => open("run", id)}
-        onConnect={() => open("connect")}
-        onRefresh={() => { void load(); if (!connected) toast.info("电脑未连接，暂时读不到新任务"); }}
-      />
+        <Empty icon="ai" title="电脑在做什么，这里就能看到" body="配对后查看 Agent 任务与执行过程。任务从电脑端发起。">
+          <Button kind="quiet" onClick={() => open("connect")}>连接电脑</Button>
+        </Empty>
       )}
-    </>
+      </div>
+    </div>
   );
 }
 

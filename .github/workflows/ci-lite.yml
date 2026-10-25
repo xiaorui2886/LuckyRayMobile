@@ -44,6 +44,39 @@ jobs:
       - name: Navigation, sync, local protocol, autosave, filter, library, invalidation, provenance, and IME-authority tests
         run: >-
           node --experimental-strip-types --test
+          tests/managedWikiProof.test.ts
+          tests/managedBoundWiki.test.ts
+          tests/managedImportIntents.test.ts
+          tests/managedNoteResources.test.ts
+          tests/managedSyncSchedule.test.ts
+          tests/managedVaultMutations.test.ts
+          tests/managedWikiIdentity.test.ts
+          tests/scopedKnowledgeSnapshots.test.ts
+          tests/scopedServiceLifecycle.test.ts
+          tests/desktopPageScopedSnapshots.test.ts
+          tests/desktopLibrarySelection.test.ts
+          tests/materialApiScope.test.ts
+          tests/knowledgeSelectedVault.test.ts
+          tests/knowledgeSelectedFailure.test.ts
+          tests/knowledgeDiagnostics.test.ts
+          tests/directoryMetadataPolicy.test.ts
+          tests/localBacklinks.test.ts
+          tests/mobileAssetViewerOvernight.test.ts
+          tests/mobileTableStyles.contract.test.mjs
+          tests/tableMarkdownModel.test.ts
+          tests/mobileLivePreviewModel.test.ts
+          tests/localNoteUploadFailure.test.ts
+          tests/noteTypography.contract.test.mjs
+          tests/highlightSyntax.test.ts
+          tests/mobileMarkdownCommands.test.ts
+          tests/sharedNoteMarkdown.test.ts
+          tests/wikiChoiceRows.test.ts
+          tests/cmMobileMarkdownInsertion.test.ts
+          tests/localWikiHistoryPaths.test.ts
+          tests/mobileMarkdownInsertions.test.ts
+          tests/noteHeadingNavigation.test.ts
+          tests/noteHeadings.test.ts
+          tests/noteOutline.test.ts
           tests/navigation.test.ts
           tests/stillScene.test.ts
           tests/contentSyncDiagnostic.test.ts
@@ -53,6 +86,7 @@ jobs:
           tests/knowledgeLiveSyncConsumer.test.ts
           tests/knowledgeColdCacheBootstrap.contract.test.ts
           tests/protocolConformance.test.ts
+          tests/localNoteNativeIO.contract.test.ts
           tests/localNoteAutosave.test.ts
           tests/knowledgeFilter.test.ts
           tests/libraryFilter.test.ts
@@ -80,6 +114,7 @@ jobs:
           tests/capabilityAcl.test.ts
           tests/androidPatchContract.test.ts
           tests/androidBuildGeneration.test.ts
+          tests/androidIconsR8.test.ts
           tests/connectionShell.test.ts
           tests/noteProvenance.test.ts
           tests/desktopNoteReader.test.ts
@@ -93,6 +128,8 @@ jobs:
           tests/uiPolishContract.test.ts
           tests/interactionClosureContract.test.ts
           tests/stillParityContract.test.ts
+          tests/mobileDesktopTheme.test.ts
+          tests/systemBarSeam.test.ts
           tests/cm6EditorAdapter.test.ts
           tests/stillUserQaFixContract.test.ts
           tests/a0StateStabilization.test.ts
@@ -100,6 +137,8 @@ jobs:
           tests/localKnowledgeUsability.test.ts
           tests/localLibraryUsability.test.ts
           tests/lshSurface.test.ts
+          tests/lshResumeCornerAndBack.test.ts
+          tests/noteCaretOcclusion.test.mjs
           tests/lshAndroidShell.test.ts
           tests/filterDraft.test.ts
           tests/companionServicesV1.contract.test.ts
@@ -145,6 +184,9 @@ jobs:
           tests/uiPrimitives.test.ts
           tests/webviewCompatibility.test.ts
           tests/wikiCompletion.test.ts
+          tests/wikiCompletionR8.test.ts
+          tests/mobileR8LibraryAgent.test.ts
+          tests/mobileR8Attachments.test.ts
           tests/wikiCompletionLayout.test.ts
           tests/mobileMediaDetailR6.test.ts
           tests/mobileR6KnowledgeNavigation.test.ts
@@ -153,8 +195,13 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/lr-dom" --no-package-lock --ignore-scripts jsdom@30.1.3
           LR_JSDOM_MODULE="$RUNNER_TEMP/lr-dom/node_modules/jsdom" node scripts/qa/mobileR6Editor.dom.cjs
+          LR_DOM_TEST_TOOLS="$RUNNER_TEMP/lr-dom/node_modules" node --test tests/scopedBackgroundViews.dom.test.mjs tests/desktopLibraryPicker.dom.test.mjs tests/mobileR8LibraryAgent.dom.test.mjs tests/mobileModeTransition.dom.test.mjs tests/mobileLivePreview.dom.test.mjs tests/mobileLivePreviewEditor.dom.test.mjs tests/mobileSideNavigation.dom.test.mjs tests/noteViewportStability.dom.test.mjs tests/nativeTextareaCaret.dom.test.mjs tests/noteChrome.dom.test.mjs tests/mobileTableMenuPolish.dom.test.mjs tests/noteSidebarLayout.dom.test.mjs tests/notePaperRail.dom.test.mjs tests/notePaperCmIntegration.dom.test.mjs tests/notePaperLifecycle.dom.test.mjs tests/desktopDocumentFallback.dom.test.mjs tests/lshAgentRetention.dom.test.mjs tests/mobileTableHistoryIdentity.dom.test.mjs tests/mobileTableHistoryMode.dom.test.mjs tests/mobileTableHistoryReview.dom.test.mjs tests/mobileTableParity.dom.test.mjs tests/noteTailClearance.dom.test.mjs tests/noteTailCmIntegration.dom.test.mjs tests/noteEditChrome.dom.test.mjs tests/librarySurfacesDom.test.mjs tests/mobileSettingsPolish.dom.test.mjs tests/systemBarSeam.dom.test.mjs
+      - name: Saved-library schema 14 preservation and parked-operation SQL
+        run: python3 scripts/test-saved-library-migration.py
       - name: Build production web assets
         run: pnpm build
+      - name: Verify production Markdown worker without DOM
+        run: node scripts/check-markdown-worker.mjs
       - name: Verify dependency lockfiles unchanged
         run: git diff --exit-code -- pnpm-lock.yaml src-tauri/Cargo.lock
 

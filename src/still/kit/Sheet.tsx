@@ -23,8 +23,8 @@ import { systemBarScrim } from "../../services/systemBarAppearance";
 import { useEffect, useRef, useState } from "react";
 import { dragDismissDecision } from "./sheetDrag";
 
-export function Sheet({ title, children, onClose, footer, registerDismiss, busy = false, retainEditorFocus = false }: {
-  title: string; children: React.ReactNode; onClose: () => void;
+export function Sheet({ title, children, onClose, footer, registerDismiss, busy = false, retainEditorFocus = false, headingSlot }: {
+  title: string; children: React.ReactNode; onClose: () => void; headingSlot?: React.ReactNode;
   footer?: React.ReactNode; registerDismiss?: (f: () => void) => () => void; busy?: boolean; retainEditorFocus?: boolean;
 }) {
   useEffect(() => systemBarScrim.acquire(), []);
@@ -50,7 +50,7 @@ export function Sheet({ title, children, onClose, footer, registerDismiss, busy 
     // Formatting is an editor command, not a new input connection. Other
     // sheets keep their original modal autofocus; native IME insets do not change.
     keepInput.current = Boolean(retainEditorFocus && before?.closest(".st-note-editor"));
-    const r = requestAnimationFrame(() => { setShown(true); if (!keepInput.current) ref.current?.focus({ preventScroll: true }); });
+    const r = requestAnimationFrame(() => { setShown(true); if (!keepInput.current && !ref.current?.contains(document.activeElement)) ref.current?.focus({ preventScroll: true }); });
     const release = registerDismiss?.(close);
     function key(e: KeyboardEvent) {
       if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); close(); }
@@ -149,7 +149,7 @@ export function Sheet({ title, children, onClose, footer, registerDismiss, busy 
           <i aria-hidden="true" />
         </button>
       </div>
-      <div className="st-sheet-heading"><h2>{title}</h2></div>
+      <div className="st-sheet-heading">{headingSlot ?? <h2>{title}</h2>}</div>
       <div className="st-sheet-body">{children}</div>
       {footer && <div className="st-sheet-footer">{footer}</div>}
     </div>

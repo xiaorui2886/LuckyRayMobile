@@ -9,16 +9,81 @@ use tokio::io::AsyncWriteExt;
 pub(crate) mod materials;
 pub(crate) mod notes;
 mod media;
+mod scope_probe;
+
+pub(crate) fn retire_protocol_proof(key: &str) { scope_probe::retire(key); }
+
+// Independent from pairing: selecting a saved library invalidates all old
+// content work without disconnecting the Desktop or changing its active UI.
+static CONTENT_SCOPE_EPOCHS: OnceLock<Mutex<HashMap<String, (u64, u64)>>> = OnceLock::new();
+fn scope_epochs(instance: &str) -> Result<(u64, u64), String> {
+    Ok(*CONTENT_SCOPE_EPOCHS.get_or_init(Default::default).lock().map_err(|_| "CONTENT_UNAVAILABLE")?.get(instance).unwrap_or(&(0, 0)))
+}
+
+pub(crate) fn material_cache_owner(instance: &str, library: Option<&str>) -> String {
+    match library {
+        None => instance.to_owned(), // Existing default-library rows stay intact.
+        Some(library) => format!("material-scope-{:x}", Sha256::digest(serde_json::to_vec(&json!([instance, library])).unwrap())),
+    }
+}
 
 #[tauri::command]
-pub(crate) async fn content_media_source(state: State<'_, SharedState>, app: tauri::AppHandle, instance: String, id: String, vault: Option<String>, note: Option<String>) -> Result<Value,String> {
-    if vault.is_none() && note.is_none() {Source::capture_expected(&state,&instance)?;material_access_check(&state,&instance,&id)?;}
-    let cached=content_cached_resource(app.clone(),instance,id,vault,note).await?;
+pub(crate) async fn content_scope_changed(instance: String, kind: String) -> Result<(), String> {
+    public_id(&instance)?;
+    if !matches!(kind.as_str(), "material" | "materials" | "knowledge") { return Err("CONTENT_SCOPE_INVALID".into()); }
+    {
+        let mut epochs = CONTENT_SCOPE_EPOCHS.get_or_init(Default::default).lock().map_err(|_| "CONTENT_UNAVAILABLE")?;
+        let pair = epochs.entry(instance).or_default();
+        if kind == "knowledge" { pair.1 = pair.1.wrapping_add(1); } else { pair.0 = pair.0.wrapping_add(1); }
+    }
+    crate::services_hints::retire_managed();
+    // Downloads check their captured domain epoch; local-owned media is untouched.
+    media::prune_retired().await;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn content_library_catalog(state: State<'_, SharedState>, instance: String) -> Result<Value, String> {
+    let source = Source::capture_expected(&state, &instance)?;
+    let (status, value) = scope_probe::read_with_retry(|| source.check(&state),
+        || source.gateway.unscoped_get("/v1/services/libraries")).await?;
+    source.check(&state)?;
+    scope_probe::observe(source.scope_protocol_key()?, &source.lifecycle.epoch, source.epoch, status, &value);
+    library_catalog_response(status, value)
+}
+
+fn legacy_vault_matches(requested: Option<&str>, catalog: &Value) -> bool {
+    requested.is_some_and(|requested| catalog["items"].as_array()
+        .and_then(|items| items.first()).and_then(|row| row["vaultId"].as_str()) == Some(requested))
+}
+
+fn legacy_scope_catalog(status: u16, value: &Value) -> bool {
+    status == 404 || (status == 200 && value["scopeSelectionVersion"] == 0
+        && value["mode"] == "legacyDefaultOnly" && value["authorizationMode"] == "legacy")
+}
+
+fn library_catalog_response(status: u16, value: Value) -> Result<Value, String> {
+    // Only a proven missing endpoint permits the old default-only contract.
+    // Transport/auth/server failures never silently choose another library.
+    if legacy_scope_catalog(status, &value) {
+        return Ok(json!({"scopeSelectionVersion":0,"materials":[],"knowledge":[]}));
+    }
+    if status != 200 { return Err(format!("CONTENT_HTTP_{status}")); }
+    if value["scopeSelectionVersion"] != 1 { return Err("CONTENT_UPGRADE_REQUIRED".into()); }
+    Ok(value)
+}
+
+#[tauri::command]
+pub(crate) async fn content_media_source(state: State<'_, SharedState>, app: tauri::AppHandle, instance: String, library: Option<String>, id: String, vault: Option<String>, note: Option<String>) -> Result<Value,String> {
+    let source = Source::capture_expected(&state,&instance)?.scoped(library.as_deref(),vault.as_deref())?;
+    if vault.is_none() && note.is_none() {material_access_check(&state,&source.cache_owner(),&id)?;}
+    let cached=cached_resource(&state,app.clone(),instance,library,id,vault,note).await?;
     let path=std::path::PathBuf::from(cached["path"].as_str().ok_or("CONTENT_NOT_CACHED")?);
     let root=app.path().app_cache_dir().map_err(|_| "CONTENT_NOT_CACHED")?.join("content-resources").canonicalize().map_err(|_| "CONTENT_NOT_CACHED")?;
     let path=path.canonicalize().map_err(|_| "CONTENT_NOT_CACHED")?;
     if path.parent()!=Some(root.as_path()) { return Err("CONTENT_NOT_CACHED".into()); }
-    media::issue(path,cached["mime"].as_str().ok_or("CONTENT_NOT_CACHED")?.to_string()).await
+    source.check(&state)?;
+    media::issue_scoped(path,cached["mime"].as_str().ok_or("CONTENT_NOT_CACHED")?.to_string(), source, state.inner().clone()).await
 }
 
 #[tauri::command]
@@ -26,9 +91,9 @@ pub(crate) async fn content_media_release(token: String) { media::release(&token
 
 /// A live paired asset, not a generic URL proxy and not a complete offline save.
 #[tauri::command]
-pub(crate) async fn content_media_stream(state: State<'_, SharedState>, instance: String, id: String, job_id: String) -> Result<Value, String> {
+pub(crate) async fn content_media_stream(state: State<'_, SharedState>, instance: String, library: Option<String>, id: String, job_id: String) -> Result<Value, String> {
     public_id(&id)?; public_id(&job_id)?;
-    let source = Source::capture_expected(&state, &instance)?;
+    let source = Source::capture_expected(&state, &instance)?.scoped(library.as_deref(), None)?;
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let mut jobs = DOWNLOADS.get_or_init(Default::default).lock().map_err(|_| "MEDIA_BUSY")?;
@@ -49,11 +114,11 @@ pub(crate) async fn content_media_status(token: String) -> Result<Value, String>
 /// source. No generic URL/path or full-file/hash prerequisite for watching.
 #[tauri::command]
 pub(crate) async fn content_video_play(state: State<'_, SharedState>, app: tauri::AppHandle,
-    instance: String, id: String, job_id: String, title: String, start_position_ms: u64, dark_mode: Option<bool>) -> Result<Value, String> {
+    instance: String, library: Option<String>, id: String, job_id: String, title: String, start_position_ms: u64, dark_mode: Option<bool>) -> Result<Value, String> {
     media::supported()?;
     public_id(&instance)?; public_id(&id)?; public_id(&job_id)?;
     Source::capture_expected(&state,&instance)?;
-    material_access_check(&state,&instance,&id)?;
+    material_access_check(&state,&material_cache_owner(&instance,library.as_deref()),&id)?;
     if title.len() > 4096 || start_position_ms > i64::MAX as u64 {return Err("CONTENT_ID_INVALID".into());}
     let started = std::time::Instant::now();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -63,10 +128,10 @@ pub(crate) async fn content_video_play(state: State<'_, SharedState>, app: tauri
         jobs.insert(job_id.clone(), cancelled.clone());
     }
     let _job = DownloadJob {id:job_id, cancelled:cancelled.clone()};
-    let grant = match content_media_source(state.clone(), app, instance.clone(), id.clone(), None, None).await {
+    let grant = match content_media_source(state.clone(), app, instance.clone(), library.clone(), id.clone(), None, None).await {
         Ok(grant) => grant,
         Err(code) if code == "CONTENT_NOT_CACHED" => {
-            let source = Source::capture_expected(&state, &instance)?;
+            let source = Source::capture_expected(&state, &instance)?.scoped(library.as_deref(), None)?;
             cancellable(source.capabilities(&state, "materialPreview"), &|| {
                 if cancelled.load(Ordering::Acquire) {return Err("CONTENT_CANCELLED".into());} source.check(&state)
             }).await??;
@@ -122,16 +187,41 @@ struct Source {
     lifecycle: ConnectionLifecycle,
     epoch: u64,
     gateway: GatewayClient,
+    scope_epochs: (u64, u64),
+    scope_kind: &'static str,
+    library: Option<String>,
+    vault: Option<String>,
+    scope_protocol_checked: tokio::sync::OnceCell<()>,
 }
 
 impl Source {
+    fn scoped(mut self, library: Option<&str>, vault: Option<&str>) -> Result<Self, String> {
+        self.gateway = self.gateway.scoped(library, vault)?;
+        self.library = library.map(str::to_owned);
+        self.vault = vault.map(str::to_owned);
+        self.scope_kind = if library.is_some() && vault.is_some() { "all" } else if vault.is_some() { "knowledge" } else { "material" };
+        Ok(self)
+    }
+    fn knowledge(mut self) -> Self { self.scope_kind = "knowledge"; self }
+    fn scope_changed(&self) -> bool {
+        let Ok(current) = scope_epochs(&self.instance) else { return true; };
+        match self.scope_kind {
+            "none" => false,
+            "material" => current.0 != self.scope_epochs.0,
+            "knowledge" => current.1 != self.scope_epochs.1,
+            _ => current != self.scope_epochs,
+        }
+    }
+    fn cache_owner(&self) -> String { material_cache_owner(&self.instance, self.library.as_deref()) }
+
     fn with_db<T>(
         &self,
         state: &SharedState,
         action: impl FnOnce(&mut Db) -> Result<T, String>,
     ) -> Result<T, String> {
         let g = state.lock().map_err(|_| "CONTENT_UNAVAILABLE")?;
-        if g.connection_lifecycle.observe() != self.epoch
+        if self.scope_changed()
+            || g.connection_lifecycle.observe() != self.epoch
             || g.conn_intent.get() != ConnectionIntent::Auto
         {
             return Err("CONTENT_SOURCE_CHANGED".into());
@@ -152,16 +242,23 @@ impl Source {
         if lifecycle.observe() != epoch {
             return Err("CONTENT_SOURCE_CHANGED".into());
         }
+        let epochs = scope_epochs(&paired.instance_id)?;
         Ok(Self {
             instance: paired.instance_id,
             lifecycle,
             epoch,
             gateway,
+            scope_epochs: epochs,
+            scope_kind: "all",
+            library: None,
+            vault: None,
+            scope_protocol_checked: tokio::sync::OnceCell::new(),
         })
     }
 
     pub(crate) fn check(&self, state: &SharedState) -> Result<(), String> {
-        if self.lifecycle.observe() != self.epoch
+        if self.scope_changed()
+            || self.lifecycle.observe() != self.epoch
             || current_conn_intent(state) != ConnectionIntent::Auto
         {
             return Err("CONTENT_SOURCE_CHANGED".into());
@@ -188,6 +285,7 @@ impl Source {
     /// instance recorded at capture time rather than the caller's expectation.
     /// Used to fence a request that is already bound to a captured gateway.
     pub(crate) fn verify_owner(&self, state: &SharedState) -> Result<(), String> {
+        self.check(state)?;
         let live = Self::capture(state)?;
         if live.instance != self.instance {
             return Err("CONTENT_SOURCE_CHANGED".into());
@@ -195,9 +293,103 @@ impl Source {
         Ok(())
     }
 
-    pub(crate) async fn capabilities(&self, state: &SharedState, capability: &str) -> Result<Value, String> {
-        let value = self.gateway.content_get("/v1/capabilities").await?;
+    fn scope_protocol_key(&self) -> Result<String, String> {
+        Ok(scope_probe::proof_key(Arc::as_ptr(&self.lifecycle.epoch) as usize,
+            self.epoch, &self.instance, self.gateway.base_url(),
+            self.gateway.fingerprint(), self.gateway.token()))
+    }
+
+    async fn ensure_scope_protocol(&self, state: &SharedState) -> Result<(), String> {
         self.check(state)?;
+        // Local OnceCell marks retry policy only; it must not bypass a shared
+        // proof invalidated by a newer catalog, transport, or protocol response.
+        self.negotiate_scope_protocol(state, false).await?;
+        let _ = self.scope_protocol_checked.set(());
+        self.check(state)
+    }
+
+    async fn negotiate_scope_protocol(&self, state: &SharedState, fresh: bool) -> Result<(), String> {
+        if self.library.is_none() && self.vault.is_none() { return Ok(()); }
+        self.check(state)?;
+        // This caches protocol VERSION only, not a catalog or grant. Current
+        // scope headers and the server's authorization still apply on every read.
+        let key = self.scope_protocol_key()?;
+        let read = || async {
+            self.check(state)?;
+            scope_probe::read_with_retry(|| self.check(state),
+                || self.gateway.unscoped_get("/v1/services/libraries")).await
+        };
+        // A mutation independently negotiates immediately before its send.
+        // It never joins a cached/pending read proof, and is fenced after await.
+        let result = if fresh { read().await }
+            else { scope_probe::discover(key.clone(), &self.lifecycle.epoch, self.epoch, read).await };
+        let (status, catalog) = match result { Ok(value) => value, Err(error) => {scope_probe::retire(&key);return Err(error);} };
+        self.check(state)?;
+        if fresh { scope_probe::observe(key.clone(), &self.lifecycle.epoch, self.epoch, status, &catalog); }
+        if status == 200 && catalog["scopeSelectionVersion"] == 1 {
+            self.gateway.set_legacy_knowledge(false);
+            self.gateway.set_scope_proof(key, catalog["reusableProofVersion"] == 1);
+            return Ok(());
+        }
+        if legacy_scope_catalog(status, &catalog) && self.library.is_none() {
+            let (current_status, current) = self.gateway.unscoped_get("/v1/vaults").await?;
+            self.check(state)?;
+            if current_status == 200 && legacy_vault_matches(self.vault.as_deref(), &current) {
+                self.gateway.set_legacy_knowledge(true);
+                self.gateway.set_scope_proof(key, false);
+                return Ok(());
+            }
+        }
+        if matches!(catalog["code"].as_str(), Some("SCOPE_UNAVAILABLE" | "SCOPE_MISMATCH")) {
+            return Err(catalog["code"].as_str().unwrap().into());
+        }
+        if status != 200 && status != 404 { return Err(format!("CONTENT_HTTP_{status}")); }
+        Err("CONTENT_UPGRADE_REQUIRED".into())
+    }
+
+    async fn prepare_mutation(&self, state: &SharedState) -> Result<(), String> {
+        self.check(state)?;
+        self.negotiate_scope_protocol(state, true).await?;
+        self.check(state)
+    }
+
+    async fn mutate(&self, state: &SharedState, path: &str, method: reqwest::Method, body: &Value) -> Result<(u16, Value), String> {
+        self.prepare_mutation(state).await?;
+        let result = self.gateway.content_mutate(path, method, body).await;
+        self.check(state)?;
+        result
+    }
+
+    fn scoped_v1_proven(&self) -> bool {
+        (self.library.is_some() || self.vault.is_some())
+            && self.scope_protocol_checked.get().is_some()
+            && !self.gateway.legacy_knowledge()
+    }
+
+    async fn metadata_request(&self, state: &SharedState, path: &str) -> Result<(u16, Value), String> {
+        self.check(state)?;
+        let read = || self.gateway.content_request(reqwest::Method::GET, path, None);
+        let result = if self.scoped_v1_proven() {
+            scope_probe::read_metadata_with_retry(|| self.check(state), read).await
+        } else { read().await };
+        self.check(state)?;
+        result
+    }
+
+    async fn metadata_get(&self, state: &SharedState, path: &str) -> Result<Value, String> {
+        let (status, body) = self.metadata_request(state, path).await?;
+        if !(200..300).contains(&status) { return Err(format!("content {}", companion_error_note(status, &body))); }
+        Ok(body)
+    }
+
+    pub(crate) async fn capabilities(&self, state: &SharedState, capability: &str) -> Result<Value, String> {
+        self.ensure_scope_protocol(state).await?;
+        let value = self.metadata_get(state, "/v1/capabilities").await?;
+        self.check(state)?;
+        if self.library.is_some() && value["scopeSelectionVersion"] != 1 {
+            scope_probe::observe(self.scope_protocol_key()?, &self.lifecycle.epoch, self.epoch, 200, &value);
+            return Err("CONTENT_UPGRADE_REQUIRED".into());
+        }
         if value["contentVersion"] != 1 || value["capabilities"][capability] != true {
             return Err("CONTENT_UPGRADE_REQUIRED".into());
         }
@@ -229,6 +421,8 @@ impl ExpectedThumbnailSource {
         &self.source.instance
     }
 
+    pub(crate) fn cache_owner(&self) -> String { self.source.cache_owner() }
+
     /// Fetch through the gateway captured for THIS owner. If the connection
     /// moved on between the capture and this call, the request is refused
     /// before it is sent, so it can never reach the new Desktop.
@@ -240,6 +434,7 @@ impl ExpectedThumbnailSource {
     ) -> Result<(Vec<u8>, String, String), String> {
         // Refuse BEFORE the request if the owner already moved.
         self.source.verify_owner(state)?;
+        self.source.capabilities(state, "materialPreview").await?;
         let value = self.source.gateway.fetch_thumbnail(id, etag).await?;
         // And again before the caller may act on the bytes.
         self.source.verify_owner(state)?;
@@ -258,9 +453,10 @@ impl ExpectedThumbnailSource {
 pub(crate) fn expected_thumbnail_source(
     state: &SharedState,
     expected: &str,
+    library: Option<&str>,
 ) -> Result<ExpectedThumbnailSource, String> {
     Ok(ExpectedThumbnailSource {
-        source: Source::capture_expected(state, expected)?,
+        source: Source::capture_expected(state, expected)?.scoped(library, None)?,
     })
 }
 /// One retained capture for an expected-owner gateway operation (Issue #72,
@@ -272,6 +468,9 @@ pub(crate) struct ExpectedGateway {
 }
 
 impl ExpectedGateway {
+    /// Apply a response under the exact captured source fence and DB lock.
+    pub(crate) fn with_db<T>(&self,state:&SharedState,f:impl FnOnce(&mut Db)->Result<T,String>)->Result<T,String>{self.source.with_db(state,f)}
+
     pub(crate) fn instance(&self) -> &str {
         &self.source.instance
     }
@@ -361,6 +560,14 @@ impl ExpectedGateway {
         self.source.check(state)
     }
 
+    pub(crate) fn wire_vault(&self, vault: Option<String>) -> Option<String> {
+        if self.source.gateway.legacy_knowledge() { None } else { vault }
+    }
+
+    pub(crate) async fn require_scope_protocol(&self, state: &SharedState) -> Result<(), String> {
+        self.source.ensure_scope_protocol(state).await
+    }
+
     /// One canonical Services V1 JSON request through the pinned gateway
     /// captured for THIS owner, re-proving the owner BEFORE the send and AFTER
     /// the awaited response (Issue #77 §2).
@@ -376,6 +583,7 @@ impl ExpectedGateway {
         body: &Value,
     ) -> Result<(u16, Value), String> {
         self.services_connection_current(state)?;
+        self.require_scope_protocol(state).await?;
         let http_method = match method {
             "GET" => reqwest::Method::GET,
             "POST" => reqwest::Method::POST,
@@ -384,7 +592,14 @@ impl ExpectedGateway {
             "DELETE" => reqwest::Method::DELETE,
             _ => return Err("SERVICES_METHOD_INVALID".into()),
         };
-        let result = self.source.gateway.content_request(http_method, path, None).await?;
+        // Only GET metadata is retryable, and only after this exact source
+        // proved version-1 scope selection. Mutations keep one send.
+        let result = if http_method == reqwest::Method::GET {
+            self.source.metadata_request(state, path).await?
+        } else {
+            self.source.prepare_mutation(state).await?;
+            self.source.gateway.content_request(http_method, path, None).await?
+        };
         let _ = has_body;
         let _ = body;
         self.services_connection_current(state)?;
@@ -400,6 +615,7 @@ impl ExpectedGateway {
         body: &Value,
     ) -> Result<(u16, Value), String> {
         self.services_connection_current(state)?;
+        self.require_scope_protocol(state).await?;
         let http_method = match method {
             "POST" => reqwest::Method::POST,
             "PATCH" => reqwest::Method::PATCH,
@@ -407,7 +623,7 @@ impl ExpectedGateway {
             "DELETE" => reqwest::Method::DELETE,
             _ => return Err("SERVICES_METHOD_INVALID".into()),
         };
-        let result = self.source.gateway.content_mutate(path, http_method, body).await?;
+        let result = self.source.mutate(state, path, http_method, body).await?;
         self.services_connection_current(state)?;
         Ok(result)
     }
@@ -423,11 +639,13 @@ impl ExpectedGateway {
         headers: &[(String, String)],
     ) -> Result<(u16, Value), String> {
         self.services_connection_current(state)?;
+        self.require_scope_protocol(state).await?;
         let http_method = match method {
             "PUT" => reqwest::Method::PUT,
             "POST" => reqwest::Method::POST,
             _ => return Err("SERVICES_METHOD_INVALID".into()),
         };
+        self.source.prepare_mutation(state).await?;
         let result = self
             .source
             .gateway
@@ -456,9 +674,13 @@ pub(crate) fn expected_gateway(
     state: &SharedState,
     expected: &str,
 ) -> Result<ExpectedGateway, String> {
-    Ok(ExpectedGateway {
-        source: Source::capture_expected(state, expected)?,
-    })
+    let mut source = Source::capture_expected(state, expected)?;
+    source.scope_kind = "none";
+    Ok(ExpectedGateway { source })
+}
+
+pub(crate) fn expected_scoped_gateway(state: &SharedState, expected: &str, library: Option<&str>, vault: Option<&str>) -> Result<ExpectedGateway, String> {
+    Ok(ExpectedGateway { source: Source::capture_expected(state, expected)?.scoped(library, vault)? })
 }
 
 fn public_id(id: &str) -> Result<(), String> {    if id.is_empty()
@@ -490,14 +712,14 @@ async fn cached_material_get(state: &SharedState, path: &str) -> Result<Value, S
     let result = async {
         let source = Source::capture(state)?;
         source.capabilities(state, "materialPreview").await?;
-        let value = source.gateway.content_get(path).await?;
+        let value = source.metadata_get(state, path).await?;
         if let Some(items) = value["items"].as_array() {
             cache_assets(state, &source, items)?;
         } else if value.get("desktopAssetId").is_some() {
             cache_assets(state, &source, std::slice::from_ref(&value))?;
         }
         source.with_db(state, |db| {
-            db.content_cache_response(&source.instance, path, &value)
+            db.content_cache_response(&source.cache_owner(), path, &value)
         })?;
         // Provenance is decided where the answer came from, never inferred
         // later from Promise status.
@@ -534,22 +756,23 @@ async fn cached_material_get(state: &SharedState, path: &str) -> Result<Value, S
 async fn cached_material_get_expected(
     state: &SharedState,
     expected_instance: &str,
+    library: Option<&str>,
     path: &str,
 ) -> Result<Value, String> {
-    let guard=Source::capture_expected(state, expected_instance)?;
+    let guard=Source::capture_expected(state, expected_instance)?.scoped(library, None)?;
     let result = async {
-        let source = Source::capture_expected(state, expected_instance)?;
+        let source = Source::capture_expected(state, expected_instance)?.scoped(library, None)?;
         source.capabilities(state, "materialPreview").await?;
         // The identity must still hold across the awaited capability probe.
         source.check(state)?;
-        let value = source.gateway.content_get(path).await?;
+        let value = source.metadata_get(state, path).await?;
         if let Some(items) = value["items"].as_array() {
             cache_assets(state, &source, items)?;
         } else if value.get("desktopAssetId").is_some() {
             cache_assets(state, &source, std::slice::from_ref(&value))?;
         }
         source.with_db(state, |db| {
-            db.content_cache_response(&source.instance, path, &value)
+            db.content_cache_response(&source.cache_owner(), path, &value)
         })?;
         let mut value = value;
         value["source"] = json!("live");
@@ -557,14 +780,14 @@ async fn cached_material_get_expected(
     }
     .await;
     match result {
-        Err(e) if e == "CONTENT_OFFLINE" || e == "CONTENT_DISCONNECTED" => with_db(state, |db| {
+        Err(e) if e == "CONTENT_OFFLINE" || e == "CONTENT_DISCONNECTED" => guard.with_db(state, |db| {
             // The cache fallback is keyed by the EXPECTED owner, and only
             // reaches here while that owner is still the paired Desktop.
             match db.paired()? {
                 Some(p) if p.instance_id == expected_instance => {}
                 _ => return Err("CONTENT_SOURCE_CHANGED".into()),
             }
-            let mut cached = db.content_cached_response(expected_instance, path)?;
+            let mut cached = db.content_cached_response(&guard.cache_owner(), path)?;
             if let Some(error)=cached["_mobileAccessError"].as_str() {return Err(error.into());}
             cached["source"] = json!("cache");
             Ok(cached)
@@ -573,7 +796,7 @@ async fn cached_material_get_expected(
             let code=material_denial_code(&error).unwrap();
             // Same existing response-cache row: a confirmed denial replaces
             // positive offline metadata, never deletes the user's originals.
-            guard.with_db(state,|db|db.content_cache_response(expected_instance,path,&json!({"_mobileAccessError":code})))?;
+            guard.with_db(state,|db|db.content_cache_response(&guard.cache_owner(),path,&json!({"_mobileAccessError":code})))?;
             Err(code.into())
         },
         other => other,
@@ -581,6 +804,11 @@ async fn cached_material_get_expected(
 }
 
 fn material_denial_code(error:&str)->Option<&'static str> {
+    if error.contains("SCOPE_UNAVAILABLE") { return Some("SCOPE_UNAVAILABLE"); }
+    if error.contains("SCOPE_MISMATCH") { return Some("SCOPE_MISMATCH"); }
+    if matches!(error, "CONTENT_HTTP_401" | "CONTENT_HTTP_403" | "CONTENT_HTTP_404" | "CONTENT_HTTP_410") {
+        return match error { "CONTENT_HTTP_401" => Some("CONTENT_HTTP_401"), "CONTENT_HTTP_403" => Some("CONTENT_HTTP_403"), "CONTENT_HTTP_404" => Some("CONTENT_HTTP_404"), _ => Some("CONTENT_HTTP_410") };
+    }
     [("http 401 ","CONTENT_HTTP_401"),("http 403 ","CONTENT_HTTP_403"),("http 404 ","CONTENT_HTTP_404"),("http 410 ","CONTENT_HTTP_410")]
         .into_iter().find(|(wire,_)|error.contains(wire)).map(|(_,code)|code)
 }
@@ -602,7 +830,7 @@ pub(crate) async fn content_capabilities(state: State<'_, SharedState>) -> Resul
 #[tauri::command]
 pub(crate) async fn content_assets(
     state: State<'_, SharedState>,
-    instance: String,
+    instance: String, library: Option<String>,
     page: u32,
     limit: u32,
     q: Option<String>,
@@ -624,11 +852,12 @@ pub(crate) async fn content_assets(
     }
     // Bound to the Desktop that produced the rows the caller is rendering —
     // never to whatever is paired when this happens to run.
-    let value = cached_material_get_expected(&state, &instance, &path).await?;
+    let value = cached_material_get_expected(&state, &instance, library.as_deref(), &path).await?;
     Ok(value)
 }
 
 fn cache_assets(state: &SharedState, source: &Source, items: &[Value]) -> Result<(), String> {
+    source.check(state)?;
     // The state lock excludes pairing changes while validating and committing.
     let g = state.lock().map_err(|_| "CONTENT_UNAVAILABLE")?;
     if g.connection_lifecycle.observe() != source.epoch
@@ -655,7 +884,7 @@ fn cache_assets(state: &SharedState, source: &Source, items: &[Value]) -> Result
             })
             .unwrap_or_default();
         db.upsert_asset(
-            &source.instance,
+            &source.cache_owner(),
             text("desktopAssetId"),
             text("name"),
             text("kind"),
@@ -674,19 +903,19 @@ fn cache_assets(state: &SharedState, source: &Source, items: &[Value]) -> Result
 #[tauri::command]
 pub(crate) async fn content_navigation(
     state: State<'_, SharedState>,
-    instance: String,
+    instance: String, library: Option<String>,
 ) -> Result<Value, String> {
-    cached_material_get_expected(&state, &instance, "/v1/assets/navigation").await
+    cached_material_get_expected(&state, &instance, library.as_deref(), "/v1/assets/navigation").await
 }
 
 #[tauri::command]
 pub(crate) async fn content_asset_detail(
     state: State<'_, SharedState>,
-    instance: String,
+    instance: String, library: Option<String>,
     id: String,
 ) -> Result<Value, String> {
     public_id(&id)?;
-    cached_material_get_expected(&state, &instance, &format!("/v1/assets/{id}")).await
+    cached_material_get_expected(&state, &instance, library.as_deref(), &format!("/v1/assets/{id}")).await
 }
 
 static DOWNLOADS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
@@ -723,7 +952,7 @@ impl Drop for DownloadJob {
 pub(crate) async fn content_asset_file(
     state: State<'_, SharedState>,
     app: tauri::AppHandle,
-    instance: String,
+    instance: String, library: Option<String>,
     id: String,
     job_id: String,
     max_bytes: Option<u64>,
@@ -731,7 +960,7 @@ pub(crate) async fn content_asset_file(
 ) -> Result<Value, String> {
     // Material downloads are owner-bound: the page names the Desktop it belongs
     // to and a moved connection fails closed.
-    download_resource(state, app, &instance, id, job_id, None, max_bytes, expected_version).await
+    download_resource(state, app, &instance, library.as_deref(), id, job_id, None, max_bytes, expected_version).await
 }
 
 #[tauri::command]
@@ -748,7 +977,7 @@ pub(crate) async fn content_note_resource(
     public_id(&note)?;
     // The reader names its captured Desktop, just like the material reader.
     // A moved pairing must fail before any wire request or cache mutation.
-    download_resource(state, app, &instance, id, job_id, Some((vault, note)), None, None).await
+    download_resource(state, app, &instance, None, id, job_id, Some((vault, note)), None, None).await
 }
 
 /// Both callers bind the Desktop their page belongs to, with no fallback to
@@ -757,6 +986,7 @@ async fn download_resource(
     state: State<'_, SharedState>,
     app: tauri::AppHandle,
     expected_instance: &str,
+    library: Option<&str>,
     id: String,
     job_id: String,
     note: Option<(String, String)>,
@@ -768,7 +998,8 @@ async fn download_resource(
     // The original file belongs to the Desktop the page was opened from. This
     // is proven before the download gate, so a connection that moved on can
     // never pull the new Desktop's file for an old Desktop's page.
-    let source = Source::capture_expected(&state, expected_instance)?;
+    let source = Source::capture_expected(&state, expected_instance)?.scoped(library, note.as_ref().map(|n| n.0.as_str()))?;
+    let resource_authority = source.with_db(&state, |db| db.content_resource_authority())?;
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let mut jobs = DOWNLOADS.get_or_init(Default::default).lock().unwrap();
@@ -811,7 +1042,7 @@ async fn download_resource(
         .unwrap_or_else(|| "asset".into());
     let key = format!(
         "{:x}",
-        Sha256::digest(format!("{}:{domain}:{id}", source.instance))
+        Sha256::digest(format!("{}:{domain}:{id}", if note.is_none() { source.cache_owner() } else { source.instance.clone() }))
     );
     let part = root.join(format!("{key}.part"));
     let metadata_path = root.join(format!("{key}.part.json"));
@@ -820,12 +1051,19 @@ async fn download_resource(
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or(Value::Null);
-    let etag = metadata["etag"].as_str().unwrap_or("");
+    if metadata["resourceAuthority"].as_i64().unwrap_or(0) != resource_authority {
+        // Only resumable staging bytes are discarded. Completed originals and
+        // all note drafts remain on disk, but cannot be reused as new authority.
+        let _ = tokio::fs::remove_file(&part).await;
+        let _ = tokio::fs::remove_file(&metadata_path).await;
+    }
+    let etag = if metadata["resourceAuthority"].as_i64().unwrap_or(0) == resource_authority { metadata["etag"].as_str().unwrap_or("") } else { "" };
     let offset = tokio::fs::metadata(&part)
         .await
         .ok()
         .map(|m| m.len())
         .unwrap_or(0);
+    cancellable(source.capabilities(&state, if note.is_some() { "noteRead" } else { "materialPreview" }), &check).await??;
     let route = note
         .as_ref()
         .map(|(vault, note)| format!("/v1/notes/{note}/resources/{id}?vault={}", encode(vault)))
@@ -835,9 +1073,11 @@ async fn download_resource(
         .client_req()?
         .get(format!("{}{route}", source.gateway.base_url()))
         .bearer_auth(source.gateway.token());
-    let cached = content_cached_resource(
+    let cached = cached_resource(
+        &state,
         app.clone(),
         source.instance.clone(),
+        source.library.clone(),
         id.clone(),
         note.as_ref().map(|n| n.0.clone()),
         note.as_ref().map(|n| n.1.clone()),
@@ -847,7 +1087,7 @@ async fn download_resource(
     // Only material originals get this additive stamp. Notes/knowledge are
     // untouched. The row was read before the conditional GET validates bytes.
     let asset_version = if note.is_none() {
-        source.with_db(&state, |db| db.asset_version(&source.instance, &id))?
+        source.with_db(&state, |db| db.asset_version(&source.cache_owner(), &id))?
             .unwrap_or_default()
     } else {String::new()};
     if expected_version.as_ref().is_some_and(|v| v!=&asset_version) {return Err("CONTENT_VERSION_CHANGED".into());}
@@ -860,8 +1100,9 @@ async fn download_resource(
     }
     let mut response = cancellable(request.send(), &check)
         .await?
-        .map_err(|_| "CONTENT_OFFLINE")?;
+        .map_err(|_| {source.gateway.retire_scope_proof(); "CONTENT_OFFLINE"})?;
     check()?;
+    source.gateway.check_scope_response(&response)?;
     let status = response.status().as_u16();
     if status == 304 {
         if cached.is_some() && !asset_version.is_empty() {
@@ -919,14 +1160,14 @@ async fn download_resource(
         .map_err(|_| "CONTENT_CACHE_UNAVAILABLE")?;
     tokio::fs::write(
         &metadata_path,
-        serde_json::to_vec(&json!({"etag": version, "mime": mime})).unwrap(),
+        serde_json::to_vec(&json!({"resourceAuthority":resource_authority,"etag": version, "mime": mime})).unwrap(),
     )
     .await
     .map_err(|_| "CONTENT_CACHE_UNAVAILABLE")?;
     let mut received = 0u64;
     while let Some(chunk) = cancellable(response.chunk(), &check)
         .await?
-        .map_err(|_| "CONTENT_OFFLINE")?
+        .map_err(|_| {source.gateway.retire_scope_proof(); "CONTENT_OFFLINE"})?
     {
         check()?;
         received += chunk.len() as u64;
@@ -959,20 +1200,21 @@ async fn download_resource(
         _ => "bin",
     };
     if let Some(expected)=expected_version.as_ref() {
-        if source.with_db(&state,|db|db.asset_version(&source.instance,&id))?.as_ref()!=Some(expected) {return Err("CONTENT_VERSION_CHANGED".into());}
+        if source.with_db(&state,|db|db.asset_version(&source.cache_owner(),&id))?.as_ref()!=Some(expected) {return Err("CONTENT_VERSION_CHANGED".into());}
     }
     let version_key = format!("{:x}", Sha256::digest(version.as_bytes()));
     let dest = root.join(format!("{key}-{version_key}.{extension}"));
     tokio::fs::rename(&part, &dest)
         .await
         .map_err(|_| "CONTENT_CACHE_UNAVAILABLE")?;
-    let mut complete_metadata = json!({"etag":version,"mime":mime,"fileName":dest.file_name().unwrap().to_string_lossy(),"sizeBytes":start+received});
+    let mut complete_metadata = json!({"resourceAuthority":resource_authority,"etag":version,"mime":mime,"fileName":dest.file_name().unwrap().to_string_lossy(),"sizeBytes":start+received});
     if note.is_none() { complete_metadata["assetVersion"] = json!(asset_version); }
     tokio::fs::write(root.join(format!("{key}.json")),serde_json::to_vec(&complete_metadata).unwrap())
         .await.map_err(|_|"CONTENT_CACHE_UNAVAILABLE")?;
     let _ = tokio::fs::remove_file(&metadata_path).await;
     let mut receipt=json!({"path": dest.to_string_lossy(), "mime": mime, "etag": version, "sizeBytes": start + received});
     if note.is_none() {receipt["assetVersion"]=complete_metadata["assetVersion"].clone();}
+    check()?;
     Ok(receipt)
 }
 
@@ -993,13 +1235,15 @@ async fn cancellable<T>(
 pub(crate) async fn content_open_resource(
     state: State<'_, SharedState>,
     app: tauri::AppHandle,
-    instance: String,
+    instance: String, library: Option<String>,
     id: String,
     vault: Option<String>,
     note: Option<String>,
 ) -> Result<Value, String> {
-    if vault.is_none() && note.is_none() {Source::capture_expected(&state,&instance)?;material_access_check(&state,&instance,&id)?;}
-    let cached = content_cached_resource(app, instance, id, vault, note).await?;
+    let source = Source::capture_expected(&state,&instance)?.scoped(library.as_deref(),vault.as_deref())?;
+    if vault.is_none() && note.is_none() {material_access_check(&state,&source.cache_owner(),&id)?;}
+    let cached = cached_resource(&state,app, instance, library, id, vault, note).await?;
+    source.check(&state)?;
     crate::companion_export::open_content_cache(
         cached["path"].as_str().ok_or("CONTENT_NOT_CACHED")?,
         cached["mime"]
@@ -1010,12 +1254,35 @@ pub(crate) async fn content_open_resource(
 
 #[tauri::command]
 pub(crate) async fn content_cached_resource(
+    state: State<'_, SharedState>,
     app: tauri::AppHandle,
-    instance: String,
+    instance: String, library: Option<String>,
     id: String,
     vault: Option<String>,
     note: Option<String>,
 ) -> Result<Value, String> {
+    cached_resource(&state, app, instance, library, id, vault, note).await
+}
+
+async fn cached_resource(state: &SharedState, app: tauri::AppHandle, instance: String,
+    library: Option<String>, id: String, vault: Option<String>, note: Option<String>) -> Result<Value, String> {
+    let resource_authority = with_db(state, |db| db.content_resource_authority())?;
+    let epochs = scope_epochs(&instance)?;
+    let (lifecycle, _) = connection_controls(state);
+    let connection_epoch = lifecycle.observe();
+    let knowledge = vault.is_some();
+    let check = || -> Result<(), String> {
+        let current = scope_epochs(&instance)?;
+        if (if knowledge { current.1 != epochs.1 } else { current.0 != epochs.0 }) || lifecycle.observe() != connection_epoch {
+            return Err("CONTENT_SOURCE_CHANGED".into());
+        }
+        with_db(state, |db| {
+            if db.paired()?.is_none_or(|p| p.instance_id != instance) || db.content_resource_authority()? != resource_authority { return Err("CONTENT_SOURCE_CHANGED".into()); }
+            Ok(())
+        })
+    };
+    check()?;
+    if let Some(library) = library.as_deref() { public_id(library)?; }
     public_id(&instance)?;
     public_id(&id)?;
     let domain = match (vault, note) {
@@ -1027,7 +1294,8 @@ pub(crate) async fn content_cached_resource(
         (None, None) => "asset".into(),
         _ => return Err("CONTENT_ID_INVALID".into()),
     };
-    let key = format!("{:x}", Sha256::digest(format!("{instance}:{domain}:{id}")));
+    let owner = if domain == "asset" { material_cache_owner(&instance, library.as_deref()) } else { instance.clone() };
+    let key = format!("{:x}", Sha256::digest(format!("{owner}:{domain}:{id}")));
     let root = app
         .path()
         .app_cache_dir()
@@ -1039,6 +1307,7 @@ pub(crate) async fn content_cached_resource(
             .map_err(|_| "CONTENT_NOT_CACHED")?,
     )
     .map_err(|_| "CONTENT_NOT_CACHED")?;
+    if metadata["resourceAuthority"].as_i64().unwrap_or(0) != resource_authority { return Err("CONTENT_NOT_CACHED".into()); }
     let name = metadata["fileName"]
         .as_str()
         .filter(|name| {
@@ -1057,15 +1326,18 @@ pub(crate) async fn content_cached_resource(
     }
     let mut receipt=json!({"path":path.to_string_lossy(),"mime":metadata["mime"],"etag":metadata["etag"],"sizeBytes":actual.len(),"cached":true});
     if domain=="asset" {receipt["assetVersion"]=metadata["assetVersion"].clone();}
+    check()?;
     Ok(receipt)
 }
 
 /// Derived screen pixels live beside the EXISTING complete resource, keyed by
 /// its owner/domain/id + HTTP etag + available material revision. No new DB or
 /// original-file authority, no remote URL/path accepted from JavaScript.
-pub(crate) async fn asset_screen_preview(state:&SharedState,app:&tauri::AppHandle,instance:&str,id:&str,expected_version:&str,force:bool)->Result<Value,String> {
+pub(crate) async fn asset_screen_preview(state:&SharedState,app:&tauri::AppHandle,instance:&str,library:Option<&str>,id:&str,expected_version:&str,force:bool)->Result<Value,String> {
+    let cached=cached_resource(state,app.clone(),instance.into(),library.map(str::to_owned),id.into(),None,None).await?;
+    let cache_owner=material_cache_owner(instance,library);
+    let instance=cache_owner.as_str();
     material_access_check(state,instance,id)?;
-    let cached=content_cached_resource(app.clone(),instance.into(),id.into(),None,None).await?;
     if !cached["mime"].as_str().unwrap_or("").starts_with("image/") {return Err("CONTENT_PREVIEW_UNAVAILABLE".into());}
     let current=with_db(state,|db|db.asset_version(instance,id))?.ok_or("CONTENT_NOT_CACHED")?;
     if current.is_empty() || current!=expected_version {return Err("CONTENT_VERSION_CHANGED".into());}
@@ -1090,4 +1362,94 @@ pub(crate) async fn asset_screen_preview(state:&SharedState,app:&tauri::AppHandl
     material_access_check(state,instance,id)?;
     if with_db(state,|db|db.asset_version(instance,id))?!=Some(current) {return Err("CONTENT_VERSION_CHANGED".into());}
     Ok(json!({"uri":output.to_string_lossy(),"mime":"image/png","etag":cached["etag"],"w":dims.0,"h":dims.1}))
+}
+
+#[cfg(test)]
+mod saved_library_scope_tests {
+    use super::*;
+
+    fn source(instance: &str, kind: &'static str) -> Source {
+        Source {
+            instance: instance.into(), lifecycle: ConnectionLifecycle::new(), epoch: 0,
+            gateway: GatewayClient::new("fixture", "https://localhost", "fixture"),
+            scope_epochs: scope_epochs(instance).unwrap(), scope_kind: kind, library: None, vault: None,
+            scope_protocol_checked: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    #[test]
+    fn material_cache_namespaces_do_not_alias_same_asset_or_legacy_rows() {
+        let a = material_cache_owner("desktop", Some("library-a"));
+        let b = material_cache_owner("desktop", Some("library-b"));
+        assert_ne!(a, b);
+        assert_ne!(a, material_cache_owner("other-desktop", Some("library-a")));
+        assert_ne!(a, material_cache_owner("desktop", None));
+        assert_eq!(material_cache_owner("desktop", None), "desktop");
+        let mut db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        for (owner, name) in [(&a, "A"), (&b, "B")] {
+            db.upsert_asset(owner, "same-asset", name, "image", "image/png", 1, "now", name, name, "", &[]).unwrap();
+            db.content_cache_response(owner, "/v1/assets/same-asset", &json!({"name":name})).unwrap();
+            db.set_thumbnail(owner, "same-asset", name, name, "image/png", 1, 1).unwrap();
+        }
+        assert_eq!(db.content_cached_response(&a, "/v1/assets/same-asset").unwrap()["name"], "A");
+        assert_eq!(db.content_cached_response(&b, "/v1/assets/same-asset").unwrap()["name"], "B");
+        assert_eq!(db.thumbnail_meta(&a, "same-asset").unwrap().unwrap().path, "A");
+        assert_eq!(db.thumbnail_meta(&b, "same-asset").unwrap().unwrap().path, "B");
+        db.content_cache_response(&a, "/v1/assets/same-asset", &json!({"_mobileAccessError":"CONTENT_HTTP_403"})).unwrap();
+        assert_eq!(db.content_cached_response(&b, "/v1/assets/same-asset").unwrap()["name"], "B");
+    }
+
+    #[tokio::test]
+    async fn library_switch_invalidates_only_captured_owner_and_domain() {
+        let owner = format!("scope-test-{}", uuid::Uuid::new_v4());
+        let material = source(&owner, "material");
+        let knowledge = source(&owner, "knowledge");
+        let other = source("scope-test-other", "all");
+        let lsh = source(&owner, "none");
+        content_scope_changed(owner.clone(), "materials".into()).await.unwrap();
+        assert!(material.scope_changed());
+        assert!(!knowledge.scope_changed());
+        assert!(!other.scope_changed());
+        assert!(!lsh.scope_changed());
+        let new_material = source(&owner, "material");
+        content_scope_changed(owner, "knowledge".into()).await.unwrap();
+        assert!(knowledge.scope_changed());
+        assert!(!new_material.scope_changed());
+        assert!(!lsh.scope_changed());
+    }
+
+    #[test]
+    fn catalog_fallback_is_missing_endpoint_only_not_denial_or_server_failure() {
+        assert_eq!(library_catalog_response(404, json!({})).unwrap()["scopeSelectionVersion"], 0);
+        for status in [401, 403, 409, 410, 429, 500, 503] {
+            assert!(library_catalog_response(status, json!({})).is_err());
+        }
+        assert!(library_catalog_response(200, json!({"scopeSelectionVersion":0})).is_err());
+        assert_eq!(library_catalog_response(200, json!({"scopeSelectionVersion":0,"mode":"legacyDefaultOnly","authorizationMode":"legacy"})).unwrap()["scopeSelectionVersion"], 0);
+        assert!(!legacy_scope_catalog(200, &json!({"scopeSelectionVersion":1,"materials":[],"knowledge":[]})));
+        assert!(legacy_vault_matches(Some("a"), &json!({"items":[{"vaultId":"a"}]})));
+        assert!(!legacy_vault_matches(Some("b"), &json!({"items":[{"vaultId":"a"}]})));
+        assert!(!legacy_vault_matches(Some("a"), &json!({"items":[]})));
+        assert_eq!(library_catalog_response(200, json!({"scopeSelectionVersion":1,"materials":[],"knowledge":[]})).unwrap()["scopeSelectionVersion"], 1);
+    }
+
+    #[test]
+    fn switching_vaults_never_migrates_existing_operation_ids_or_payloads() {
+        let mut db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        for vault in ["a", "b"] {
+            db.content_vault_remember("desktop", vault, vault).unwrap();
+            db.content_create("desktop", vault, "same-note", vault, "saved").unwrap();
+        }
+        let a = db.content_prepare_available_operations("desktop", "a", Some(false)).unwrap().pop().unwrap();
+        let b = db.content_prepare_available_operations("desktop", "b", Some(false)).unwrap().pop().unwrap();
+        assert_ne!(a.payload["opId"], b.payload["opId"]);
+        assert_eq!(a.payload["vaultId"], "a");
+        assert_eq!(b.payload["vaultId"], "b");
+        db.offline_select("desktop", "b", true).unwrap();
+        db.offline_current("desktop", "b", true).unwrap();
+        db.offline_current("desktop", "a", true).unwrap();
+        let again = db.content_prepare_available_operations("desktop", "a", Some(true)).unwrap().pop().unwrap();
+        assert_eq!(a.payload, again.payload);
+        assert_eq!(a.route, again.route);
+    }
 }

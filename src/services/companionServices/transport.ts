@@ -16,6 +16,8 @@
 export type ServicesRequest = {
   /** Bound to the Desktop instance the caller proved before the send. */
   instance: string;
+  library?: string;
+  vault?: string;
   /** Canonical operation id (operations.json), used for diagnostics only. */
   operationId: string;
   method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
@@ -32,11 +34,14 @@ export type ServicesRequest = {
 };
 
 export type ServicesResponse = {
+  /** Parsed by the pinned native response boundary; bounded by retry policy. */
+  retryAfterMs?: number;
   status: number;
   body: unknown;
 };
 
 export type ServicesTransport = {
+  invalidate?: (instance?: string, scope?: Readonly<{library?: string; vault?: string}>) => void;
   request: (req: ServicesRequest) => Promise<ServicesResponse>;
 };
 

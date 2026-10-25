@@ -25,10 +25,10 @@ test('old prefetch receipt cannot suppress a newer canonical revision',async()=>
 
 test('automatic image bytes and version are enforced natively without reducing manual budget',()=>{const s=read('src-tauri/src/content.rs');assert(s.includes('max_bytes.unwrap_or(4*1024*1024*1024)'));assert(s.includes('start.saturating_add(length) > byte_limit'));assert(s.includes('start.saturating_add(received) > byte_limit'));assert(s.includes('v!=&asset_version'));const ui=read('src/still/StillAsset.tsx');assert(ui.includes('contentAssetFile(owner,assetId,jobId,32*1024*1024,version)'));assert(ui.includes('if (!pageCurrent || !pageVisible'));});
 
-test('system bar JNI contract agrees on two booleans and keeps the bridge in release',()=>{
+test('system bar JNI contract agrees on two booleans plus resolved RGB and keeps the bridge in release',()=>{
  const kotlin=read('scripts/android-src/DeviceBridge.kt'),rust=read('src-tauri/src/device.rs');
- assert.match(kotlin,/fun setSystemBarAppearance\(dark: Boolean, dimmed: Boolean\)/);
- assert(rust.includes('"setSystemBarAppearance", "(ZZ)V", &[dark.into(), dimmed.into()]'));
+ assert.match(kotlin,/fun setSystemBarAppearance\(dark: Boolean, dimmed: Boolean, statusRgb: Int, navigationRgb: Int\)/);
+ assert(rust.includes('"setSystemBarAppearance", "(ZZII)V", &[dark.into(), dimmed.into(), status_rgb.into(), navigation_rgb.into()]'));
  assert(read('scripts/apply-android-patches.sh').includes('-keep class com.luckyray.mobile.DeviceBridge { *; }'));
  assert(read('scripts/check-apk-bridges.py').includes('"DeviceBridge": ["gmsAvailable", "moveTaskToBack", "setSystemBarAppearance"]'));
 });

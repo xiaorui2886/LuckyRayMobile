@@ -25,6 +25,7 @@ export class LocalNoteAutosaveCoordinator {
 
   private latestSnapshot: NoteSnapshot;
   private editGen = 0;
+  private baselineEpoch = 0;
   private lastSavedGen = 0;
 
   /** The single shared drain. Every flush() caller joins this promise; it is null
@@ -141,16 +142,16 @@ export class LocalNoteAutosaveCoordinator {
   private async runDrainLoop(): Promise<boolean> {
     while (this.editGen > this.lastSavedGen) {
       const genToSave = this.editGen;
+      const epochToSave = this.baselineEpoch;
       const snapshotToSave = { ...this.latestSnapshot };
 
       this.setStatus("saving");
 
       try {
         await this.saveFn(snapshotToSave);
-        // Only advance the saved generation when no resetBase() happened mid-save
-        // (resetBase sets editGen to 0, which is always < genToSave). This prevents a
-        // stale completion from breaking the editGen/lastSavedGen invariant.
-        if (this.editGen >= genToSave) {
+        // Generations restart on hydration. A receipt from the previous
+        // baseline must not certify an equal-numbered edit after reset.
+        if (epochToSave === this.baselineEpoch && this.editGen >= genToSave) {
           this.lastSavedGen = genToSave;
         }
 
@@ -176,6 +177,7 @@ export class LocalNoteAutosaveCoordinator {
       this.debounceTimer = null;
     }
     this.latestSnapshot = { ...snapshot };
+    this.baselineEpoch += 1;
     this.editGen = 0;
     this.lastSavedGen = 0;
     this.setStatus("saved");

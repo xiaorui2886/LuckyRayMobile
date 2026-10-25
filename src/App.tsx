@@ -1,5 +1,6 @@
-import { systemBarScrim, systemBarUpdater } from "./services/systemBarAppearance";
-import { useCallback, useEffect, useSyncExternalStore, useState } from "react";
+import { foregroundConnection } from "./services/foregroundConnection";
+import { observeSystemBarAppearance } from "./services/systemBarAppearance";
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onBackButtonPress } from "@tauri-apps/api/app";
 import { api, type ConnState } from "./services/client";
@@ -16,7 +17,10 @@ import { StillHealthRecovery } from "./still/StillSettings";
 
 export { navigation };
 export type { Tab };
-const knowledgeLiveSync = new KnowledgeLiveSync(knowledgeChangeFeed, () => syncCoordinator.wake(), knowledgePermissionsChanged);
+const knowledgeLiveSync = new KnowledgeLiveSync(knowledgeChangeFeed, () => syncCoordinator.wake(), (instance, revision) => {
+  knowledgePermissionsChanged(instance, revision);
+  syncCoordinator.authorizationChanged(instance);
+});
 
 export default function App() {
   const [conn, setConn] = useState<ConnState | null>(null);
@@ -50,9 +54,12 @@ export default function App() {
   );
   void route; // the Still shell subscribes to the same authority itself
 
+  const connectionRead = useRef(0);
   const refresh = useCallback(async () => {
+    const read = ++connectionRead.current;
     try {
       const c = await api.connState();
+      if (read !== connectionRead.current) return;
       setConn(c);
       if (c.ws) setWs(c.ws);
     } catch {
@@ -70,6 +77,7 @@ export default function App() {
 
   useEffect(() => {
     if (!conn?.paired || ws.state !== "connected") return;
+    syncCoordinator.authorizationChanged(conn.identity?.instanceId || "");
     syncCoordinator.trigger();
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") syncCoordinator.trigger();
@@ -82,14 +90,7 @@ export default function App() {
   // 连接电脑 and tap 重新连接. Idempotent on the Rust side (already-running
   // returns immediately; an explicit 断开连接 is honoured and never
   // overridden; an unpaired device does nothing).
-  const resumeConnection = useCallback(async () => {
-    try {
-      await api.connResume();
-    } catch {
-      /* transport/runtime unavailable — the manual 重新连接 action remains */
-    }
-    void refresh();
-  }, [refresh]);
+  const resumeConnection = useMemo(() => foregroundConnection(api.connResume, refresh), [refresh]);
 
   useEffect(() => {
     let un1: (() => void) | undefined, un2: (() => void) | undefined, unShare: (() => void) | undefined, unFocus: (() => void) | undefined;
@@ -117,6 +118,8 @@ export default function App() {
       // the WebView was ready and got lost. Re-ingest is idempotent by share
       // digest, so a focus-triggered sweep closes that gap safely.
       unFocus = await listen("tauri://focus", async () => {
+        window.dispatchEvent(new Event("luckyray:foreground"));
+        void resumeConnection();
         await ingestShares();
         setInboxTick((t) => t + 1);
       });
@@ -126,12 +129,12 @@ export default function App() {
       void resumeConnection();
       // Official Android back-button handling (Tauri 2).
       unBack = await onBackButtonPress(() => {
-        // A note editor with unsaved work consumes BACK first (same contract
-        // as before — it preventDefaults and runs its own guarded exit).
-        if (!window.dispatchEvent(new Event("luckyray:desktop-note-back", {cancelable: true}))) return;
-        // A modal sheet/dialog consumes BACK before any navigation: closing the
-        // overlay is always the least surprising result.
+        // A preview or sheet must consume BACK before the note's guarded exit.
+        // Otherwise a read-only image preview navigates out of the note and
+        // unmounts the dialog before its registered dismisser can run.
         if (overlayStack.dismissTop()) return;
+        // With no overlay, retain the note's save-before-navigation guard.
+        if (!window.dispatchEvent(new Event("luckyray:desktop-note-back", {cancelable: true}))) return;
         // MATERIAL-LIBRARY-INSTANT-R1 R7 (三): an active multi-select consumes
         // BACK before any navigation — exiting the selection is less surprising
         // than leaving the page. When no selection is active the event is not
@@ -150,6 +153,7 @@ export default function App() {
     // before the WebView was ready. Idempotent by share digest.
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
+        window.dispatchEvent(new Event("luckyray:foreground"));
         void ingestShares();
         setInboxTick((t) => t + 1);
         // M3-M1 R2: a phone returning to the foreground (or waking from a
@@ -158,6 +162,8 @@ export default function App() {
         void resumeConnection();
       }
     };
+    const onNativeForeground = () => { void resumeConnection(); };
+    window.addEventListener("luckyray:foreground", onNativeForeground);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       un1?.();
@@ -167,6 +173,7 @@ export default function App() {
       unBack?.unlisten?.();
       unDataCommit();
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("luckyray:foreground", onNativeForeground);
     };
   }, [refresh, resumeConnection]);
 
@@ -311,18 +318,7 @@ export default function App() {
   // appearance in sync with the color mode (light -> light bar with dark
   // icons; dark -> dark bar with light icons). Presentation only — the
   // approved native inset geometry is never touched here.
-  useEffect(() => {
-    const updater = systemBarUpdater(api.setSystemBarAppearance);
-    const apply = () => {
-      const dark = document.documentElement.dataset.theme === "dark";
-      updater.request(dark, systemBarScrim.active());
-    };
-    apply();
-    const observer = new MutationObserver(apply);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-    const release = systemBarScrim.subscribe(apply);
-    return () => { release(); observer.disconnect(); updater.dispose(); };
-  }, []);
+  useEffect(() => observeSystemBarAppearance(api.setSystemBarAppearance), []);
 
   // Android System WebView 83 does not reliably scroll a nested flex scroller
   // when an IME focuses an input, even with ADJUST_RESIZE.  Bring any editor

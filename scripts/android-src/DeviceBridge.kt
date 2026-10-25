@@ -3,6 +3,7 @@ package com.luckyray.mobile
 import android.app.Activity
 import android.content.Context
 import android.graphics.Color
+import kotlin.math.roundToInt
 import androidx.core.view.WindowInsetsControllerCompat
 
 /**
@@ -46,24 +47,29 @@ object DeviceBridge {
      *  (用户问题1). Presentation only — applySystemBarInsets() geometry and
      *  IME math in MainActivity are untouched. */
     @JvmStatic
-    fun setSystemBarAppearance(dark: Boolean, dimmed: Boolean) {
+    fun setSystemBarAppearance(dark: Boolean, dimmed: Boolean, statusRgb: Int, navigationRgb: Int) {
         val activity = appActivity ?: return
         activity.runOnUiThread {
             WindowInsetsControllerCompat(activity.window, activity.window.decorView).apply {
                 isAppearanceLightStatusBars = !dark
                 isAppearanceLightNavigationBars = !dark
             }
-            val base = if (dark) Color.rgb(9, 9, 11) else Color.rgb(247, 247, 244)
-            val scrim = if (dark) Color.BLACK else Color.rgb(19, 23, 21)
-            val alpha = if (!dimmed) 0f else if (dark) 0.42f else 0.25f
-            fun blend(a: Int, b: Int) = (a * (1f - alpha) + b * alpha).toInt()
-            val status = Color.rgb(blend(Color.red(base), Color.red(scrim)),
+            val base = if (dark) Color.rgb(10, 10, 12) else Color.rgb(241, 242, 245)
+            val scrim = if (dark) Color.rgb(3, 3, 5) else Color.rgb(29, 31, 40)
+            val alpha = if (!dimmed) 0f else if (dark) 0.64f else 0.30f
+            fun blend(a: Int, b: Int) = (a * (1f - alpha) + b * alpha).roundToInt()
+            val fallbackStatus = Color.rgb(blend(Color.red(base), Color.red(scrim)),
                 blend(Color.green(base), Color.green(scrim)), blend(Color.blue(base), Color.blue(scrim)))
+            // Web CSS supplies the already-composited opaque color, including
+            // live fade opacity and nested sheets. NEVER dim this color again.
+            fun opaque(rgb: Int) = rgb or (0xff shl 24)
+            val status = if (statusRgb in 0..0xffffff) opaque(statusRgb) else fallbackStatus
+            val navigation = if (navigationRgb in 0..0xffffff) opaque(navigationRgb) else base
             // The decor paints the status-bar inset on edge-to-edge Android.
             // The bottom sheet remains undimmed, as does its navigation bar.
             activity.window.decorView.setBackgroundColor(status)
             activity.window.statusBarColor = status
-            activity.window.navigationBarColor = base
+            activity.window.navigationBarColor = navigation
         }
     }
 }

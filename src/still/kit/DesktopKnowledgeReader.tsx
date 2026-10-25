@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { splitWikiHeading, noteHeadings, resolveNoteHeading } from "./noteHeadings";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import DesktopNotePreview from "../../components/DesktopNotePreview";
 import { api } from "../../services/client";
 import { sessionKnowledge } from "./knowledgeSession";
@@ -6,9 +7,10 @@ import { KnowledgeRelations, relationsStatus, resolveWikiReference, type Relatio
 import type { ReadingFind } from "./NoteReadingContent";
 
 export function DesktopKnowledgeReader(props: {
+  renderEditor?: (follow: (reference: WikiReference) => void, status: (reference: WikiReference) => "resolved" | "missing" | "ambiguous" | "unknown") => ReactNode;
   instance: string; vault: string; note: string; content: string; resources: any[]; panelOnly?: boolean;
-  online: boolean; revision: string; clean: boolean; onNavigate: (noteId: string, isCurrent: () => boolean) => Promise<void>;
-  find?: ReadingFind;
+  online: boolean; revision: string; clean: boolean; onNavigate: (noteId: string, isCurrent: () => boolean, heading?: string) => Promise<void>;
+  find?: ReadingFind; registerOverlay?: (dismiss: () => void) => () => void;
 }) {
   const { instance, vault, note, online, revision, clean } = props;
   const navigation = sessionKnowledge().navigation;
@@ -32,6 +34,11 @@ export function DesktopKnowledgeReader(props: {
     phase: navigation.denied(instance, "relations") ? "denied" as const : online ? "idle" as const : "offline" as const,
     items: [], revision: "" };
   const activeChoice = choice?.requestKey === requestKey ? choice : null;
+  const linkStatus = useCallback((reference: WikiReference) => {
+    if (snapshot.requestKey !== requestKey) return "unknown" as const;
+    const result = resolveWikiReference(snapshot, reference, revision, clean);
+    return result.kind === "resolved" || result.kind === "missing" || result.kind === "ambiguous" ? result.kind : "unknown" as const;
+  }, [snapshot, requestKey, revision, clean]);
   const canNavigate = online && clean && relations.phase === "ready" && Boolean(revision) && relations.revision === revision;
   const backlinks = relations.items.filter(item => item.kind === "backlink");
   const uniqueBacklinks = [...new Map(backlinks.map(item => [item.sourceNoteId, item])).values()];
@@ -69,21 +76,31 @@ export function DesktopKnowledgeReader(props: {
     return () => { alive = false; };
   }, [instance, vault, scopeKey, candidateKey]);
 
-  async function navigate(id: string) {
+  async function navigate(id: string, heading?: string) {
     if (navigateBusy.current) return;
     if (!canNavigate || requestRef.current !== requestKey || scopeRef.current !== scopeKey || !/^[A-Za-z0-9_-]{1,160}$/.test(id)) return;
     navigateBusy.current = true;
     try { await props.onNavigate(id, () => requestRef.current === requestKey && scopeRef.current === scopeKey
-      && navigation.authorityKey(instance, "relations") === authority && !navigation.denied(instance, "relations")); }
+      && navigation.authorityKey(instance, "relations") === authority && !navigation.denied(instance, "relations"), heading); }
     finally { navigateBusy.current = false; }
   }
   function follow(reference: WikiReference) {
+    const target = splitWikiHeading(reference.target);
+    if (!target) { setNotice("标题链接格式无效。"); return; }
+    if (!target.noteTarget && target.heading) {
+      if (!resolveNoteHeading(noteHeadings(props.content), target.heading)) { setNotice("未找到目标标题，正文可能已更新。"); return; }
+      const key = requestKey;
+      setChoice(null); setNotice("");
+      void props.onNavigate(note, () => requestRef.current === key && scopeRef.current === scopeKey, target.heading);
+      return;
+    }
+    // Keep the complete target + line + revision for exact server resolution.
     const result = resolveWikiReference(relations, reference, revision, clean);
     setChoice(null);
-    if (result.kind === "resolved") { setNotice(""); void navigate(result.noteIds[0]); }
+    if (result.kind === "resolved") { setNotice(""); void navigate(result.noteIds[0], target.heading); }
     else if (result.kind === "ambiguous") { setNotice("有多篇同名笔记，请选择要打开的一篇。"); setChoice({ reference, noteIds: result.noteIds, requestKey }); }
     else if (result.kind === "stale") setNotice("正文与电脑端链接版本暂不一致，请同步完成后重试。");
-    else if (result.kind === "missing") setNotice(reference.heading
+    else if (result.kind === "missing") setNotice(target.heading
       ? `电脑尚未解析「${reference.target}」的标题链接。可以在笔记列表中查找目标笔记。`
       : `未找到「${reference.target}」对应的笔记。`);
     else setNotice(relationsStatus(relations.phase));
@@ -93,21 +110,21 @@ export function DesktopKnowledgeReader(props: {
       if (backlink) {
         if (!canNavigate || !uniqueBacklinks.some(item => item.sourceNoteId === id)) return;
       } else if (!activeChoice || !resolveWikiReference(relations, activeChoice.reference, revision, clean).noteIds.includes(id)) return;
-      void navigate(id);
+      void navigate(id, backlink ? undefined : activeChoice ? splitWikiHeading(activeChoice.reference.target)?.heading : undefined);
     }}>
     <strong>{labels[id]?.title || `笔记 ${id}`}</strong>
     <small>{labels[id]?.path || "此电脑知识库中的笔记"}{backlink && ambiguousBacklinks.has(id) ? " · 同名链接，可能引用此笔记" : ""}</small>
   </button>;
   return <>
-    {props.panelOnly ? <section aria-label="此笔记的内部链接">
+    {props.renderEditor ? props.renderEditor(follow, linkStatus) : props.panelOnly ? <section aria-label="此笔记的内部链接">
       <h3 className="st-links-heading">链接到</h3>
       {!clean ? <p className="st-folder-status">修改同步后可打开内部链接。</p> : null}
       {relations.phase === "ready" ? relations.items.filter(item => item.kind === "wikiLink").map((item, index) => item.kind === "wikiLink" ?
         <button type="button" className="st-relation-row" key={index} disabled={!canNavigate}
           onClick={() => follow({ target: item.target, label: item.target, line: item.line, from: 0, to: 0 })}>{item.target}</button> : null) : null}
       {relations.phase === "ready" && !relations.items.some(item => item.kind === "wikiLink") ? <p className="st-folder-status">还没有内部链接。输入 [[笔记名]] 建立链接。</p> : null}
-    </section> : <DesktopNotePreview {...props} onWikiLink={follow} />}
-    {notice && current ? <div className="st-relations-notice" role="status">{notice}
+    </section> : <DesktopNotePreview {...props} wikiStatus={linkStatus} onWikiLink={follow} />}
+    {notice ? <div className="st-relations-notice" role="status">{notice}
       {activeChoice ? <button type="button" onClick={() => { setChoice(null); setNotice(""); }}>取消选择</button> : null}
     </div> : null}
     {activeChoice ? <div className="st-relations-picker" aria-label="选择链接目标">{activeChoice.noteIds.map(id => renderChoice(id))}</div> : null}

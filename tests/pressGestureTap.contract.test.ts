@@ -184,6 +184,6 @@ test("R5b-T9 — both tiles keep the gesture active and only omit the long press
   }
   // The Local source genuinely has no long press (so no multi-select for it).
   const lib = strip(read("src", "still", "StillLibrary.tsx"));
-  assert.match(lib, /onLongPress=\{domain === "desktop" \?/u,
+  assert.match(lib, /onLongPress=\{domain === "desktop" && writeGranted \?/u,
     "the page offers a long press only for the Desktop source");
 });

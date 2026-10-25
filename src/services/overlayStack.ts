@@ -34,6 +34,10 @@ export class OverlayStack {
     return true;
   }
 
+  isOnly(dismiss: () => void): boolean {
+    return this.stack.length === 1 && this.stack[0] === dismiss;
+  }
+
   depth(): number {
     return this.stack.length;
   }

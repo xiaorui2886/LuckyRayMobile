@@ -1,4 +1,12 @@
-import { cmCaretVisibility } from './cmCaretVisibility';
+import {isTableCellComposing,tableStructureHistory} from './tableFocus.ts';
+import { usePreviewHandoff } from './NoteBodyTransition';
+import { cmLivePreview, refreshLivePreview, type PreviewLinkStatus } from './cmLivePreview';
+import type { WikiReference } from '../../../still/kit/knowledgeRelations';
+import './cmLivePreview.css';
+import { cmCaretVisibility, noteScrollNavigation } from './cmCaretVisibility';
+import type { MobileMarkdownInsertion } from './mobileMarkdownInsertions';
+import { runMobileMarkdownInsertion } from './cmMobileMarkdownInsertion';
+import { cmMobileMarkdownInput } from './cmMobileMarkdownInput';
 import { NoteActionIcon } from "./NoteActionIcon";
 // CM6-EDITOR-R1 — the Mobile CM6 body editor adapter.
 //
@@ -23,6 +31,7 @@ import { NoteActionIcon } from "./NoteActionIcon";
 // working via closest(); the imperative handle covers the textarea-style
 // operations the page used through DOM queries.
 
+import { mergeWikiChoices, wikiResourceChoices } from "./wikiCompletion";
 import { cmWikiCompletion, type WikiLoader } from "./cmWikiCompletion";
 import { cmInlineImages, type EditorImageScope } from "./cmInlineImages";
 import { runEditorCommand, type EditorCommand } from "./editorCommands";
@@ -43,6 +52,7 @@ export { authoritativeSync, isAuthoritativeTransactionSet } from "./cmDocumentSy
 const changeListener = new Compartment();
 const assistFeatures = new Compartment();
 const imageFeatures = new Compartment();
+const previewFeatures = new Compartment();
 const appliedSearchTargets = new WeakMap<EditorView, NoteSearchTarget | undefined>();
 const revealedSearchTargets = new WeakMap<EditorView, NoteSearchTarget>();
 
@@ -52,6 +62,7 @@ export type CmEditorHandle = {
   /** The view's CURRENT doc — the page never edits from a stale snapshot. */
   getValue(): string;
   runCommand(command: EditorCommand): boolean;
+  insert(insertion: MobileMarkdownInsertion): boolean;
   getSelection(): CmEditorSelection;
   setSelection(sel: CmEditorSelection): void;
   /** A user-level replace (enters history, triggers onChange exactly once). */
@@ -65,12 +76,17 @@ export type CmEditorHandle = {
   /** The scroller's current scrollTop (scroll snapshot). */
   scrollTop(): number;
   scrollTo(top: number): void;
+  /** Navigate without replacing the retained editor, selection or undo history. */
+  scrollToSource(offset: number): void;
 };
 
 export type MobileCmEditorProps = {
   /** FULL owner scope: sourceKind + instance/vault/note (the retention key). */
   scope: string;
+  registerOverlay?: (dismiss:()=>void)=>()=>void;
   wikiLoader?: WikiLoader;
+  onWikiLink?: (reference: WikiReference) => void;
+  linkStatus?: (reference: WikiReference) => PreviewLinkStatus;
   imageScope?: EditorImageScope;
   assistActive?: boolean;
   sourceMode?: boolean;
@@ -89,11 +105,31 @@ export type MobileCmEditorProps = {
   onDismissSearch?: () => void;
 };
 
+// A title is portalled into the retained editor scroll viewport. Do not
+// reconfigure/hydrate that host while its input owns focus or IME: hiding the
+// pending body would otherwise also hide the live title. Keep only the latest
+// effect and resume at the real blur boundary, without a timer or forced blur.
+function afterTitleEditing(view: EditorView, apply: () => void): () => void {
+  let retired = false;
+  const active = document.activeElement;
+  const title = active instanceof HTMLElement && active.closest('.st-note-heading') && view.dom.contains(active) ? active : null;
+  const resume = () => queueMicrotask(() => { if (!retired && view.dom.isConnected) apply(); });
+  if (title) title.addEventListener('blur', resume, { once: true });
+  else apply();
+  return () => { retired = true; title?.removeEventListener('blur', resume); };
+}
+
 export function MobileCmEditor({
-  scope, wikiLoader, imageScope, sourceMode = false, assistActive = true, value, onChange, placeholderText = "", ariaLabel = "笔记正文", focusRequest, handleRef, search, searchActive = true, onDismissSearch,
+  scope, registerOverlay, wikiLoader, onWikiLink, linkStatus, imageScope, sourceMode = false, assistActive = true, value, onChange, placeholderText = "", ariaLabel = "笔记正文", focusRequest, handleRef, search, searchActive = true, onDismissSearch,
 }: MobileCmEditorProps) {
-  const assistRef = useRef({ wikiLoader, assistActive, imageScope });
-  assistRef.current = { wikiLoader, assistActive, imageScope };
+  const handoff = usePreviewHandoff();
+  const handoffRef = useRef(handoff?.settle); handoffRef.current = handoff?.settle;
+  const handoffWaiting = handoff?.waiting ?? false;
+  const invalidateHandoff = useRef(handoff?.invalidate); invalidateHandoff.current = handoff?.invalidate;
+  const pendingBodyIntent = useRef<NoteBodyFocusRequest | null>(null);
+  const handoffSearch = useRef(search); handoffSearch.current = search;
+  const assistRef = useRef({ wikiLoader, assistActive, imageScope, onWikiLink, linkStatus, registerOverlay });
+  assistRef.current = { wikiLoader, assistActive, imageScope, onWikiLink, linkStatus, registerOverlay };
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   // onChange is read through a ref so the view is created ONCE per scope —
@@ -109,9 +145,9 @@ export function MobileCmEditor({
     if (viewRef.current !== view || !searchActiveRef.current) return;
     const reveal = () => {
       const match = view.state.field(noteSearchField).ranges[view.state.field(noteSearchField).index];
-      if (match) view.dispatch({ effects: EditorView.scrollIntoView(match.from, { y: "center" }) });
+      if (match) view.dispatch({ effects: [noteScrollNavigation.of(null), EditorView.scrollIntoView(match.from, { y: "center" })] });
     };
-    if (view.composing || view.compositionStarted) pendingFind.current = reveal;
+    if (view.composing || view.compositionStarted || isTableCellComposing(view)) pendingFind.current = reveal;
     else reveal();
   };
   const nextMatch = (direction: number) => {
@@ -126,7 +162,7 @@ export function MobileCmEditor({
     };
     // Do not dispatch or move selection during an IME composition. The
     // final composition input settles before the deferred navigation runs.
-    if (view.composing || view.compositionStarted) pendingFind.current = change;
+    if (view.composing || view.compositionStarted || isTableCellComposing(view)) pendingFind.current = change;
     else change();
   };
 
@@ -137,13 +173,15 @@ export function MobileCmEditor({
     if (!host) return;
     const extensions: Extension[] = [
       history(),
+      tableStructureHistory,
       cmCaretVisibility,
       noteSearchField,
+      cmMobileMarkdownInput,
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.lineWrapping,
       cmPlaceholder(placeholderRef.current),
       changeListener.of([]),
-      assistFeatures.of([]), imageFeatures.of([]),
+      assistFeatures.of([]), imageFeatures.of([]), previewFeatures.of([]),
     ];
     const view = acquireCmView(scope, () => new EditorView({
       state: EditorState.create({ doc: value, extensions }),
@@ -162,9 +200,13 @@ export function MobileCmEditor({
       host.appendChild(view.dom);
     }
     restoreCmViewScroll(scope);
-    view.dom.setAttribute("role", "textbox");
-    view.dom.setAttribute("aria-multiline", "true");
+    // The outer editor also owns the title and embedded table controls. A
+    // second textbox role flattens those descendants in Android accessibility.
+    // CM's actual contentDOM remains the labelled, multiline textbox.
+    view.dom.setAttribute("role", "group");
+    view.dom.removeAttribute("aria-multiline");
     view.dom.setAttribute("aria-label", ariaLabel);
+    view.contentDOM.setAttribute("aria-label", ariaLabel);
     const handle = createHandle(view);
     if (handleRef) handleRef.current = handle;
     // The page-level DOM helpers (pageEditorHandle) read it off the host.
@@ -173,7 +215,7 @@ export function MobileCmEditor({
     const settleFind = () => {
       compositionFrame = requestAnimationFrame(() => {
         if (viewRef.current !== view || !searchActiveRef.current) { pendingFind.current = null; return; }
-        if (view.composing || view.compositionStarted) { settleFind(); return; }
+        if (view.composing || view.compositionStarted || isTableCellComposing(view)) { settleFind(); return; }
         const action = pendingFind.current; pendingFind.current = null; action?.();
       });
     };
@@ -182,7 +224,7 @@ export function MobileCmEditor({
       cancelAnimationFrame(compositionFrame);
       pendingFind.current = null;
       view.contentDOM.removeEventListener("compositionend", settleFind);
-      view.dispatch({effects:[assistFeatures.reconfigure([]), imageFeatures.reconfigure([])]});
+      view.dispatch({effects:[assistFeatures.reconfigure([]), imageFeatures.reconfigure([]), previewFeatures.reconfigure([])]});
       teardown(scope, view, viewRef, handleRef);
     };
     // The view is created once per scope; value/placeholder flow through the
@@ -191,25 +233,35 @@ export function MobileCmEditor({
   }, [scope]);
 
   const imageKey = JSON.stringify(imageScope || null);
+  const readiness = useRef<{ preview?: EditorState['doc']; images?: EditorState['doc'] }>({});
+  useLayoutEffect(() => { readiness.current = {}; }, [scope, imageKey, sourceMode]);
+  const reportReady = (view: EditorView, kind: 'preview' | 'images', available = true) => {
+    if (viewRef.current !== view) return;
+    if (!available) { handoffRef.current?.(view, !handoffSearch.current?.query, false); return; }
+    readiness.current[kind] = view.state.doc;
+    if (readiness.current.preview === view.state.doc && (!assistRef.current.imageScope || readiness.current.images === view.state.doc))
+      handoffRef.current?.(view, !handoffSearch.current?.query);
+  };
   useLayoutEffect(() => {
     const view = viewRef.current; if (!view) return;
     let frame = 0, retired = false;
     const configure = () => {
       if (retired || viewRef.current !== view) return;
-      if (view.composing || view.compositionStarted) { frame = requestAnimationFrame(configure); return; }
+      if (view.composing || view.compositionStarted || isTableCellComposing(view)) { frame = requestAnimationFrame(configure); return; }
       const extensions: Extension[] = [];
       if (assistActive && wikiLoader) extensions.push(cmWikiCompletion(async (q,embed) => {
-        if(!embed)return assistRef.current.wikiLoader!(q);
-        const query=q.normalize('NFC').toLocaleLowerCase();
-        const seen=new Set<string>();
-        const items=(assistRef.current.imageScope?.resources||[]).filter(r=>r.status==='resolved' && !seen.has(r.target) && (seen.add(r.target),true) && r.target.normalize('NFC').toLocaleLowerCase().includes(query))
-          .map(r=>({id:r.resourceId,title:r.target.split('/').pop()||r.target,target:r.target,detail:r.target}));
-        return {items:items.slice(0,12),partial:items.length>12};
+        const attachments=wikiResourceChoices(assistRef.current.imageScope?.resources||[],q);
+        if(embed)return {items:attachments.slice(0,12),partial:attachments.length>12};
+        let notes;
+        try { notes=await assistRef.current.wikiLoader!(q); }
+        catch(error) { if(attachments.length)return {items:attachments.slice(0,12),partial:true}; throw error; }
+        return {items:mergeWikiChoices(notes.items,attachments),partial:notes.partial||notes.items.length+attachments.length>12};
       }, () => assistRef.current.assistActive));
       view.dispatch({effects:assistFeatures.reconfigure(extensions)});
     };
-    configure(); return () => { retired = true; cancelAnimationFrame(frame); };
-  }, [scope, assistActive, Boolean(wikiLoader)]);
+    const stopWaiting = afterTitleEditing(view, configure);
+    return () => { retired = true; stopWaiting(); cancelAnimationFrame(frame); };
+  }, [scope, assistActive, Boolean(wikiLoader), imageKey]);
   // Opening a menu only suspends suggestions. Existing image geometry stays
   // mounted; source mode alone removes its rendered decorations.
   useLayoutEffect(() => {
@@ -217,36 +269,84 @@ export function MobileCmEditor({
     let frame = 0, retired = false;
     const configure = () => {
       if (retired || viewRef.current !== view) return;
-      if (view.composing || view.compositionStarted) { frame = requestAnimationFrame(configure); return; }
-      view.dispatch({effects:imageFeatures.reconfigure(imageScope && !sourceMode ? cmInlineImages(imageScope,view.hasFocus) : [])});
+      if (view.composing || view.compositionStarted || isTableCellComposing(view)) { frame = requestAnimationFrame(configure); return; }
+      view.dispatch({effects:imageFeatures.reconfigure(imageScope && !sourceMode ? cmInlineImages(imageScope,view.hasFocus,(editor, available) => { if (!retired) reportReady(editor, 'images', available); }) : [])});
     };
-    configure(); return () => { retired = true; cancelAnimationFrame(frame); };
+    const stopWaiting = afterTitleEditing(view, configure);
+    return () => { retired = true; stopWaiting(); cancelAnimationFrame(frame); };
   }, [scope, imageKey, sourceMode]);
+
+  // Display-only ordinary editing. All source/history/save authority remains
+  // with the retained CodeMirror document; menu state only gates actions.
+  useLayoutEffect(() => {
+    const view = viewRef.current; if (!view) return;
+    let frame = 0, retired = false;
+    const configure = () => {
+      if (retired || viewRef.current !== view) return;
+      if (view.composing || view.compositionStarted || isTableCellComposing(view)) { frame = requestAnimationFrame(configure); return; }
+      invalidateHandoff.current?.();
+      view.dispatch({ effects: previewFeatures.reconfigure(sourceMode ? [] : cmLivePreview({
+        onSettled: (editor, available) => { if (!retired) reportReady(editor, 'preview', available); },
+        enabled: () => viewRef.current === view && assistRef.current.assistActive,
+        registerOverlay: dismiss => assistRef.current.registerOverlay?.(dismiss) || (()=>{}),
+        onWikiLink: reference => assistRef.current.onWikiLink?.(reference),
+        linkStatus: reference => assistRef.current.linkStatus?.(reference) || 'unknown',
+        imageScope,
+      }, view.hasFocus)) });
+      if (sourceMode) queueMicrotask(() => { if (!retired && viewRef.current === view) handoffRef.current?.(view, !handoffSearch.current?.query); });
+    };
+    const stopWaiting = afterTitleEditing(view, configure);
+    return () => { retired = true; stopWaiting(); cancelAnimationFrame(frame); };
+  }, [scope, imageKey, sourceMode]);
+
+  // Link availability changes presentation, not the Markdown parse. Keep the
+  // ready AST/decorations instead of briefly recreating a raw long document.
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (view) view.dispatch({ effects: refreshLivePreview.of(null) });
+  }, [scope, linkStatus]);
 
   // External value application: the SMALLEST diff, no history entry, no echo.
   useLayoutEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    const current = view.state.doc.toString();
-    if (value === current) return; // echo: no transaction at all
-    view.dispatch({
-      changes: documentSyncChange(current, value),
-      annotations: [authoritativeSync.of(true), Transaction.addToHistory.of(false)],
+    return afterTitleEditing(view, () => {
+      const current = view.state.doc.toString();
+      // CM normalizes line endings when constructing its document. Compare and
+      // diff in that same coordinate space; diffing LF against CRLF can create
+      // an extra trailing newline during an otherwise identical hydration.
+      const normalizedValue = value.replace(/\r\n?/g, "\n");
+      if (normalizedValue === current) return; // echo: no transaction at all
+      // Authoritative late hydration/replacement is another first frame. Never
+      // reveal the new raw document while its matching decorations are pending.
+      if (!sourceMode) invalidateHandoff.current?.();
+      view.dispatch({
+        changes: documentSyncChange(current, normalizedValue),
+        annotations: [authoritativeSync.of(true), Transaction.addToHistory.of(false)],
+      });
     });
-  }, [value, scope]);
+  }, [value, scope, sourceMode]);
 
   // Selection-only input entry: no document transaction, history reset or
   // save. Run synchronously in the gesture's commit so mobile keyboards can
   // open. Reattachment/refresh cannot replay a consumed request.
   useLayoutEffect(() => {
     const view = viewRef.current;
-    if (!view || !searchActive || !consumeBodyFocusRequest(focusRequest, scope) || !focusRequest) return;
-    if (view.composing || view.compositionStarted) return;
+    if (!view || !searchActive || !focusRequest || focusRequest.scope !== scope) return;
+    if (pendingBodyIntent.current !== focusRequest) {
+      if (!consumeBodyFocusRequest(focusRequest, scope)) return;
+      pendingBodyIntent.current = focusRequest;
+    }
+    if (view.composing || view.compositionStarted || isTableCellComposing(view)) return;
+    // A validated, deliberate body gesture takes ownership immediately. Do not
+    // keep an invisible focused editor behind the retained reader.
+    if (handoffWaiting) { handoffRef.current?.(view, false); return; }
+    pendingBodyIntent.current = null;
     const offset = editorOffsetAtSource(value, focusRequest.offset);
+    view.focus();
     view.dispatch({ selection: { anchor: Math.min(view.state.doc.length, offset) },
       scrollIntoView: true, annotations: Transaction.addToHistory.of(false) });
-    view.focus();
-  }, [scope, focusRequest, searchActive]);
+  }, [scope, focusRequest, searchActive, handoffWaiting]);
 
   // A new route's query is applied once. Returning to the same retained
   // editor keeps its active match and scroll; fresh body hydration can still
@@ -271,7 +371,7 @@ export function MobileCmEditor({
           revealedSearchTargets.set(view, search); revealMatch(view);
         }
       };
-      if (view.composing || view.compositionStarted) pendingFind.current = apply;
+      if (view.composing || view.compositionStarted || isTableCellComposing(view)) pendingFind.current = apply;
       else apply();
     }
   }, [scope, search, searchActive]);
@@ -314,6 +414,7 @@ function createHandle(view: EditorView): CmEditorHandle {
   return {
     getValue: () => view.state.doc.toString(),
     runCommand: command => runEditorCommand(view, command),
+    insert: insertion => runMobileMarkdownInsertion(view, insertion),
     getSelection: () => {
       const sel = view.state.selection.main;
       return { start: clamp(Math.min(sel.from, sel.to)), end: clamp(Math.max(sel.from, sel.to)) };
@@ -326,7 +427,7 @@ function createHandle(view: EditorView): CmEditorHandle {
     replaceRange: (text, range) => {
       // Preedit can start before the first document change. Neither a format
       // command nor its caller may mutate or force that IME session to end.
-      if (view.composing || view.compositionStarted) return;
+      if (view.composing || view.compositionStarted || isTableCellComposing(view)) return;
       const sel = view.state.selection.main;
       const from = range ? clamp(Math.min(range.start, range.end)) : clamp(Math.min(sel.from, sel.to));
       const to = range ? clamp(Math.max(range.start, range.end)) : clamp(Math.max(sel.from, sel.to));
@@ -339,10 +440,14 @@ function createHandle(view: EditorView): CmEditorHandle {
       });
     },
     focus: () => { view.focus(); },
-    hasFocus: () => view.hasFocus,
-    isComposing: () => Boolean(view.composing),
-    compositionStarted: () => Boolean(view.compositionStarted),
+    hasFocus: () => view.hasFocus || Boolean(view.dom.ownerDocument.activeElement?.matches?.('.cm-lp-table-input') && view.dom.contains(view.dom.ownerDocument.activeElement)),
+    isComposing: () => Boolean(view.composing || isTableCellComposing(view)),
+    compositionStarted: () => Boolean(view.compositionStarted || isTableCellComposing(view)),
     scrollTop: () => view.scrollDOM ? view.scrollDOM.scrollTop : 0,
-    scrollTo: (top) => { if (view.scrollDOM) view.scrollDOM.scrollTop = top; },
+    scrollTo: (top) => { view.dispatch({effects:noteScrollNavigation.of(null)}); if (view.scrollDOM) view.scrollDOM.scrollTop = top; },
+    scrollToSource: (offset) => {
+      if (!Number.isFinite(offset)) return;
+      view.dispatch({ effects: [noteScrollNavigation.of(null), EditorView.scrollIntoView(clamp(Math.trunc(offset)), { y: "start", yMargin: 12 })] });
+    },
   };
 }

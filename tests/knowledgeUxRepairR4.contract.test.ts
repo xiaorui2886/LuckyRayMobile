@@ -50,9 +50,10 @@ test("R4-A2 — per-source scroll survives unmounts on BOTH sources", () => {
   const coll = COLL();
   assert.match(coll, /const rememberedScroll: Record<"local" \| "desktop", number> = \{ local: 0, desktop: 0 \};/u,
     "a module-level per-source scroll store");
-  // The desktop CollectionView feed.
-  assert.match(coll, /scrollTop=\{rememberedScroll\[source\]\}/u, "desktop restores its offset");
-  assert.match(coll, /onScroll=\{\(top\) => \{ rememberedScroll\[source\] = top; \}\}/u, "and captures it");
+  // The desktop CollectionView feed is keyed by instance/vault/directory/query.
+  assert.match(coll, /JSON\.stringify\(\[instanceId, desktop\.vaultId, desktopDirectory, query\.trim\(\)\]\)/u, "scroll cannot leak across scopes");
+  assert.match(coll, /scrollTop=\{desktopScrollByScope\.get\(desktopScrollKey\) \?\? 0\}/u, "desktop restores its offset");
+  assert.match(coll, /onScroll=\{\(top\) => \{ desktopScrollByScope\.set\(desktopScrollKey, top\); \}\}/u, "and captures it");
   // The local scroller.
   const localScroller = coll.slice(coll.indexOf('onScroll={(e) => { rememberedScroll[source] ='));
   assert.ok(localScroller.length > 0, "the local scroller captures its offset too");
@@ -169,8 +170,8 @@ test("R4-B4 — the Rust bulk projection exists and is registered", () => {
 
 test("R4-C1 — ordinary existing-note opens remain editable; search and inline Wiki explicitly read", () => {
   const shell = SHELL();
-  assert.match(shell, /const editable = opts\?\.noteSearch\?\.query \? false : opts\?\.edit !== false;/u,
-    "search is reading; ordinary opens stay editable unless explicitly read");
+  assert.match(shell, /const editable = \(opts\?\.noteSearch\?\.query \|\| opts\?\.noteHeading\) \? false : opts\?\.edit !== false;/u,
+    "search and heading intents are reading; ordinary opens stay editable unless explicitly read");
   assert.match(shell, /detail: \(editable \? NOTE_EDIT_PREFIX : ""\) \+ \(id \|\| ""\)/u,
     "the route carries the edit prefix by default");
   // Ordinary entry points keep their accepted default. #99 deliberately adds
@@ -182,7 +183,7 @@ test("R4-C1 — ordinary existing-note opens remain editable; search and inline 
   ] as const) {
     assert.doesNotMatch(src, /open\("note",[^)]*edit: false/u, `${file} never forces read mode`);
   }
-  assert.match(read("src", "still", "StillNote.tsx"), /open\("note", noteId, \{ edit: false, linked: true \}\)/u,
+  assert.match(read("src", "still", "StillNote.tsx"), /open\("note", routeFor\(noteId\), \{ edit: false, linked: true, noteHeading: targetHeading \? \{ fragment: targetHeading \} : undefined \}\)/u,
     "local Wiki enters the stable target as reading, retaining the source");
 });
 
@@ -192,7 +193,9 @@ test("R4-C2 — 新建笔记 creates once and enters edit directly, no intermedi
   assert.match(branch, /creatingNoteRef\.current/u, "a single-flight owner");
   assert.match(branch, /if \(creatingNoteRef\.current\) return;/u, "a second tap is a no-op");
   assert.match(branch, /api\.localNoteAdd\("新笔记", "", \[\]\)/u, "ONE local create");
-  assert.match(branch, /NOTE_EDIT_PREFIX \+ \(note\?\.noteId \|\| ""\)/u, "straight into the new note in edit mode");
+  assert.match(branch, /NOTE_EDIT_PREFIX \+ route/u, "straight into the new note in edit mode");
+  assert.match(branch, /selected \? managedNoteRoute\(selected\.localVaultId, note\.noteId\) : note\.noteId/u, "managed identity remains vault-qualified; legacy identity remains unchanged");
+  assert.match(branch, /managedVault\.create\(selected\.localVaultId, "新笔记", ""\)/u, "the chosen file vault owns new notes after migration");
   assert.match(branch, /creatingNoteRef\.current = false;/u, "the owner releases in finally");
   // The intermediary surface still exists for the restored deep link, but the
   // ordinary flow never routes to it.

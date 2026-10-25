@@ -1,0 +1,4 @@
+.st-note-outline { list-style: none; margin: 0; padding: 0; }
+.st-note-outline button { display: flex; align-items: baseline; gap: 10px; width: 100%; min-height: 48px; padding: 12px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; text-align: start; overflow-wrap: anywhere; }
+.st-note-outline button:active { background: rgba(127,127,127,.12); }
+.st-note-outline-level { flex: 0 0 auto; opacity: .55; font-size: .75em; }

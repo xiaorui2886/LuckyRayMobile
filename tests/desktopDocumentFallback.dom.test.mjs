@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {pathToFileURL} from 'node:url';
+import {readFile,mkdtemp,rm} from 'node:fs/promises';
+import path from 'node:path';
+const require=createRequire(import.meta.url);
+const tools=process.env.LR_DOM_TEST_TOOLS?createRequire(path.join(path.resolve(process.env.LR_DOM_TEST_TOOLS),'__harness__.cjs')):require;
+const {JSDOM}=tools('jsdom');
+const {build}=createRequire(require.resolve('vite/package.json'))('esbuild');
+const repo=path.resolve(import.meta.dirname,'..'),dir=await mkdtemp(path.join(import.meta.dirname,'.document-test-'));
+try{
+ await build({entryPoints:[path.join(repo,'src/still/kit/DesktopDocumentFallback.tsx')],outfile:path.join(dir,'view.mjs'),bundle:true,format:'esm',platform:'node',jsx:'automatic',plugins:[{name:'react-identity',setup(b){b.onResolve({filter:/^(react|react\/jsx-runtime)$/},a=>({path:pathToFileURL(require.resolve(a.path)).href,external:true}));}}]});
+ const dom=new JSDOM('<div id="root"></div>',{url:'https://test.invalid'});
+ for(const key of ['window','document','HTMLElement','MouseEvent'])globalThis[key]=dom.window[key];
+ globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+ const React=await import('react'),{act}=React,{createRoot}=await import('react-dom/client');
+ const {DesktopDocumentFallback}=await import(pathToFileURL(path.join(dir,'view.mjs')));
+ const root=createRoot(document.getElementById('root'));let opens=0;
+ const render=async(props={})=>act(async()=>root.render(React.createElement(DesktopDocumentFallback,{cached:false,busy:false,disabled:false,message:'',onOpen:()=>opens++,...props})));
+ await render();assert.match(document.body.textContent,/暂不支持正文预览/);assert.match(document.body.textContent,/获取并打开原文件/);assert.equal(opens,0,'does not auto-fetch or open documents');
+ await act(async()=>document.querySelector('button').click());assert.equal(opens,1);
+ await render({cached:true});assert.match(document.body.textContent,/原文件已保存到手机/);assert.match(document.querySelector('button').textContent,/打开已缓存文件/);
+ await render({busy:true});assert.equal(document.querySelector('button').disabled,true);assert.match(document.body.textContent,/正在获取原文件/);
+ await render({disabled:true,message:'当前电脑已更换，请返回素材库重新打开。'});await act(async()=>document.querySelector('button').click());assert.equal(opens,1);assert.match(document.querySelector('[role=status]').textContent,/电脑已更换/);
+ await render({message:'未找到可打开此文件的应用。'});assert.match(document.querySelector('[role=status]').textContent,/未找到/);
+ const source=await readFile(path.join(repo,'src/still/StillAsset.tsx'),'utf8');
+ assert.match(source,/\(asset\?\.kind \|\| preview\?\.kind\) === "document" \? <DesktopDocumentFallback/);
+ assert.match(source,/if \(unavailable \|\| ownerMismatch \|\| !asset \|\| busy\) return;/);
+ assert.match(source,/if \(resource\) void scopedApi\.contentOpenResource\(owner, assetId\)/);
+ assert.match(source,/else void load\(\);/);
+ await act(async()=>root.unmount());dom.window.close();console.log('PASS 7 document fallback DOM cases plus exact-source scoped-action wiring. No inline TXT renderer or native opener/device claim.');
+}finally{await rm(dir,{recursive:true,force:true});}

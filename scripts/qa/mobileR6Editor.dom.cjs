@@ -14,7 +14,7 @@ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'luckyray-r6-editor-'));
 let w;
 try {
 const bundle=path.join(temp,'bundle.cjs');
-await esbuild.build({stdin:{contents:`export {EditorState,Compartment} from '@codemirror/state';export {EditorView} from '@codemirror/view';export * from './src/presentation/still01/editor/cmInlineImages';export * from './src/presentation/still01/editor/cmCaretVisibility';export * from './src/presentation/still01/editor/cmWikiCompletion';`,resolveDir:root},bundle:true,platform:'node',format:'cjs',outfile:bundle,plugins:[{name:'native-test-adapters',setup(b){
+await esbuild.build({stdin:{contents:`export {EditorState,Compartment} from '@codemirror/state';export {EditorView} from '@codemirror/view';export * from './src/presentation/still01/editor/cmInlineImages';export * from './src/presentation/still01/editor/cmCaretVisibility';export {tailRevealDelta} from './src/presentation/still01/editor/noteTailClearance';export * from './src/presentation/still01/editor/cmWikiCompletion';`,resolveDir:root},bundle:true,platform:'node',format:'cjs',outfile:bundle,plugins:[{name:'native-test-adapters',setup(b){
 b.onResolve({filter:/services\/client$/},()=>({path:'api',namespace:'test-adapter'}));
 b.onResolve({filter:/^@tauri-apps\/api\/core$/},()=>({path:'core',namespace:'test-adapter'}));
 b.onLoad({filter:/.*/,namespace:'test-adapter'},args=>({contents:args.path==='core'?`export const convertFileSrc=p=>'http://localhost'+p;`:`export const api={contentCachedResource:async()=>({path:'/fake.png',mime:'image/png'}),contentNoteResource:async()=>({path:'/fake.png',mime:'image/png'}),contentCancel:async()=>{}};`,loader:'js'}));
@@ -23,7 +23,7 @@ const d=new JSDOM('<!doctype html><body></body>',{pretendToBeVisual:true,url:'ht
 for(const k of ['Window','window','document','navigator','MutationObserver','Node','HTMLElement','HTMLImageElement','getComputedStyle','DOMRect','Range'])Object.defineProperty(global,k,{value:k==='window'?w:k==='document'?w.document:w[k],configurable:true,writable:true});
 global.requestAnimationFrame=w.requestAnimationFrame.bind(w);global.cancelAnimationFrame=w.cancelAnimationFrame.bind(w);
 w.Range.prototype.getClientRects=()=>[];w.Range.prototype.getBoundingClientRect=()=>new w.DOMRect(0,0,1,20);
-const {EditorState,EditorView,Compartment,cmInlineImages,cmCaretVisibility,caretScrollDelta,cmWikiCompletion}=require(bundle);
+const {EditorState,EditorView,Compartment,cmInlineImages,cmCaretVisibility,tailRevealDelta,cmWikiCompletion}=require(bundle);
 const scope={instance:'i',vault:'v',note:'n',online:false,resources:['a.png','b.png'].map(target=>({target,resourceId:target,status:'resolved',mimeType:'image/png'}))};
 let count=0,failures=0;function check(name,fn){try{fn();console.log('PASS',name);count++}catch(e){failures++;console.error('FAIL',name,e.stack)}}
 function make(doc){const compartment=new Compartment;const v=new EditorView({state:EditorState.create({doc,extensions:[compartment.of(cmInlineImages(scope)),cmCaretVisibility]}),parent:document.body});return [v,compartment]}
@@ -35,7 +35,20 @@ check('composition insertion safely maps replacement decorations',()=>{const[v]=
 check('ordinary image-target links preserve prose instead of replacing it',()=>{const doc='[some important text](a.png)';const[v]=make(doc);assert.equal(v.dom.querySelectorAll('.st-editor-image').length,0);assert(v.contentDOM.textContent.includes('some important text'));assert.equal(v.state.doc.toString(),doc);v.destroy()});
 check('linked thumbnail uses inner image rather than enclosing destination',()=>{const doc='[![thumb](a.png)](b.png)';const[v]=make(doc);const images=v.dom.querySelectorAll('.st-editor-image img');assert.equal(images.length,1);assert.equal(images[0].alt,'a.png');assert(v.contentDOM.textContent.includes('(b.png)'));assert.equal(v.state.doc.toString(),doc);v.destroy()});
 check('markdown reference image and trailing source not destroyed',()=>{const[v]=make('![x][a]\n\n[a]: a.png');assert.equal(v.dom.querySelectorAll('.st-editor-image').length,1);assert(v.state.doc.toString().includes('[a]: a.png'));v.destroy()});
-check('caret delta preserves visible position',()=>{assert.equal(caretScrollDelta(30,50,0,100),0);assert.equal(caretScrollDelta(90,110,0,100),22);assert.equal(caretScrollDelta(0,20,10,100),-18)});
+// Only an explicitly armed, collapsed lower-obscured caret may move. Resize
+// alone is not a navigation request; actual CM input/IME ownership is covered
+// by tests/noteTailCmIntegration.dom.test.mjs in the same workflow lane.
+check('caret delta preserves visible and range positions and bounds occlusion reveal',()=>{
+ const caret=(top,bottom,endBottom=bottom,collapsed=true)=>({top,bottom,endBottom,collapsed});
+ const measuredTailRange=120;
+ assert.equal(tailRevealDelta(caret(30,50),0,100,500,measuredTailRange),0);
+ assert.equal(tailRevealDelta(caret(90,110),0,100,500,measuredTailRange),22);
+ assert.equal(tailRevealDelta(caret(0,20),10,100,500,measuredTailRange),0);
+ assert.equal(tailRevealDelta(caret(90,110,400),0,100,500,measuredTailRange),0,'covered middle caret outside measured tail remains stationary');
+ assert.equal(tailRevealDelta(caret(90,110,110,false),0,100,500,measuredTailRange),0);
+ assert.equal(tailRevealDelta(caret(90,110),0,100,8,measuredTailRange),8);
+ assert.equal(tailRevealDelta(caret(90,99),0,100,500,measuredTailRange),0,'visible comfort-margin caret does not initiate reveal');
+});
 check('active source remains visible after focused image extension reconfigure',()=>{const[v,c]=make('before\n![[a.png]]\nafter');v.focus();v.dispatch({selection:{anchor:10}});assert(v.contentDOM.textContent.includes('![[a.png]]'));v.dispatch({effects:c.reconfigure(cmInlineImages(scope,v.hasFocus))});assert(v.hasFocus);assert(v.contentDOM.textContent.includes('![[a.png]]'),'Active source unexpectedly replaced while editor remains focused');v.destroy()});
 
 // Browser layout is deliberately supplied here; jsdom has no physical IME.
@@ -44,7 +57,7 @@ caretView.focus();caretView.scrollDOM.getBoundingClientRect=()=>new w.DOMRect(0,
 caretView.coordsAtPos=()=>({left:0,right:1,top:90,bottom:110});
 caretView.scrollDOM.scrollTop=0;window.dispatchEvent(new w.Event('resize'));
 await new Promise(r=>setTimeout(r,70));
-check('focused viewport resize reveals caret without changing source or selection',()=>{assert(caretView.scrollDOM.scrollTop>=22);assert.equal(caretView.state.doc.toString(),'line one\nline two');assert.equal(caretView.state.selection.main.head,0)});
+check('focused resize alone preserves viewport, source and selection',()=>{assert.equal(caretView.scrollDOM.scrollTop,0);assert.equal(caretView.state.doc.toString(),'line one\nline two');assert.equal(caretView.state.selection.main.head,0)});
 caretView.contentDOM.blur();caretView.scrollDOM.scrollTop=0;window.dispatchEvent(new w.Event('resize'));
 await new Promise(r=>setTimeout(r,40));
 check('blurred viewport resize does not drag reading position',()=>assert.equal(caretView.scrollDOM.scrollTop,0));caretView.destroy();

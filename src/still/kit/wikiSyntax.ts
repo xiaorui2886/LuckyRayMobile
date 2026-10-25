@@ -1,7 +1,7 @@
 import type { WikiReference } from "./knowledgeRelations.ts";
 import { decodeString } from "micromark-util-decode-string";
+import { markdownSourcePosition } from "./markdownSourcePosition.ts";
 
-type Position = { offset: number; line: number; column: number };
 /** Resolver text only, never a path to open. The Desktop resolves relative
  * ./ and ../ references against the source note and enforces the vault root. */
 export function safeWikiTarget(target: string): boolean {
@@ -12,10 +12,7 @@ function escaped(raw: string, at: number): boolean {
   let count = 0; while (at > 0 && raw[--at] === "\\") count++;
   return count % 2 === 1;
 }
-function position(source: string, at: number): Position {
-  const before = source.slice(0, at), lines = before.split(/\r\n|\r|\n/);
-  return { offset: at, line: lines.length, column: lines[lines.length - 1].length + 1 };
-}
+
 /** Map Markdown-decoded text boundaries back to their exact source atoms.
  * A transformed token is kept literal; neighboring plain tokens still work. */
 export function decodedSource(raw: string, text: string): number[] | null {
@@ -35,6 +32,7 @@ export function decodedSource(raw: string, text: string): number[] | null {
  * every new node preserve accepted reader→editor and editor→reader mapping.
  */
 export function wikiSyntax(source: string, references: Map<string, WikiReference>) {
+  const position = markdownSourcePosition(source);
   return () => (tree: any) => {
     const visit = (node: any) => {
       if (["code", "inlineCode", "html", "link", "linkReference", "image", "imageReference"].includes(node.type) || !Array.isArray(node.children)) return;
@@ -47,7 +45,7 @@ export function wikiSyntax(source: string, references: Map<string, WikiReference
         if (!boundaries) return [child];
         let consumedText = 0, consumedRaw = 0;
         const span = (type: string, value: string, start: number, end: number) => ({ type, value,
-          position: { start: position(source, from + start), end: position(source, from + end) } });
+          position: { start: position(from + start), end: position(from + end) } });
         for (const match of text.matchAll(/!?\[\[([^\]\n\r]+)\]\]/g)) {
           const value = match[0], index = match.index!;
           const at = boundaries[index], end = boundaries[index + value.length];
@@ -59,7 +57,7 @@ export function wikiSyntax(source: string, references: Map<string, WikiReference
           const target = destination.trim(), label = aliases.join("|").trim() || target;
           if (!embed && !safeWikiTarget(target)) continue;
           if (index > consumedText) out.push(span("text", text.slice(consumedText, index), consumedRaw, at));
-          const tokenPosition = { start: position(source, from + at), end: position(source, from + at + value.length) };
+          const tokenPosition = { start: position(from + at), end: position(from + at + value.length) };
           if (embed) out.push({ type: "image", url: target, alt: label, position: tokenPosition });
           else {
             const ref: WikiReference = { target, label, line: tokenPosition.start.line, from: from + at, to: from + at + value.length,

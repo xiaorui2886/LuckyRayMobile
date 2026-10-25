@@ -15,6 +15,7 @@ class MainActivity : TauriActivity() {
   private var mainWebView: WebView? = null
   override fun onResume() {
     super.onResume()
+    LshEmbeddedSurface.resumeFor(this)
     // A content-free lifecycle signal after Wry has resumed the existing
     // WebView. The startup compatibility layer alone handles old-engine jobs;
     // newer engines stay untouched. No reload or new public IPC/eval entry.
@@ -22,7 +23,12 @@ class MainActivity : TauriActivity() {
       mainWebView?.evaluateJavascript("window.dispatchEvent(new Event('lr:main-resume'))", null)
     }
   }
+  override fun onPause() {
+    LshEmbeddedSurface.pause()
+    super.onPause()
+  }
   override fun onDestroy() {
+    LshEmbeddedSurface.destroyFor(this)
     mainWebView = null
     super.onDestroy()
   }
@@ -49,6 +55,7 @@ class MainActivity : TauriActivity() {
     // app-private storage immediately; Rust ingests it via the startup
     // reconcile or the frontend mount-time ingest.
     ShareBridge.init(this)
+    NoteImportBridge.init(this)
     maybeHandleShare(intent)
     // M2.9 material library: warm the thumbnail bridge so the JVM + class
     // GlobalRef are cached before any native-thread JNI call.
@@ -99,6 +106,7 @@ class MainActivity : TauriActivity() {
       // includes the navigation-bar space it covers.
       val bottom = maxOf(safe.bottom, ime.bottom)
       view.setPadding(safe.left, safe.top, safe.right, bottom)
+      LshEmbeddedSurface.imeChanged(windowInsets.isVisible(WindowInsetsCompat.Type.ime()))
       windowInsets
     }
     ViewCompat.requestApplyInsets(content)
@@ -119,6 +127,7 @@ class MainActivity : TauriActivity() {
    * grant diagnostics in ShareBridge). */
   private fun maybeHandleShare(intent: Intent?) {
     ShareBridge.handle(intent)
+    NoteImportBridge.handle(intent)
   }
 
   override fun onWebViewCreate(webView: WebView) {
@@ -129,6 +138,11 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    if (LshEmbeddedSurface.onActivityResult(requestCode, resultCode, data)) return
+    if (requestCode == NoteImportBridge.REQ_NOTE) {
+      NoteImportBridge.result(resultCode, data)
+      return
+    }
     // route capture picker results to the bridge (M2.9 adds the video picker)
     if (requestCode == CaptureBridge.REQ_IMAGE || requestCode == CaptureBridge.REQ_PHOTO
         || requestCode == CaptureBridge.REQ_FILE || requestCode == CaptureBridge.REQ_VIDEO) {

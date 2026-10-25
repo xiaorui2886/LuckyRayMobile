@@ -1,0 +1,6 @@
+/* Keep search at intrinsic height: selection remains its following flex sibling. */
+.st-knowledge-view>.st-collection-top{flex:0 0 auto;padding-bottom:8px}
+
+/* Imported files never force navigation away from an open editor. */
+.st-import-notice{position:absolute;left:var(--st-page-x);right:var(--st-page-x);bottom:calc(var(--st-safe-bottom) + 100px);z-index:70;display:flex;align-items:center;gap:12px;background:var(--st-sheet);border:1px solid var(--st-line);border-radius:12px;padding:8px 12px;font-size:12px}
+.st-import-notice>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.st-import-notice>button{min-height:44px;color:var(--st-accent)}

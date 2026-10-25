@@ -28,6 +28,10 @@ export type ConnTransitionResult = {
 export type NativeVideoReceipt = {reason: string; positionMs: number; durationMs: number; errorCode?: string; firstFrameMs?: number; remoteBytesBeforeFirstFrame?: number; remoteBytes: number; sizeBytes: number; transport: string; completeOffline: boolean; rangeRequests?: number; cacheBytes?: number; format?: {videoMime?: string; audioMime?: string; containerMime?: string; codecs?: string; videoDecoder?: string; audioDecoder?: string; width?: number; height?: number; frameRate?: number; lumaBitdepth?: number; chromaBitdepth?: number; channels?: number; sampleRate?: number; audioAdvancing?: boolean; rangeRetries?: number; playerErrorCode?: number}};
 
 export const api = {
+  managedVaultResourceOpen: (localVaultId: string, noteId: string, target: string, expectedRevision: string) => invoke<{ status: string }>("managed_vault_resource_open", { localVaultId, noteId, target, expectedRevision }),
+  managedVaultResourceGet: (localVaultId: string, noteId: string, target: string, expectedRevision: string) => invoke<{ path: string; mime: string; sha256: string; sizeBytes: number }>("managed_vault_resource_get", { localVaultId, noteId, target, expectedRevision }),
+  contentLibraryCatalog: (instance: string) => invoke<import("./desktopLibraries").DesktopLibraryCatalog>("content_library_catalog", {instance}),
+  contentScopeChanged: (instance: string, kind: "materials" | "knowledge") => invoke<void>("content_scope_changed", {instance, kind}),
   connState: () => invoke<ConnState>("conn_state"),
   connPair: (payload: string) => invoke<unknown>("conn_pair", { payload }),
   connPairFile: (fileName: string) => invoke<unknown>("conn_pair_file", { fileName }),
@@ -44,27 +48,28 @@ export const api = {
    *  to, and Rust fails closed if the live connection has moved on. */
   /** `force` is the bounded decode-failure retry: it drops this exact
    *  owner+asset cache row and refetches, never touching another owner. */
-  assetThumbnail: (instance: string, id: string, force = false, preview = false, version = "") => invoke<{ uri: string; etag: string; mime: string; w: number; h: number }>("asset_thumbnail", { instance, id, force, preview, version }),
+  assetThumbnail: (instance: string, id: string, force = false, preview = false, version = "", library?: string) => invoke<{ uri: string; etag: string; mime: string; w: number; h: number }>("asset_thumbnail", { library, instance, id, force, preview, version }),
   assetFile: (id: string) => invoke<string>("asset_file", { id }),
   contentCapabilities: () => invoke<import("../../shared/companion-content-v1/types").Capabilities>("content_capabilities"),
   /** Every Desktop material read carries the EXPECTED owner instance; the
    *  authority refuses (`CONTENT_SOURCE_CHANGED`) rather than silently reading
    *  whichever Desktop happens to be connected now. */
-  contentAssets: (instance: string, opts: { page: number; limit: number; q?: string; kind?: string; folder?: string; tag?: string }) =>
-    invoke<import("../../shared/companion-content-v1/types").AssetPage>("content_assets", { instance, ...opts }),
-  contentNavigation: (instance: string) => invoke<{ folders: any[]; tags: any[] }>("content_navigation", { instance }),
-  contentAssetDetail: (instance: string, id: string) => invoke<any>("content_asset_detail", { instance, id }),
-  contentAssetFile: (instance: string, id: string, jobId: string, maxBytes?: number, expectedVersion?: string) => invoke<{ path: string; mime: string; etag: string; sizeBytes: number; assetVersion?: string }>("content_asset_file", { instance, id, jobId, ...(maxBytes === undefined ? {} : {maxBytes}), ...(expectedVersion === undefined ? {} : {expectedVersion}) }),
+  contentAssets: (instance: string, opts: { page: number; limit: number; q?: string; kind?: string; folder?: string; tag?: string }, library?: string) =>
+    invoke<import("../../shared/companion-content-v1/types").AssetPage>("content_assets", { library, instance, ...opts }),
+  contentNavigation: (instance: string, library?: string) => invoke<{ folders: any[]; tags: any[] }>("content_navigation", { library, instance }),
+  contentAssetDetail: (instance: string, id: string, library?: string) => invoke<any>("content_asset_detail", { library, instance, id }),
+  contentAssetFile: (instance: string, id: string, jobId: string, maxBytes?: number, expectedVersion?: string, library?: string) => invoke<{ path: string; mime: string; etag: string; sizeBytes: number; assetVersion?: string }>("content_asset_file", { library, instance, id, jobId, ...(maxBytes === undefined ? {} : {maxBytes}), ...(expectedVersion === undefined ? {} : {expectedVersion}) }),
   contentCancel: (jobId: string) => invoke<void>("content_cancel", { jobId }),
-  contentMediaSource: (instance: string, id: string, vault?: string, note?: string) => invoke<{url: string; token: string}>("content_media_source", {instance,id,vault,note}),
+  contentMediaSource: (instance: string, id: string, vault?: string, note?: string, library?: string) => invoke<{url: string; token: string}>("content_media_source", { library,instance,id,vault,note}),
   localAssetMediaSource: (assetId: string) => invoke<{url: string; token: string}>("local_asset_media_source", {assetId}),
   contentMediaRelease: (token: string) => invoke<void>("content_media_release", {token}),
   /** Native playback selects only this owner's complete cache or paired Range
    * source. No Desktop URL, bearer, arbitrary path or partial-cache authority. */
-  contentVideoPlay: (instance: string, id: string, jobId: string, title: string, startPositionMs: number, darkMode = false) =>
-    invoke<NativeVideoReceipt>("content_video_play", {instance, id, jobId, title, startPositionMs, darkMode}),
+  contentVideoPlay: (instance: string, id: string, jobId: string, title: string, startPositionMs: number, darkMode = false, library?: string) =>
+    invoke<NativeVideoReceipt>("content_video_play", { library,instance, id, jobId, title, startPositionMs, darkMode}),
   localAssetVideoPlay: (assetId: string, jobId: string, title: string, startPositionMs: number, darkMode = false) =>
     invoke<NativeVideoReceipt>("local_asset_video_play", {assetId, jobId, title, startPositionMs, darkMode}),
+  contentNoteLocalAttachment: (instance: string, vault: string, note: string, op: string) => invoke<{path: string; mime: string; etag: string}>("content_note_local_attachment", {instance, vault, note, op}),
   contentNoteResource: (instance: string, vault: string, note: string, id: string, jobId: string) => invoke<{path: string; mime: string; etag: string}>("content_note_resource", { instance, vault, note, id, jobId }),
   /**
    * LSH remote surface (Issue #72). `expectedInstance` names the paired
@@ -73,14 +78,23 @@ export const api = {
    * bootstrap path, nor cookies, nor tokens (bound at the Desktop #166
    * integration closure).
    */
+  lshSurfaceEmbed: (request: import("../still/kit/lshEmbedded").LshEmbedRequest) =>
+    invoke<import("../still/kit/lshEmbedded").LshEmbedReceipt>("lsh_surface_embed", request),
   lshSurfaceState: (expectedInstance: string) =>
     invoke<{ granted: boolean; runtimeAvailable: boolean }>("lsh_surface_state", { expectedInstance }),
   lshSurfaceBootstrap: (expectedInstance: string) => invoke<{ sessionUrl: string; expiresAtMs: number; carrierGeneration: number; gatewayGeneration: number }>("lsh_surface_bootstrap", { expectedInstance }),
   lshSurfaceStop: () => invoke<{ stopped: boolean }>("lsh_surface_stop"),
   /** Open the dedicated Android WebView shell for one exact session URL. */
   lshSurfaceOpen: (request: { sessionUrl: string; ownerInstanceId: string; title: string }) => invoke<{ opened: boolean }>("lsh_surface_open", { ...request }),
-  contentCachedResource: (instance: string, id: string, vault?: string, note?: string) => invoke<{path: string; mime: string; etag: string}>("content_cached_resource", { instance, id, vault, note }),
-  contentSync: () => invoke<{ continuation: boolean; pushed: number; applied: number }>("content_sync"),
+  contentCachedResource: (instance: string, id: string, vault?: string, note?: string, library?: string) => invoke<{path: string; mime: string; etag: string}>("content_cached_resource", { library, instance, id, vault, note }),
+  contentSync: (instance?: string, vault?: string) => invoke<{ continuation: boolean; pushed: number; applied: number; pairingReviewRequired?: boolean; warningCode?: string }>("content_sync", {instance,vault}),
+  contentCacheLibraries: () => invoke<import("./knowledgeActions").CacheLibrary[]>("content_cache_libraries"),
+  contentCacheClear: (instance: string, vault: string) => invoke<{clearedCount: number; protectedCount: number; paused: true}>("content_cache_clear", {instance, vault}),
+  localNoteImportPick: () => invoke<{status: "launched"; requestId?: string}>("local_note_import_pick"),
+  localNoteImportPending: () => invoke<{items: import("./knowledgeActions").ImportReceipt[]; hasMore?: boolean}>("local_note_import_pending"),
+  localNoteImportAck: (requestIds: string[]) => invoke<void>("local_note_import_ack", {requestIds}),
+  contentLocalNoteUploadTarget: (instance: string, vault?: string) => invoke<import("./knowledgeActions").UploadTarget>("content_local_note_upload_target", {instance, vault}),
+  contentLocalNoteUpload: (instance: string, vault: string, noteId: string, parent: string) => invoke<{status: "queued" | "alreadySubmitted"; noteId: string; localNoteId: string; instanceId: string; vaultId: string; reused: boolean; transferScope: "titleAndContent"; localMetadataPreserved: true; localOriginalPreserved: true}>("content_local_note_upload", {instance, vault, noteId, parentRelativePath: parent}),
   contentVaults: () => invoke<any[]>("content_vaults"),
   contentReplicaLibraries: (instance: string) => invoke<import("./knowledgeReplica.ts").KnowledgeReplicaLibrary[]>("content_offline_libraries", {instance}),
   contentReplicaNotes: (instance: string, vault: string, q = "", page = 1, directory = "") => invoke<import("./knowledgeReplica.ts").KnowledgeReplicaPage>("content_offline_notes", {instance, vault, q, page, directory}),
@@ -93,16 +107,16 @@ export const api = {
   contentNoteDirectories: (instance: string, vault: string) => invoke<{ directories: string[] }>("content_note_directories", { instance, vault }),
   // Wave A: Desktop material organization (desired-state; Desktop owns truth).
   // Every call requires a connected Desktop and fails truthfully offline.
-  contentMaterialSetFavorite: (instance: string, assetId: string, favorited: boolean) =>
-    invoke<{ desktopAssetId: string; favorited: boolean }>("content_material_set_favorite", { instance, assetId, favorited }),
-  contentMaterialSetTags: (instance: string, assetId: string, patch: { set?: string[]; add?: string[]; remove?: string[] }) =>
-    invoke<{ desktopAssetId: string; tags: string[] }>("content_material_set_tags", { instance, assetId, set: patch.set ?? null, add: patch.add ?? null, remove: patch.remove ?? null }),
-  contentMaterialSetFolder: (instance: string, assetId: string, folderId: string | null) =>
-    invoke<{ desktopAssetId: string; folderId: string | null }>("content_material_set_folder", { instance, assetId, folderId }),
-  contentMaterialCreateTag: (instance: string, name: string, color?: string) =>
-    invoke<{ tag: { id: string; name: string; color?: string | null } }>("content_material_create_tag", { instance, name, color: color ?? null }),
-  contentMaterialCreateFolder: (instance: string, name: string, parentId?: string) =>
-    invoke<{ folder: { id: string; name: string; parentId?: string | null } }>("content_material_create_folder", { instance, name, parentId: parentId ?? null }),
+  contentMaterialSetFavorite: (instance: string, assetId: string, favorited: boolean, library?: string) =>
+    invoke<{ desktopAssetId: string; favorited: boolean }>("content_material_set_favorite", { library, instance, assetId, favorited }),
+  contentMaterialSetTags: (instance: string, assetId: string, patch: { set?: string[]; add?: string[]; remove?: string[] }, library?: string) =>
+    invoke<{ desktopAssetId: string; tags: string[] }>("content_material_set_tags", { library, instance, assetId, set: patch.set ?? null, add: patch.add ?? null, remove: patch.remove ?? null }),
+  contentMaterialSetFolder: (instance: string, assetId: string, folderId: string | null, library?: string) =>
+    invoke<{ desktopAssetId: string; folderId: string | null }>("content_material_set_folder", { library, instance, assetId, folderId }),
+  contentMaterialCreateTag: (instance: string, name: string, color?: string, library?: string) =>
+    invoke<{ tag: { id: string; name: string; color?: string | null } }>("content_material_create_tag", { library, instance, name, color: color ?? null }),
+  contentMaterialCreateFolder: (instance: string, name: string, parentId?: string, library?: string) =>
+    invoke<{ folder: { id: string; name: string; parentId?: string | null } }>("content_material_create_folder", { library, instance, name, parentId: parentId ?? null }),
   /**
    * Batch organization. `folderChange` is an explicit PRESENCE signal: false
    * sends no folderId at all (leave the folder unchanged), true sends
@@ -112,11 +126,11 @@ export const api = {
   contentMaterialBatch: (instance: string, input: {
     assetIds: string[]; favorited?: boolean; add?: string[]; remove?: string[];
     folderChange: boolean; folderId?: string | null;
-  }) =>
+  }, library?: string) =>
     invoke<{ requested: number; succeeded: string[]; failed: { desktopAssetId: string; reason: string }[]; atomic: false }>(
       "content_material_batch",
       {
-        instance,
+        library, instance,
         assetIds: input.assetIds,
         favorited: input.favorited ?? null,
         add: input.add ?? null,
@@ -141,7 +155,7 @@ export const api = {
   contentNoteDelete: (instance: string, vault: string, id: string) => invoke<void>("content_note_delete", { instance, vault, id }),
   contentNoteResolve: (instance: string, vault: string, id: string, copy: boolean) => invoke<string | null>("content_note_resolve", { instance, vault, id, copy }),
   contentNoteAttach: (instance: string, vault: string, id: string, kind: "image" | "photo" | "file") => invoke<any>("content_note_attach", { instance, vault, id, kind }),
-  contentOpenResource: (instance: string, id: string, vault?: string, note?: string) => invoke<any>("content_open_resource", {instance, id, vault, note}),
+  contentOpenResource: (instance: string, id: string, vault?: string, note?: string, library?: string) => invoke<any>("content_open_resource", { library,instance, id, vault, note}),
   notesList: () => invoke<any[]>("notes_list"),
   noteGet: (id: string) => invoke<any>("note_get", { id }),
   noteRefresh: (id: string) => invoke<any>("note_refresh", { id }),
@@ -173,6 +187,7 @@ export const api = {
   // Local Knowledge / Notes (M2.8) — Mobile-local durable notes, works with zero Desktop.
   localNoteList: (opts: { folder?: string; q?: string; tag?: string; pinned?: boolean; favorite?: boolean; archived?: boolean; page?: number; limit?: number; sort?: "recent" | "name" }) =>
     invoke<{ items: any[]; total: number; hasMore: boolean }>("local_note_list", opts),
+  localNoteLinkCatalog: () => invoke<{ items: { noteId: string; title: string; folder: string; historicalNames: string[] }[] }>("local_note_link_catalog"),
   localNoteFolders: () => invoke<{ paths: string[] }>("local_note_folders"),
   localNoteCreateFolder: (name: string, parent = "") => invoke<{ path: string }>("local_note_create_folder", { name, parent }),
   localNoteSetFolder: (noteId: string, folder: string) => invoke<any>("local_note_set_folder", { noteId, folder }),
@@ -254,10 +269,36 @@ export const api = {
    * used ONLY by the root Back fallback. No process kill. */
   moveTaskToBack: () => invoke<boolean>("move_task_to_back"),
   /** INTERACTION-CLOSURE-R1: system-bar visual appearance follows color mode. */
-  setSystemBarAppearance: (dark: boolean, dimmed = false) => invoke<boolean>("set_system_bar_appearance", { dark, dimmed }),
+  setSystemBarAppearance: (dark: boolean, dimmed = false, statusRgb?: number, navigationRgb?: number) => invoke<boolean>("set_system_bar_appearance", { dark, dimmed, statusRgb, navigationRgb }),
   qrScan: (timeoutMs: number) => invoke<string>("qr_scan", { timeoutMs }),
   qrCancel: () => invoke<string>("qr_cancel"),
   dbHealth: () => invoke<{ ok: boolean; schemaVersion: number; expectedVersion: number; tablesOk: boolean }>("db_health"),
   dbExportDiagnostics: () => invoke<string>("db_export_diagnostics"),
   dbResetFull: () => invoke<string>("db_reset_full"),
 };
+
+/** Immutable route/request-bound material API. Do not pass a mutable selection getter. */
+export function materialApi(library: string | undefined, writeGranted = true) {
+  const bind = <A extends unknown[], R>(fn: (...args: [...A, string?]) => R, arity: number, write = false) => (...args: A): R => {
+    if (write && !writeGranted) return Promise.reject(new Error("LIBRARY_READ_ONLY")) as R;
+    const fixed = [...args]; while (fixed.length < arity) fixed.push(undefined);
+    return fn(...[...fixed, library] as unknown as [...A, string?]);
+  };
+  return {
+    assetThumbnail: bind(api.assetThumbnail, 5),
+    contentAssets: bind(api.contentAssets, 2),
+    contentNavigation: bind(api.contentNavigation, 1),
+    contentAssetDetail: bind(api.contentAssetDetail, 2),
+    contentAssetFile: bind(api.contentAssetFile, 5),
+    contentMediaSource: bind(api.contentMediaSource, 4),
+    contentVideoPlay: bind(api.contentVideoPlay, 6),
+    contentCachedResource: bind(api.contentCachedResource, 4),
+    contentMaterialSetFavorite: bind(api.contentMaterialSetFavorite, 3, true),
+    contentMaterialSetTags: bind(api.contentMaterialSetTags, 3, true),
+    contentMaterialSetFolder: bind(api.contentMaterialSetFolder, 3, true),
+    contentMaterialCreateTag: bind(api.contentMaterialCreateTag, 3, true),
+    contentMaterialCreateFolder: bind(api.contentMaterialCreateFolder, 3, true),
+    contentMaterialBatch: bind(api.contentMaterialBatch, 2, true),
+    contentOpenResource: bind(api.contentOpenResource, 4),
+  };
+}

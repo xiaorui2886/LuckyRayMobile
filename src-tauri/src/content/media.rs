@@ -6,10 +6,11 @@ use std::{collections::HashMap, path::PathBuf, sync::{Arc, atomic::{AtomicBool, 
 use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::{Mutex, OnceCell, Semaphore}};
 
 enum MediaSource { Cached(PathBuf), Remote(Arc<stream::Remote>) }
-struct Lease { source: MediaSource, mime: String, expires: Instant, live: AtomicBool }
+struct Lease { source: MediaSource, mime: String, expires: Instant, live: AtomicBool, scope: Option<Box<dyn Fn() -> Result<(), String> + Send + Sync>> }
 impl Lease {
     fn check(&self) -> Result<(), String> {
         if !self.live.load(Ordering::Acquire) || self.expires <= Instant::now() { return Err("MEDIA_EXPIRED".into()); }
+        if let Some(check) = &self.scope { check()?; }
         if let MediaSource::Remote(remote) = &self.source { remote.check()?; }
         Ok(())
     }
@@ -43,7 +44,14 @@ pub(super) async fn issue_stream(source: super::Source, state: crate::SharedStat
     let client = source.gateway.media_client_req()?;
     let url = format!("{}/v1/assets/{id}/file", source.gateway.base_url());
     let authorization = source.gateway.ws_authorization().parse().map_err(|_| "MEDIA_UNAVAILABLE")?;
-    issue_remote(stream::Authority {client, url, authorization, check: Arc::new(move || {
+    let source = Arc::new(source);
+    let response_source = source.clone();
+    issue_remote(stream::Authority {client, url, authorization,
+        response_check: Arc::new(move |response| match response {
+            Some(response) => response_source.gateway.check_scope_response(response),
+            None => { response_source.gateway.retire_scope_proof(); Err("MEDIA_OFFLINE".into()) }
+        }),
+        check: Arc::new(move || {
         if cancelled.load(Ordering::Acquire) { return Err("CONTENT_CANCELLED".into()); }
         source.check(&state)
     })}).await
@@ -93,6 +101,21 @@ pub(super) async fn issue(path: PathBuf, mime: String) -> Result<serde_json::Val
     register(MediaSource::Cached(path), mime).await
 }
 
+pub(super) async fn issue_scoped(path: PathBuf, mime: String, source: super::Source, state: crate::SharedState) -> Result<serde_json::Value, String> {
+    if !mime.starts_with("video/") && !mime.starts_with("audio/") { return Err("MEDIA_TYPE_UNSUPPORTED".into()); }
+    if mime.contains(['\r','\n']) { return Err("MEDIA_TYPE_UNSUPPORTED".into()); }
+    let server = server().await?;
+    source.check(&state)?;
+    let mut leases = server.leases.lock().await;
+    leases.retain(|_, lease| { let keep = lease.check().is_ok(); if !keep { lease.stop(); } keep });
+    if leases.len() >= 64 { return Err("MEDIA_BUSY".into()); }
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    leases.insert(token.clone(), Arc::new(Lease { source: MediaSource::Cached(path), mime,
+        expires: Instant::now() + Duration::from_secs(7200), live: AtomicBool::new(true),
+        scope: Some(Box::new(move || source.check(&state))) }));
+    Ok(serde_json::json!({"token":token,"url":format!("http://127.0.0.1:{}/media/{token}",server.port)}))
+}
+
 async fn register(source: MediaSource, mime: String) -> Result<serde_json::Value, String> {
     let server = server().await?;
     register_on(server, source, mime).await
@@ -103,13 +126,20 @@ async fn register_on(server: &Arc<Server>, source: MediaSource, mime: String) ->
     leases.retain(|_, lease| { let keep = lease.check().is_ok(); if !keep { lease.stop(); } keep });
     if leases.len() >= 64 { return Err("MEDIA_BUSY".into()); }
     let token = uuid::Uuid::new_v4().simple().to_string();
-    leases.insert(token.clone(), Arc::new(Lease { source, mime, expires: Instant::now() + Duration::from_secs(7200), live: AtomicBool::new(true) }));
+    leases.insert(token.clone(), Arc::new(Lease { source, mime, expires: Instant::now() + Duration::from_secs(7200), live: AtomicBool::new(true), scope: None }));
     Ok(serde_json::json!({"token":token,"url":format!("http://127.0.0.1:{}/media/{token}",server.port)}))
 }
 
 pub(super) async fn release(token: &str) {
     if let Some(server) = SERVER.get() {
         if let Some(lease) = server.leases.lock().await.remove(token) { lease.stop(); }
+    }
+}
+
+pub(super) async fn prune_retired() {
+    if let Some(server) = SERVER.get() {
+        let mut leases = server.leases.lock().await;
+        leases.retain(|_, lease| { let keep = lease.check().is_ok(); if !keep { lease.stop(); } keep });
     }
 }
 
@@ -312,6 +342,7 @@ mod tests {
         stream::Authority {
             client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap(),
             url: fixture.url.clone(), authorization: "Bearer synthetic-only".parse().unwrap(),
+            response_check: Arc::new(|_| Ok(())),
             check: Arc::new(move || if live.load(Ordering::Acquire) == 7 {Ok(())} else {Err("CONTENT_SOURCE_CHANGED".into())}),
         }
     }
@@ -460,6 +491,7 @@ mod tests {
         let grant = issue_remote(stream::Authority {
             client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap(),
             url: fixture.url.clone(), authorization: "Bearer synthetic-only".parse().unwrap(),
+            response_check: Arc::new(|_| Ok(())),
             check: Arc::new(move || if live.load(Ordering::Acquire) == 7 {Ok(())} else {Err("CONTENT_SOURCE_CHANGED".into())}),
         }).await.unwrap();
         let url = grant["url"].as_str().unwrap(); let client = reqwest::Client::new();

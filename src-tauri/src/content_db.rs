@@ -7,6 +7,7 @@ pub(crate) mod offline;
 pub(crate) enum NoteOperationRoute {
     Content,
     KnowledgeCreateUnique,
+    KnowledgeImportPlanned,
 }
 
 impl NoteOperationRoute {
@@ -14,6 +15,7 @@ impl NoteOperationRoute {
         match self {
             Self::Content => "content",
             Self::KnowledgeCreateUnique => "knowledgeCreateUnique",
+            Self::KnowledgeImportPlanned => "knowledgeImportPlanned",
         }
     }
 
@@ -21,6 +23,7 @@ impl NoteOperationRoute {
         match value {
             "content" => Ok(Self::Content),
             "knowledgeCreateUnique" => Ok(Self::KnowledgeCreateUnique),
+            "knowledgeImportPlanned" => Ok(Self::KnowledgeImportPlanned),
             _ => Err("CONTENT_OPERATION_ROUTE_INVALID".into()),
         }
     }
@@ -120,20 +123,16 @@ fn apply_document(db: &Connection, instance: &str, vault: &str, doc: &Value) -> 
     if id.is_empty() || text(doc, "vaultId") != vault {
         return Err("CONTENT_DOCUMENT_INVALID".into());
     }
-    let existing_vault: Option<String> = db
-        .query_row(
-            "SELECT vault_id FROM note_cache WHERE desktop_instance_id=?1 AND note_id=?2",
-            params![instance, id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(fail)?;
-    if existing_vault
-        .as_deref()
-        .is_some_and(|existing| !existing.is_empty() && existing != vault)
-    {
-        return Err("CONTENT_DOCUMENT_INVALID".into());
+    // Equal note IDs in different saved vaults are independent rows. The
+    // incoming vault is already checked above; never adopt or retarget another
+    // vault's cached draft, pending operation or body baseline.
+    // Cleared body scopes remain metadata-only even when an old sync/read
+    // completes later. Dirty/conflicting/local data are never suppressed.
+    let mut retained = doc.clone();
+    if offline::cache_suppress_body(db, instance, vault, id)? {
+        if let Some(object) = retained.as_object_mut() { object.remove("content"); }
     }
+    let doc = &retained;
     let deleted = doc["deleted"] == true;
     // A tombstone carries no body either; it deletes the note, so it must not
     // be mistaken for an unprovable summary (the recoverable text is kept by
@@ -156,7 +155,7 @@ fn apply_document(db: &Connection, instance: &str, vault: &str, doc: &Value) -> 
     let doc = doc;
     db.execute("INSERT INTO note_cache(desktop_instance_id,note_id,vault_id,title,relative_path,content,revision,updated_at,server_document,cached_document,deleted)
         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
-        ON CONFLICT(desktop_instance_id,note_id) DO UPDATE SET
+        ON CONFLICT(desktop_instance_id,vault_id,note_id) DO UPDATE SET
         server_document=excluded.server_document,
         title=CASE WHEN note_cache.dirty=0 THEN excluded.title ELSE note_cache.title END,
         relative_path=excluded.relative_path,
@@ -241,12 +240,49 @@ pub(crate) fn content_note_move_receipt(
     "deleted": false,
     // deliberately NO "content": a move receipt is metadata-only.
     });
-    apply_document(&db.conn, instance, vault, &doc)
+    crate::managed_vault_sync::recover(&db.conn)?;
+    let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+    apply_document(&tx, instance, vault, &doc)?;
+    crate::managed_vault_sync::commit(tx, instance, vault)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_attachment_projection_survives_edit_receipt_and_reopen_with_exact_scope() {
+        let mut db = fixture();
+        db.content_apply_batch("desktop-a", "vault-a", &[document("r1", "body")], 1, None).unwrap();
+        let staged = db.content_stage_attachment("desktop-a", "vault-a", "kn-a", "upload-a", "same.jpg", "image/jpeg", "private-source", 3, "digest").unwrap();
+        assert_eq!(staged["localAttachments"][0]["opId"], "upload-a");
+        assert!(staged["localAttachments"][0].get("path").is_none());
+        assert!(staged["localAttachments"][0].get("localPath").is_none());
+        let epoch = db.content_begin_edit("desktop-a", "vault-a", "kn-a").unwrap()["editorEpoch"].as_i64().unwrap();
+        let saved = db.content_edit_observed("desktop-a", "vault-a", "kn-a", "title", text(&staged,"content"), epoch, 1, Some("r1")).unwrap();
+        assert_eq!(saved["localAttachments"], staged["localAttachments"]);
+        let receipt = json!({"publication":{"markdown":"![[attachments/same.jpg]]"}});
+        db.content_attachment_receipt("desktop-a", "wrong-vault", "kn-a", "upload-a", &receipt).unwrap();
+        assert!(db.content_note("desktop-a", "vault-a", "kn-a").unwrap()["localAttachments"][0]["publicationMarkdown"].is_null());
+        db.content_attachment_receipt("desktop-a", "vault-a", "kn-a", "upload-a", &receipt).unwrap();
+        let reopened = db.content_note("desktop-a", "vault-a", "kn-a").unwrap();
+        assert_eq!(reopened["localAttachments"][0]["publicationMarkdown"], "![[attachments/same.jpg]]");
+        assert!(text(&reopened,"content").contains("![[attachments/same.jpg]]"));
+        assert!(db.content_local_attachment_file("desktop-b", "vault-a", "kn-a", "upload-a").is_err());
+        assert!(db.content_local_attachment_file("desktop-a", "vault-b", "kn-a", "upload-a").is_err());
+        assert!(db.content_local_attachment_file("desktop-a", "vault-a", "kn-b", "upload-a").is_err());
+        assert!(db.content_local_attachment_file("desktop-a", "vault-a", "kn-a", "upload-b").is_err());
+        assert!(db.content_local_attachment_file("desktop-a", "vault-a", "kn-a", "upload-a").is_ok());
+        for index in 0..256 {
+            db.content_stage_attachment("desktop-a", "vault-a", "kn-a", &format!("extra-{index}"), "same.jpg", "image/jpeg", "private-source", 3, "digest").unwrap();
+        }
+        let many = db.content_note("desktop-a", "vault-a", "kn-a").unwrap();
+        assert_eq!(many["localAttachments"].as_array().unwrap().len(), 257);
+        assert_eq!(many["localAttachments"][256]["opId"], "extra-255");
+        db.conn.execute("UPDATE note_cache SET deleted=1 WHERE note_id='kn-a'", []).unwrap();
+        assert!(db.content_local_attachment_file("desktop-a", "vault-a", "kn-a", "upload-a").is_err());
+        assert!(db.content_note("desktop-a", "vault-a", "kn-a").unwrap().get("localAttachments").is_none());
+    }
+
     fn fixture() -> Db {
         let mut db = Db {
             conn: Connection::open_in_memory().unwrap(),
@@ -483,6 +519,73 @@ mod tests {
     }
     fn document(rev: &str, content: &str) -> Value {
         json!({"noteId":"kn-a","vaultId":"vault-a","title":"原笔记","relativePath":"目录/原笔记.md","revision":rev,"content":content})
+    }
+
+    fn refresh_document(revision: &str, content: &str) -> Value {
+        let mut value = document(revision, content);
+        value["resources"] = json!([]);
+        value
+    }
+
+    #[test]
+    fn direct_refresh_delayed_before_ack_cannot_roll_back_clean_body_or_ack_proof() {
+        let mut db = fixture();
+        db.content_apply_batch("desktop-a", "vault-a", &[document("r1", "old")], 1, None).unwrap();
+        let epoch = db.content_begin_edit("desktop-a", "vault-a", "kn-a").unwrap()["editorEpoch"].as_i64().unwrap();
+        let expected = db.content_note_cached("desktop-a", "vault-a", "kn-a").unwrap();
+        db.content_edit_observed("desktop-a", "vault-a", "kn-a", "原笔记", "B", epoch, 1, Some("r1")).unwrap();
+        let op = db.content_prepare_operations("desktop-a", "vault-a").unwrap().remove(0);
+        db.content_ack("desktop-a", "vault-a", "kn-a", op["opId"].as_str().unwrap(), &document("r2", "B")).unwrap();
+        let before = db.content_note("desktop-a", "vault-a", "kn-a").unwrap();
+        let cursor = db.content_sync_position("desktop-a", "vault-a").unwrap();
+        assert!(!db.content_refresh_adopt("desktop-a", "vault-a", "kn-a", &expected, &refresh_document("r1", "old")).unwrap());
+        assert_eq!(db.content_note("desktop-a", "vault-a", "kn-a").unwrap(), before);
+        assert_eq!(db.content_sync_position("desktop-a", "vault-a").unwrap(), cursor);
+        db.content_edit_observed("desktop-a", "vault-a", "kn-a", "原笔记", "B + next", epoch, 2, Some("r1")).unwrap();
+        assert_eq!(db.content_prepare_operations("desktop-a", "vault-a").unwrap()[0]["expectedRevision"], "r2");
+    }
+
+    #[test]
+    fn direct_refresh_rejects_changed_draft_epoch_and_newer_observation() {
+        for change in ["draft", "epoch", "observation"] {
+            let mut db = fixture();
+            db.content_apply_batch("desktop-a", "vault-a", &[document("r1", "old")], 1, None).unwrap();
+            let epoch = db.content_begin_edit("desktop-a", "vault-a", "kn-a").unwrap()["editorEpoch"].as_i64().unwrap();
+            let expected = db.content_note_cached("desktop-a", "vault-a", "kn-a").unwrap();
+            match change {
+                "draft" => { db.content_edit("desktop-a", "vault-a", "kn-a", "原笔记", "draft", epoch, 1).unwrap(); },
+                "epoch" => { db.content_begin_edit("desktop-a", "vault-a", "kn-a").unwrap(); },
+                _ => { db.content_apply_batch("desktop-a", "vault-a", &[document("r3", "newer")], 3, None).unwrap(); },
+            }
+            let before = db.content_note("desktop-a", "vault-a", "kn-a").unwrap();
+            assert!(!db.content_refresh_adopt("desktop-a", "vault-a", "kn-a", &expected, &refresh_document("r2", "delayed")).unwrap());
+            assert_eq!(db.content_note("desktop-a", "vault-a", "kn-a").unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn direct_refresh_unchanged_row_adopts_empty_body_without_cursor_change() {
+        let mut db = fixture();
+        db.content_apply_batch("desktop-a", "vault-a", &[document("r1", "old")], 1, None).unwrap();
+        let expected = db.content_note_cached("desktop-a", "vault-a", "kn-a").unwrap();
+        let cursor = db.content_sync_position("desktop-a", "vault-a").unwrap();
+        assert!(db.content_refresh_adopt("desktop-a", "vault-a", "kn-a", &expected, &refresh_document("r2", "")).unwrap());
+        let note = db.content_note("desktop-a", "vault-a", "kn-a").unwrap();
+        assert_eq!(note["content"], "");
+        assert_eq!(note["revision"], "r2");
+        assert_eq!(db.content_sync_position("desktop-a", "vault-a").unwrap(), cursor);
+    }
+
+    #[test]
+    fn direct_refresh_rejects_foreign_document_without_mutation() {
+        let mut db = fixture();
+        db.content_apply_batch("desktop-a", "vault-a", &[document("r1", "old")], 1, None).unwrap();
+        let expected = db.content_note_cached("desktop-a", "vault-a", "kn-a").unwrap();
+        for field in ["vaultId", "noteId"] {
+            let mut foreign = refresh_document("r2", "wrong"); foreign[field] = json!("foreign");
+            assert!(db.content_refresh_adopt("desktop-a", "vault-a", "kn-a", &expected, &foreign).is_err());
+            assert_eq!(db.content_note_cached("desktop-a", "vault-a", "kn-a").unwrap(), expected);
+        }
     }
 
     #[test]
@@ -1997,7 +2100,7 @@ mod tests {
     }
 
     #[test]
-    fn deleted_note_stops_attachment_publication_and_cross_vault_ids_fail_closed() {
+    fn deleted_note_stops_attachment_publication_and_equal_ids_are_vault_scoped() {
         let mut db = fixture();
         db.content_apply_batch(
             "desktop-a",
@@ -2039,7 +2142,7 @@ mod tests {
         other["vaultId"] = json!("vault-b");
         assert!(db
             .content_apply_batch("desktop-a", "vault-b", &[other], 2, None)
-            .is_err());
+            .is_ok());
         assert!(text(
             &db.content_note("desktop-a", "vault-a", "kn-a").unwrap(),
             "content"
@@ -2528,6 +2631,16 @@ pub(crate) fn is_clean_vault_relative(path: &str) -> bool {
 }
 
 impl Db {
+    pub(crate) fn content_pairing_review(&self, instance: &str, vault: &str) -> Result<(), String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
+        let parked: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM note_cache n JOIN app_meta m ON m.key='content.pairing-review.v1:' || json_array(n.desktop_instance_id,n.vault_id,n.note_id) WHERE n.desktop_instance_id=?1 AND n.vault_id=?2 AND n.dirty=1)", params![instance,vault], |r| r.get(0)).map_err(fail)?;
+        if parked { Err("CONTENT_PAIRING_REVIEW_REQUIRED".into()) } else { Ok(()) }
+    }
+
+    pub(crate) fn content_resource_authority(&self) -> Result<i64, String> {
+        Ok(self.conn.query_row("SELECT CAST(value AS INTEGER) FROM app_meta WHERE key='content.resource.authority.v1'", [], |r| r.get(0)).optional().map_err(fail)?.unwrap_or(0))
+    }
+
     pub(crate) fn content_cache_response(
         &self,
         instance: &str,
@@ -2560,6 +2673,7 @@ impl Db {
         size: u64,
         hash: &str,
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -2570,7 +2684,7 @@ impl Db {
         if count != 1 {
             return Err("CONTENT_NOTE_UNAVAILABLE".into());
         }
-        tx.commit().map_err(fail)?;
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
         self.content_note(instance, vault, id)
     }
 
@@ -2585,6 +2699,7 @@ impl Db {
         vault: &str,
         ids: &[String],
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let bounded: Vec<&str> = ids.iter().map(|s| s.as_str()).take(100).collect();
         let mut items = Vec::with_capacity(bounded.len());
         for id in &bounded {
@@ -2629,9 +2744,10 @@ impl Db {
         instance: &str,
         vault: &str,
     ) -> Result<Vec<Value>, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let mut statement=self.conn.prepare("SELECT a.note_id,a.op_id,a.file_name,a.mime,a.local_path,a.size_bytes,a.sha256,a.manifest,COALESCE(n.cached_document, n.server_document)
             FROM content_note_attachment a JOIN note_cache n ON n.desktop_instance_id=a.desktop_instance_id AND n.vault_id=a.vault_id AND n.note_id=a.note_id
-            WHERE a.desktop_instance_id=?1 AND a.vault_id=?2 AND a.receipt IS NULL AND n.deleted=0 AND n.pending_kind!='delete' AND n.conflict_document IS NULL AND n.server_document IS NOT NULL ORDER BY a.op_id LIMIT 16").map_err(fail)?;
+            WHERE a.desktop_instance_id=?1 AND a.vault_id=?2 AND a.receipt IS NULL AND NOT EXISTS(SELECT 1 FROM app_meta m WHERE m.key='content.pairing-review.v1:' || json_array(a.desktop_instance_id,a.vault_id,a.note_id)) AND n.deleted=0 AND n.pending_kind!='delete' AND n.conflict_document IS NULL AND n.server_document IS NOT NULL ORDER BY a.op_id LIMIT 16").map_err(fail)?;
         let rows=statement.query_map(params![instance,vault],|r|{
             let manifest:Option<String>=r.get(7)?;let server:String=r.get(8)?;
             Ok(json!({"noteId":r.get::<_,String>(0)?,"opId":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"mime":r.get::<_,String>(3)?,"localPath":r.get::<_,String>(4)?,"sizeBytes":r.get::<_,u64>(5)?,"sha256":r.get::<_,String>(6)?,
@@ -2646,8 +2762,12 @@ impl Db {
         op: &str,
         manifest: &Value,
     ) -> Result<(), String> {
-        self.conn.execute("UPDATE content_note_attachment SET manifest=?3 WHERE desktop_instance_id=?1 AND op_id=?2 AND manifest IS NULL",params![instance,op,manifest.to_string()]).map_err(fail)?;
-        Ok(())
+        crate::managed_vault_sync::recover(&self.conn)?;
+        let vault:Option<String>=self.conn.query_row("SELECT vault_id FROM content_note_attachment WHERE desktop_instance_id=?1 AND op_id=?2",params![instance,op],|r|r.get(0)).optional().map_err(fail)?;
+        let Some(vault)=vault else{return Ok(());};
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        tx.execute("UPDATE content_note_attachment SET manifest=?3 WHERE desktop_instance_id=?1 AND op_id=?2 AND manifest IS NULL",params![instance,op,manifest.to_string()]).map_err(fail)?;
+        crate::managed_vault_sync::commit(tx,instance,&vault)
     }
 
     pub(crate) fn content_attachment_receipt(
@@ -2658,6 +2778,7 @@ impl Db {
         op: &str,
         receipt: &Value,
     ) -> Result<(), String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let markdown = receipt["publication"]["markdown"]
             .as_str()
             .ok_or("CONTENT_ATTACHMENT_RECEIPT_INVALID")?;
@@ -2665,12 +2786,12 @@ impl Db {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(fail)?;
-        let count=tx.execute("UPDATE content_note_attachment SET receipt=?3,uploaded_bytes=size_bytes WHERE desktop_instance_id=?1 AND op_id=?2 AND receipt IS NULL",params![instance,op,receipt.to_string()]).map_err(fail)?;
+        let count=tx.execute("UPDATE content_note_attachment SET receipt=?3,uploaded_bytes=size_bytes WHERE desktop_instance_id=?1 AND op_id=?2 AND vault_id=?4 AND note_id=?5 AND receipt IS NULL AND EXISTS(SELECT 1 FROM note_cache n WHERE n.desktop_instance_id=?1 AND n.vault_id=?4 AND n.note_id=?5 AND n.deleted=0)",params![instance,op,receipt.to_string(),vault,id]).map_err(fail)?;
         if count == 1 {
             let marker = format!("![附件待同步](luckyray-attachment:{op})");
             tx.execute("UPDATE note_cache SET content=replace(content,?4,?5),dirty=1,draft_generation=draft_generation+1 WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",params![instance,vault,id,marker,markdown]).map_err(fail)?;
         }
-        tx.commit().map_err(fail)
+        crate::managed_vault_sync::commit(tx, instance, vault)
     }
 
     pub(crate) fn content_vault_remember(
@@ -2679,6 +2800,7 @@ impl Db {
         vault: &str,
         name: &str,
     ) -> Result<(), String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         self.conn.execute("INSERT INTO content_vault_cache(desktop_instance_id,vault_id,name) VALUES(?1,?2,?3)
             ON CONFLICT(desktop_instance_id,vault_id) DO UPDATE SET name=excluded.name", params![instance,vault,name]).map_err(fail)?;
         Ok(())
@@ -2696,7 +2818,32 @@ impl Db {
         vault: &str,
         id: &str,
     ) -> Result<Value, String> {
-        self.conn.query_row(&format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3"), params![instance,vault,id], note_value).map_err(fail)
+        crate::managed_vault_sync::recover(&self.conn)?;
+        let mut value = self.conn.query_row(&format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3"), params![instance,vault,id], note_value).map_err(fail)?;
+        // Phone-owned bytes remain available before AND after upload. Do not
+        // expose draft paths or substitute these for the server document.
+        if value["deleted"] != true {
+            value["localAttachments"] = json!(self.content_local_attachments(instance, vault, id)?);
+        }
+        crate::managed_vault_sync::read_body(&self.conn, instance, vault, id, &mut value)?;
+        Ok(value)
+    }
+
+    pub(crate) fn content_local_attachments(&self, instance: &str, vault: &str, id: &str) -> Result<Vec<Value>, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
+        let mut statement = self.conn.prepare("SELECT op_id,file_name,mime,sha256,receipt FROM content_note_attachment WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3 ORDER BY rowid").map_err(fail)?;
+        let rows = statement.query_map(params![instance,vault,id], |r| {
+            let receipt: Option<String> = r.get(4)?;
+            let receipt = receipt.and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
+            Ok(json!({"opId":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"mimeType":r.get::<_,String>(2)?,"version":r.get::<_,String>(3)?,"publicationMarkdown":receipt["publication"]["markdown"]}))
+        }).map_err(fail)?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(fail)
+    }
+
+    /// Native-only lookup. No caller-provided filesystem path or target alias.
+    pub(crate) fn content_local_attachment_file(&self, instance: &str, vault: &str, id: &str, op: &str) -> Result<Value,String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
+        self.conn.query_row("SELECT a.local_path,a.mime,a.size_bytes,a.sha256 FROM content_note_attachment a JOIN note_cache n ON n.desktop_instance_id=a.desktop_instance_id AND n.vault_id=a.vault_id AND n.note_id=a.note_id WHERE a.desktop_instance_id=?1 AND a.vault_id=?2 AND a.note_id=?3 AND a.op_id=?4 AND n.deleted=0", params![instance,vault,id,op], |r| Ok(json!({"path":r.get::<_,String>(0)?,"mime":r.get::<_,String>(1)?,"sizeBytes":r.get::<_,u64>(2)?,"sha256":r.get::<_,String>(3)?}))).map_err(|_| "CONTENT_NOT_CACHED".into())
     }
 
     /// R4 (B): a bounded LOCAL-ONLY bulk projection of preview fields
@@ -2710,6 +2857,7 @@ impl Db {
         vault: &str,
         ids: &[String],
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let bounded: Vec<&str> = ids.iter().map(|s| s.as_str()).take(100).collect();
         let mut items = Vec::with_capacity(bounded.len());
         for id in &bounded {
@@ -2740,7 +2888,7 @@ impl Db {
                 },
             );
             match row {
-                Ok(v) => items.push(v),
+                Ok(mut v) => { crate::managed_vault_sync::read_body(&self.conn,instance,vault,id,&mut v)?; items.push(v); },
                 Err(rusqlite::Error::QueryReturnedNoRows) => {}
                 Err(other) => return Err(fail(other)),
             }
@@ -2757,6 +2905,7 @@ impl Db {
         page: u32,
         directory: &str,
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         // A0-2: vault-relative directory prefix filter. Backslashes are
         // normalized on write; a defensive drive-prefix strip keeps any legacy
         // absolute path from ever becoming a directory label.
@@ -2781,6 +2930,7 @@ impl Db {
         let mut items = rows.collect::<Result<Vec<_>, _>>().map_err(fail)?;
         let more = items.len() > 50;
         items.truncate(50);
+        for item in &mut items { let id=text(item,"noteId").to_owned(); crate::managed_vault_sync::read_body(&self.conn,instance,vault,&id,item)?; }
         Ok(json!({"items": items, "hasMore": more, "page": page}))
     }
 
@@ -2791,6 +2941,7 @@ impl Db {
         instance: &str,
         vault: &str,
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let mut statement = self.conn.prepare(
             "SELECT DISTINCT replace(relative_path,'\\','/') FROM note_cache              WHERE desktop_instance_id=?1 AND vault_id=?2 AND deleted=0 AND pending_kind!='delete'",
         )
@@ -2832,6 +2983,7 @@ impl Db {
         vault: &str,
         id: &str,
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let count = self.conn.execute("UPDATE note_cache SET editor_epoch=editor_epoch+1,editor_generation=0 WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3", params![instance,vault,id]).map_err(fail)?;
         if count == 0 {
             return Err("CONTENT_NOTE_NOT_CACHED".into());
@@ -2855,6 +3007,7 @@ impl Db {
     /// epoch, operation or draft that changed during the GET. No cursor writes.
     pub(crate) fn content_prefetch_adopt(&mut self, instance: &str, vault: &str, id: &str,
         expected: &Option<Value>, document: &Value) -> Result<bool, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         if text(document,"noteId") != id || text(document,"vaultId") != vault
             || document["deleted"] == true || !document["content"].is_string()
             || !document["resources"].is_array() || !document["title"].is_string()
@@ -2864,9 +3017,35 @@ impl Db {
         let current = tx.query_row(
             &format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3"),
             params![instance,vault,id], note_value).optional().map_err(fail)?;
-        let adopt = &current == expected && Self::content_prefetch_eligible(&current);
+        let adopt = !offline::cache_paused(&tx, instance, vault)? && &current == expected && Self::content_prefetch_eligible(&current);
         if adopt { apply_document(&tx,instance,vault,document)?; }
-        tx.commit().map_err(fail)?;
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
+        Ok(adopt)
+    }
+
+    /// A direct refresh is a read, not authority to roll back a newer local
+    /// observation. Compare the exact row captured before its network await.
+    /// Rejected responses leave draft, ACK proof, attachments and cursor intact.
+    pub(crate) fn content_refresh_adopt(
+        &mut self, instance: &str, vault: &str, id: &str,
+        expected: &Option<Value>, document: &Value,
+    ) -> Result<bool, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
+        if text(document, "noteId") != id || text(document, "vaultId") != vault
+            || document["deleted"] == true || !document["content"].is_string()
+            || !document["resources"].is_array() || text(document, "revision").is_empty()
+        { return Err("CONTENT_DOCUMENT_INVALID".into()); }
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        let current = tx.query_row(
+            &format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3"),
+            params![instance, vault, id], note_value).optional().map_err(fail)?;
+        let adopt = &current == expected;
+        if adopt {
+            offline::cache_allow_reader(&tx, instance, vault, id)?;
+            apply_document(&tx, instance, vault, document)?;
+            offline::remember(&tx, instance, vault, document)?;
+        }
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
         Ok(adopt)
     }
 
@@ -2876,10 +3055,13 @@ impl Db {
         vault: &str,
         id: &str,
     ) -> Result<Option<Value>, String> {
-        self.conn.query_row(
+        crate::managed_vault_sync::recover(&self.conn)?;
+        let mut value = self.conn.query_row(
             &format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3"),
             params![instance,vault,id], note_value,
-        ).optional().map_err(fail)
+        ).optional().map_err(fail)?;
+        if let Some(value) = &mut value { crate::managed_vault_sync::read_body(&self.conn, instance, vault, id, value)?; if let Some(o)=value.as_object_mut(){o.remove("bodyState");o.remove("editable");} }
+        Ok(value)
     }
 
     /// Adopt a cold detail response only while the row is STILL absent.
@@ -2893,6 +3075,7 @@ impl Db {
         id: &str,
         document: &Value,
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         if text(document, "noteId") != id || text(document, "vaultId") != vault
             || document["deleted"] == true
             || document.get("deleted").is_some_and(|value| !value.is_boolean())
@@ -2913,14 +3096,11 @@ impl Db {
             params![instance, vault, id], note_value,
         ).optional().map_err(fail)?;
         if existing.is_none() {
+            offline::cache_allow_reader(&tx, instance, vault, id)?;
             apply_document(&tx, instance, vault, document)?;
         }
-        let note = tx.query_row(
-            &format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3"),
-            params![instance, vault, id], note_value,
-        ).map_err(fail)?;
-        tx.commit().map_err(fail)?;
-        Ok(note)
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
+        self.content_note(instance, vault, id)
     }
 
     pub(crate) fn content_edit(
@@ -2933,6 +3113,7 @@ impl Db {
         epoch: i64,
         generation: i64,
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         self.content_edit_observed(instance, vault, id, title, content, epoch, generation, None)
     }
 
@@ -2940,6 +3121,7 @@ impl Db {
         &self, instance: &str, vault: &str, id: &str, title: &str, content: &str,
         epoch: i64, generation: i64, displayed_revision: Option<&str>,
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         // A late renderer edit may still contain an upload marker that was
         // resolved while typing. Reapply durable receipts before saving it.
         let mut content = content.to_owned();
@@ -2978,9 +3160,8 @@ impl Db {
         if count != 1 {
             return Err("CONTENT_EDITOR_CHANGED".into());
         }
-        let note = tx.query_row(&format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3"), params![instance,vault,id], note_value).map_err(fail)?;
-        tx.commit().map_err(fail)?;
-        Ok(note)
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
+        self.content_note(instance, vault, id)
     }
 
     pub(crate) fn content_create(
@@ -2991,6 +3172,7 @@ impl Db {
         title: &str,
         content: &str,
     ) -> Result<(), String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         self.content_create_in(instance, vault, id, title, content, "")
     }
 
@@ -3009,6 +3191,7 @@ impl Db {
         content: &str,
         parent_relative_path: &str,
     ) -> Result<(), String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let parent = parent_relative_path.replace(MIRROR_SEP, "/");
         if !parent.trim().is_empty() && !is_clean_vault_relative(&parent) {
             return Err("CONTENT_PATH_INVALID".into());
@@ -3018,9 +3201,16 @@ impl Db {
         } else {
             format!("{parent}/{id}.md")
         };
-        self.conn.execute("INSERT INTO note_cache(desktop_instance_id,note_id,vault_id,title,relative_path,content,revision,dirty,draft_generation,pending_kind,base_revision)
+        // A local-note upload already owns its receipt+create transaction.
+        // Its caller must journal that complete transaction, not nest one.
+        if !self.conn.is_autocommit() {
+            self.conn.execute("INSERT INTO note_cache(desktop_instance_id,note_id,vault_id,title,relative_path,content,revision,dirty,draft_generation,pending_kind,base_revision) VALUES(?1,?2,?3,?4,?5,?6,'',1,1,'create','')",params![instance,id,vault,title,relative_path,content]).map_err(fail)?;
+            return Ok(());
+        }
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        tx.execute("INSERT INTO note_cache(desktop_instance_id,note_id,vault_id,title,relative_path,content,revision,dirty,draft_generation,pending_kind,base_revision)
             VALUES(?1,?2,?3,?4,?5,?6,'',1,1,'create','')", params![instance,id,vault,title,relative_path,content]).map_err(fail)?;
-        Ok(())
+        crate::managed_vault_sync::commit(tx, instance, vault)
     }
 
     pub(crate) fn content_delete(
@@ -3029,6 +3219,7 @@ impl Db {
         vault: &str,
         id: &str,
     ) -> Result<(), String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         // All callers share this gate. Historical audit alone never blocks a
         // new valid ACTIVE operation. Check and write are one IMMEDIATE tx.
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
@@ -3050,13 +3241,13 @@ impl Db {
         }
         let local = tx.execute("UPDATE note_cache SET deleted=1,dirty=0,pending_kind='delete' WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3 AND server_document IS NULL AND NOT EXISTS(SELECT 1 FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3)",params![instance,vault,id]).map_err(fail)?;
         if local == 1 {
-            return tx.commit().map_err(fail);
+            return crate::managed_vault_sync::commit(tx, instance, vault);
         }
         // Keep recoverable text until the deletion acknowledgement. A later edit
         // has a new generation and cannot be cleared by that acknowledgement.
         tx.execute("UPDATE note_cache SET pending_kind='delete',base_revision=CASE WHEN dirty=0 THEN revision ELSE base_revision END,
             dirty=1,draft_generation=draft_generation+1 WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3", params![instance,vault,id]).map_err(fail)?;
-        tx.commit().map_err(fail)
+        crate::managed_vault_sync::commit(tx, instance, vault)
     }
 
     /// R1.6-C: handle a CREATE 409 REVISION_CONFLICT (a filename collision),
@@ -3085,6 +3276,8 @@ impl Db {
         note_id: &str,
         failed_payload: &Value,
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
         let row: Option<(String, String, String)> = self
             .conn
             .query_row(
@@ -3098,10 +3291,11 @@ impl Db {
             .map_err(fail)?;
         let Some((title, content, relative_path)) = row else {
             // The pending create is gone (user deleted it): retire the op.
-            let _ = self.conn.execute(
+            let _ = tx.execute(
                 "DELETE FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",
                 params![instance, vault, note_id],
             );
+            crate::managed_vault_sync::commit(tx, instance, vault)?;
             return Ok(json!({"retried": false, "renamed": null}));
         };
         let payload_parent = failed_payload["parentRelativePath"].as_str().unwrap_or("");
@@ -3120,10 +3314,11 @@ impl Db {
         if stale_intent {
             // Step 1: retire ONLY the stale operation intent; everything
             // else survives; the next prepare regenerates with a NEW opId.
-            self.conn.execute(
+            tx.execute(
                 "DELETE FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",
                 params![instance, vault, note_id],
             ).map_err(fail)?;
+            crate::managed_vault_sync::commit(tx, instance, vault)?;
             return Ok(json!({"retried": true, "renamed": null}));
         }
         // Step 2: the latest title genuinely collides — bounded auto-copy
@@ -3136,7 +3331,7 @@ impl Db {
         // next prepare re-publishes with a NEW opId.
         let (base, seen) = strip_copy_suffix(&title);
         if seen >= 20 {
-            self.conn.execute(
+            tx.execute(
                 "UPDATE note_cache SET create_collision_block=1 WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",
                 params![instance, vault, note_id],
             ).map_err(fail)?;
@@ -3144,10 +3339,11 @@ impl Db {
             // busy-loop, and once a real user edit clears the block the next
             // prepare regenerates from the NEWEST draft with a NEW opId
             // (never the stale staged payload).
-            self.conn.execute(
+            tx.execute(
                 "DELETE FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",
                 params![instance, vault, note_id],
             ).map_err(fail)?;
+            crate::managed_vault_sync::commit(tx, instance, vault)?;
             return Ok(json!({"retried": false, "renamed": null, "exhausted": true}));
         }
         let mut renamed: Option<String> = None;
@@ -3161,16 +3357,17 @@ impl Db {
             // Local truth update (title only — noteId/parent/content/
             // attachments unchanged) + retire the old op so the next
             // prepare emits a NEW opId with the renamed payload.
-            self.conn.execute(
+            tx.execute(
                 "UPDATE note_cache SET title=?4 WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",
                 params![instance, vault, note_id, candidate],
             ).map_err(fail)?;
-            self.conn.execute(
+            tx.execute(
                 "DELETE FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",
                 params![instance, vault, note_id],
             ).map_err(fail)?;
             renamed = Some(candidate);
         }
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
         Ok(json!({"retried": renamed.is_some(), "renamed": renamed}))
     }
 
@@ -3183,6 +3380,7 @@ impl Db {
         vault: &str,
         id: &str,
     ) -> Result<bool, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let pending: Option<(String,)> = self
             .conn
             .query_row(
@@ -3208,6 +3406,7 @@ impl Db {
         vault: &str,
         documents: &[Value],
     ) -> Result<usize, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -3215,7 +3414,7 @@ impl Db {
         for document in documents {
             apply_document(&tx, instance, vault, document)?;
         }
-        tx.commit().map_err(fail)?;
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
         Ok(documents.len())
     }
 
@@ -3224,6 +3423,7 @@ impl Db {
         instance: &str,
         vault: &str,
     ) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         self.conn.query_row("SELECT initialized,snapshot_after,snapshot_seq,cursor FROM content_vault_cache WHERE desktop_instance_id=?1 AND vault_id=?2", params![instance,vault], |r|
             Ok(json!({"initialized": r.get::<_,bool>(0)?, "afterId": r.get::<_,Option<String>>(1)?, "snapshotSeq": r.get::<_,Option<i64>>(2)?, "cursor": r.get::<_,i64>(3)?}))).map_err(fail)
     }
@@ -3243,6 +3443,7 @@ impl Db {
         &mut self, instance: &str, vault: &str, documents: &[Value], cursor: i64,
         snapshot: Option<(&str, bool)>, deferred: &[Value],
     ) -> Result<(), String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -3269,10 +3470,11 @@ impl Db {
         } else {
             tx.execute("UPDATE content_vault_cache SET cursor=?3 WHERE desktop_instance_id=?1 AND vault_id=?2", params![instance,vault,cursor]).map_err(fail)?;
         }
-        tx.commit().map_err(fail)
+        crate::managed_vault_sync::commit(tx, instance, vault)
     }
 
     pub(crate) fn content_resnapshot(&mut self, instance: &str, vault: &str) -> Result<(), String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -3284,7 +3486,7 @@ impl Db {
             tx.execute("UPDATE content_offline_note SET state='unverified',attempts=0,next_retry=0,error='' WHERE desktop_instance_id=?1 AND vault_id=?2", params![instance,vault]).map_err(fail)?;
         }
         tx.execute("UPDATE content_vault_cache SET initialized=0,snapshot_after=NULL,snapshot_seq=NULL,cursor=0 WHERE desktop_instance_id=?1 AND vault_id=?2", params![instance,vault]).map_err(fail)?;
-        tx.commit().map_err(fail)
+        crate::managed_vault_sync::commit(tx, instance, vault)
     }
 
     pub(crate) fn content_prepare_operations(
@@ -3292,6 +3494,7 @@ impl Db {
         instance: &str,
         vault: &str,
     ) -> Result<Vec<Value>, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         Ok(self.content_prepare_routed_operations(instance, vault, false)?
             .into_iter().map(|operation| operation.payload).collect())
     }
@@ -3302,6 +3505,7 @@ impl Db {
         vault: &str,
         unique_create_implemented: bool,
     ) -> Result<Vec<PreparedNoteOperation>, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         self.content_prepare_available_operations(instance, vault, Some(unique_create_implemented))
     }
 
@@ -3313,6 +3517,7 @@ impl Db {
         vault: &str,
         unique_create_implemented: Option<bool>,
     ) -> Result<Vec<PreparedNoteOperation>, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -3320,6 +3525,10 @@ impl Db {
         let rows = {
             let mut statement = tx.prepare(&format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND dirty=1 AND conflict_document IS NULL
                 AND create_collision_block=0
+                AND NOT EXISTS(SELECT 1 FROM app_meta b WHERE b.key='managed.linked.blocked.v1:' || json_array(note_cache.desktop_instance_id,note_cache.vault_id,note_cache.note_id))
+                AND NOT EXISTS(SELECT 1 FROM app_meta f WHERE f.key LIKE 'managed.folder.v1:%' AND json_extract(f.value,'$.instanceId')=note_cache.desktop_instance_id AND json_extract(f.value,'$.vaultId')=note_cache.vault_id AND substr(note_cache.relative_path,1,length(json_extract(f.value,'$.relativePath'))+1)=json_extract(f.value,'$.relativePath') || '/')
+                AND NOT EXISTS(SELECT 1 FROM app_meta m WHERE m.key='managed.move.v1:' || json_array(note_cache.desktop_instance_id,note_cache.vault_id,note_cache.note_id) OR m.key='managed.import.resources.v1:' || json_array(note_cache.desktop_instance_id,note_cache.vault_id,note_cache.note_id))
+                AND NOT EXISTS(SELECT 1 FROM app_meta m WHERE m.key='content.pairing-review.v1:' || json_array(note_cache.desktop_instance_id,note_cache.vault_id,note_cache.note_id))
                 AND (pending_kind='delete' OR EXISTS(SELECT 1 FROM content_note_operation op WHERE op.desktop_instance_id=?1 AND op.vault_id=?2 AND op.note_id=note_cache.note_id) OR (trim(title,?4) NOT IN ('','.','..') AND lower(trim(title,?4))!='.luckyray' AND substr(trim(title,?4),1,1)!='~' AND instr(title,'/')=0 AND instr(title,char(92))=0 AND instr(title,':')=0 AND instr(title,char(0))=0))
                 AND NOT EXISTS(SELECT 1 FROM content_note_operation_pause p JOIN content_note_operation op ON op.desktop_instance_id=p.desktop_instance_id AND op.vault_id=p.vault_id AND op.note_id=p.note_id AND op.op_id=p.op_id WHERE p.desktop_instance_id=?1 AND p.vault_id=?2 AND p.note_id=note_cache.note_id)
                 AND (?3 OR pending_kind!='create' OR EXISTS(SELECT 1 FROM content_note_operation op WHERE op.desktop_instance_id=?1 AND op.vault_id=?2 AND op.note_id=note_cache.note_id))
@@ -3334,6 +3543,12 @@ impl Db {
         let mut operations = Vec::new();
         for note in rows {
             let id = text(&note, "noteId");
+            // A pending move owns the old remote CAS. Do not race it with an
+            // update/delete or freeze a create before its parent is published.
+            if tx.query_row("SELECT EXISTS(SELECT 1 FROM app_meta WHERE key=?1)", [managed_move_key(instance,vault,id)], |r|r.get::<_,bool>(0)).map_err(fail)? {continue;}
+            if tx.query_row("SELECT EXISTS(SELECT 1 FROM app_meta WHERE key=?1)",[format!("managed.import.resources.v1:{}",json!([instance,vault,id]))],|r|r.get::<_,bool>(0)).map_err(fail)? {continue;}
+            let parent=text(&note,"relativePath").rsplit_once('/').map(|p|p.0).unwrap_or("");
+            if !crate::managed_vault_folder_sync::parent_ready(&tx,instance,vault,parent)? {continue;}
             let old: Option<(String, String)> = tx.query_row("SELECT payload,route FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3", params![instance,vault,id], |r|Ok((r.get(0)?, r.get(1)?))).optional().map_err(fail)?;
             if let Some((payload, route)) = old {
                 operations.push(PreparedNoteOperation {
@@ -3357,7 +3572,7 @@ impl Db {
             } else {
                 "rename"
             };
-            let base: Option<String> = tx.query_row("SELECT base_revision FROM note_cache WHERE desktop_instance_id=?1 AND note_id=?2", params![instance,id], |r|r.get(0)).map_err(fail)?;
+            let base: Option<String> = tx.query_row("SELECT base_revision FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3", params![instance,vault,id], |r|r.get(0)).map_err(fail)?;
             let op_id = uuid::Uuid::new_v4().to_string();
             let pending_attachments=kind=="create" && tx.query_row("SELECT COUNT(*) FROM content_note_attachment WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3 AND receipt IS NULL",params![instance,vault,id],|r|r.get::<_,u64>(0)).map_err(fail)?>0;
             let payload = json!({"opId":op_id,"noteId":id,"vaultId":vault,"kind":kind,"expectedRevision":base,
@@ -3387,7 +3602,7 @@ impl Db {
             .map_err(fail)?;
             operations.push(PreparedNoteOperation { payload, route });
         }
-        tx.commit().map_err(fail)?;
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
         Ok(operations)
     }
 
@@ -3397,6 +3612,7 @@ impl Db {
         &mut self, instance: &str, vault: &str, prepared: &PreparedNoteOperation,
         status: u16, result: &Value,
     ) -> Result<bool, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let payload = &prepared.payload;
         if status != 400 || result["code"] != "NOTE_INPUT_INVALID"
             || prepared.route != NoteOperationRoute::Content || payload["kind"] != "rename"
@@ -3415,11 +3631,16 @@ impl Db {
         // SELECT copies the ORIGINAL bytes/route/generation, never a serialized
         // replacement. Current editor title/body/epoch/generation are untouched.
         tx.execute("INSERT OR IGNORE INTO content_note_operation_pause(desktop_instance_id,vault_id,note_id,op_id,payload,route,draft_generation,reason,paused_at) SELECT desktop_instance_id,vault_id,note_id,op_id,payload,route,draft_generation,'BLANK_RENAME_400',?5 FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3 AND op_id=?4", params![instance,vault,id,op_id,now_iso()]).map_err(fail)?;
-        tx.commit().map_err(fail)?;
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
         Ok(true)
     }
 
     pub(crate) fn content_sync_attention(&self, instance: &str, vault: &str) -> Result<bool, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
+        let blocked:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM note_cache n JOIN app_meta m ON m.key='managed.import.resources.v1:' || json_array(n.desktop_instance_id,n.vault_id,n.note_id) WHERE n.desktop_instance_id=?1 AND n.vault_id=?2 AND n.deleted=0)",params![instance,vault],|r|r.get(0)).map_err(fail)?;
+        if blocked{return Ok(true);}
+        let mut blocked_query=self.conn.prepare("SELECT key FROM app_meta WHERE key LIKE 'managed.folder.blocked.v1:%' OR key LIKE 'managed.move.blocked.v1:%' OR key LIKE 'managed.linked.blocked.v1:%'").map_err(fail)?;
+        for row in blocked_query.query_map([],|r|r.get::<_,String>(0)).map_err(fail)? {let key=row.map_err(fail)?;let suffix=key.split_once(':').ok_or("MANAGED_MUTATION_INVALID")?.1;let parts:Vec<String>=serde_json::from_str(suffix).map_err(|_|"MANAGED_MUTATION_INVALID")?;if parts.len()==3 && parts[0]==instance && parts[1]==vault{return Ok(true);}}
         // Read only title/flags, not every pending body/attachment payload.
         let mut query = self.conn.prepare("SELECT title,deleted,EXISTS(SELECT 1 FROM content_note_operation op JOIN content_note_operation_pause p ON p.desktop_instance_id=op.desktop_instance_id AND p.vault_id=op.vault_id AND p.note_id=op.note_id AND p.op_id=op.op_id WHERE op.desktop_instance_id=?1 AND op.vault_id=?2 AND op.note_id=note_cache.note_id) FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND dirty=1").map_err(fail)?;
         let rows = query.query_map(params![instance,vault], |r| Ok((r.get::<_,String>(0)?,r.get::<_,bool>(1)?,r.get::<_,bool>(2)?))).map_err(fail)?;
@@ -3435,6 +3656,7 @@ impl Db {
     /// stays immutable; the user's current draft gets a new id and OLD base CAS.
     pub(crate) fn content_resume_paused(&mut self, instance: &str, vault: &str, id: &str,
         paused_op_id: &str, epoch: i64, generation: i64) -> Result<Value, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
         let current = tx.query_row(&format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3 AND editor_epoch=?4 AND draft_generation=?5 AND dirty=1 AND deleted=0 AND conflict_document IS NULL AND pending_kind='update'"),params![instance,vault,id,epoch,generation],note_value).optional().map_err(fail)?.ok_or("CONTENT_EDITOR_CHANGED")?;
         if !fresh_title_valid(text(&current,"title")) { return Err("CONTENT_TITLE_REQUIRED".into()); }
@@ -3455,7 +3677,7 @@ impl Db {
         if tx.execute("DELETE FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3 AND op_id=?4 AND payload=?5 AND route=?6",params![instance,vault,id,paused_op_id,bytes,route]).map_err(fail)? != 1 { return Err("CONTENT_OPERATION_CHANGED".into()); }
         tx.execute("INSERT INTO content_note_operation(desktop_instance_id,vault_id,note_id,op_id,payload,draft_generation,route) VALUES(?1,?2,?3,?4,?5,?6,'content')",params![instance,vault,id,new_op_id,payload.to_string(),generation]).map_err(fail)?;
         tx.execute("INSERT INTO content_note_operation_recovery(desktop_instance_id,vault_id,note_id,paused_op_id,new_op_id,recovered_at) VALUES(?1,?2,?3,?4,?5,?6)",params![instance,vault,id,paused_op_id,new_op_id,now_iso()]).map_err(fail)?;
-        tx.commit().map_err(fail)?;
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
         self.content_note(instance,vault,id)
     }
 
@@ -3467,6 +3689,7 @@ impl Db {
         op_id: &str,
         document: &Value,
     ) -> Result<(), String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         if text(document, "vaultId") != vault || text(document, "noteId") != id {
             return Err("CONTENT_ACK_INVALID".into());
         }
@@ -3483,6 +3706,10 @@ impl Db {
         };
         let payload: Value =
             serde_json::from_str(&payload).map_err(|_| "CONTENT_OPERATION_INVALID")?;
+        if route=="knowledgeImportPlanned" {
+            crate::managed_vault_linked_import::validate_document(&payload,document)?;
+            tx.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES(?1,?2)",params![format!("managed.linked.receipt.v1:{}",json!([instance,vault,id])),json!({"opId":op_id,"planId":payload["importPlan"]["planId"],"mappingHash":payload["importPlan"]["mappingHash"],"noteId":id,"document":document}).to_string()]).map_err(fail)?;
+        }
         let current = tx.query_row(&format!("SELECT {NOTE_COLUMNS} FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3"),params![instance,vault,id],note_value).map_err(fail)?;
         let same_generation = current["draftGeneration"].as_i64() == Some(sent_generation);
         let deleted = document["deleted"] == true;
@@ -3492,7 +3719,7 @@ impl Db {
         // edit or pending attachment is not a later TITLE edit: adopt the
         // selected name while retaining that newer durable body. A genuinely
         // changed local title remains the user's next rename intent.
-        let adopt_unique_title = route == "knowledgeCreateUnique"
+        let adopt_unique_title = matches!(route.as_str(),"knowledgeCreateUnique"|"knowledgeImportPlanned")
             && payload["kind"] == "create" && current["title"] == payload["title"];
         let conflict = dirty
             && (deleted
@@ -3530,7 +3757,7 @@ impl Db {
         }
         tx.execute("DELETE FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3 AND op_id=?4",params![instance,vault,id,op_id]).map_err(fail)?;
         offline::remember(&tx, instance, vault, document)?;
-        tx.commit().map_err(fail)
+        crate::managed_vault_sync::commit(tx, instance, vault)
     }
 
     pub(crate) fn content_conflict(
@@ -3540,8 +3767,10 @@ impl Db {
         id: &str,
         document: &Value,
     ) -> Result<(), String> {
-        self.conn.execute("UPDATE note_cache SET conflict_document=?4,server_document=?4 WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",params![instance,vault,id,document.to_string()]).map_err(fail)?;
-        Ok(())
+        crate::managed_vault_sync::recover(&self.conn)?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        tx.execute("UPDATE note_cache SET conflict_document=?4,server_document=?4 WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",params![instance,vault,id,document.to_string()]).map_err(fail)?;
+        crate::managed_vault_sync::commit(tx, instance, vault)
     }
 
     pub(crate) fn content_resolve(
@@ -3551,6 +3780,7 @@ impl Db {
         id: &str,
         copy: bool,
     ) -> Result<Option<String>, String> {
+        crate::managed_vault_sync::recover(&self.conn)?;
         let note = self.content_note(instance, vault, id)?;
         let server = &note["conflictDocument"];
         if server.is_null() {
@@ -3592,7 +3822,282 @@ impl Db {
         tx.execute("DELETE FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",params![instance,vault,id]).map_err(fail)?;
         tx.execute("UPDATE note_cache SET dirty=0,conflict_document=NULL,pending_kind='update' WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",params![instance,vault,id]).map_err(fail)?;
         apply_document(&tx, instance, vault, server)?;
-        tx.commit().map_err(fail)?;
+        crate::managed_vault_sync::commit(tx, instance, vault)?;
         Ok(copy_id)
+    }
+}
+
+impl Db {
+    pub(crate) fn managed_recover(&self)->Result<(),String>{crate::managed_vault_sync::recover(&self.conn)}
+    /// Caller holds the file gate after the application's DB mutex.
+    pub(crate) fn managed_migrate_replicas(&self)->Result<Value,String>{crate::managed_vault_sync::migrate_replicas(&self.conn)}
+    pub(crate) fn managed_save_bound(&self,store:&crate::managed_vault::Store,local_vault:&str,id:&str,expected:&str,title:&str,content:&str,tags:Vec<String>)->Result<crate::managed_vault::Note,String>{
+        self.managed_recover()?;
+        let binding={let _gate=crate::managed_vault::lock()?;let note=store.get(local_vault,id)?;
+            if note.revision!=expected{return Err("VAULT_REVISION_CONFLICT".into());}
+            if note.body_state!="ready"{return Err("VAULT_BODY_NOT_EDITABLE".into());}
+            store.manifest(local_vault)?.binding.ok_or("VAULT_BINDING_REQUIRED")?};
+        let observed=self.content_begin_edit(&binding.instance_id,&binding.remote_vault_id,id)?;
+        self.content_edit_observed(&binding.instance_id,&binding.remote_vault_id,id,title,content,
+            observed["editorEpoch"].as_i64().ok_or("CONTENT_EDITOR_INVALID")?,1,observed["revision"].as_str())?;
+        let _gate=crate::managed_vault::lock()?;
+        let mut m=store.manifest(local_vault)?;
+        if let Some(n)=m.notes.get_mut(id){if n.tags!=tags{n.revision=uuid::Uuid::new_v4().simple().to_string();}n.tags=tags;}
+        // Tags are local presentation metadata, not a second body/outbox write.
+        store.commit(m,std::collections::BTreeMap::new())?;
+        drop(_gate);
+        if super::local_note_upload_db::blocked_resource(content).is_none() {
+            let key=format!("managed.import.resources.v1:{}",json!([binding.instance_id,binding.remote_vault_id,id]));
+            let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+            tx.execute("DELETE FROM app_meta WHERE key=?1",[key]).map_err(fail)?;
+            crate::managed_vault_sync::commit(tx,&binding.instance_id,&binding.remote_vault_id)?;
+        }
+        let _gate=crate::managed_vault::lock()?;store.get(local_vault,id)
+    }
+    pub(crate) fn managed_create_bound(&self,store:&crate::managed_vault::Store,local_vault:&str,title:&str,content:&str,tags:Vec<String>,folder:&str)->Result<crate::managed_vault::Note,String>{
+        self.managed_recover()?;
+        let binding={let _gate=crate::managed_vault::lock()?;let m=store.manifest(local_vault)?;
+            // Bound folders are populated only from verified remote paths or
+            // directory observations, never from arbitrary local mkdir.
+            if !folder.is_empty()&&!m.folders.iter().any(|p|p==folder){return Err("VAULT_FOLDER_NOT_FOUND".into());}
+            m.binding.ok_or("VAULT_BINDING_REQUIRED")?};
+        let id=format!("kn-{}",uuid::Uuid::new_v4().simple());
+        self.content_create_in(&binding.instance_id,&binding.remote_vault_id,&id,title,content,folder)?;
+        let _gate=crate::managed_vault::lock()?;let mut m=store.manifest(local_vault)?;
+        if let Some(n)=m.notes.get_mut(&id){n.tags=tags;}
+        store.commit(m,std::collections::BTreeMap::new())?;store.get(local_vault,&id)
+    }
+}
+
+fn managed_move_key(instance:&str,vault:&str,id:&str)->String{format!("managed.move.v1:{}",json!([instance,vault,id]))}
+impl Db {
+    pub(crate) fn managed_move_prepare(&self,store:&crate::managed_vault::Store,local_vault:&str,id:&str,expected:&str,folder:&str)->Result<(crate::managed_vault::Binding,Value),String>{
+        self.managed_recover()?;
+        if !is_clean_vault_relative(folder)||folder.contains('\\'){return Err("CONTENT_PATH_INVALID".into());}
+        let binding={let _gate=crate::managed_vault::lock()?;let n=store.get(local_vault,id)?;
+            if n.body_state=="conflict" {return Err("VAULT_BODY_NOT_EDITABLE".into());}
+            let m=store.manifest(local_vault)?;
+            if !folder.is_empty() && !m.folders.iter().any(|p|p==folder) {return Err("VAULT_FOLDER_NOT_FOUND".into());}
+            m.binding.ok_or("VAULT_BINDING_REQUIRED")?};
+        let key=managed_move_key(&binding.instance_id,&binding.remote_vault_id,id);
+        let previous:Option<String>=self.conn.query_row("SELECT value FROM app_meta WHERE key=?1",[&key],|r|r.get(0)).optional().map_err(fail)?;
+        if let Some(bytes)=previous{let request:Value=serde_json::from_str(&bytes).map_err(|_|"VAULT_MOVE_INTENT_INVALID")?;
+            if request["parentRelativePath"]!=folder{return Err("VAULT_MOVE_PENDING_DIFFERENT_TARGET".into());}
+            return Ok((binding,request));}
+        {let _gate=crate::managed_vault::lock()?;if store.get(local_vault,id)?.revision!=expected{return Err("VAULT_REVISION_CONFLICT".into());}}
+        let note=self.content_note(&binding.instance_id,&binding.remote_vault_id,id)?;
+        let facts=self.content_note_move_facts(&binding.instance_id,&binding.remote_vault_id,&[id.into()])?;
+        let fact=&facts["items"][0];
+        let has_operation:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM content_note_operation WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3)",params![binding.instance_id,binding.remote_vault_id,id],|r|r.get(0)).map_err(fail)?;
+        if note["pendingKind"]=="create" && note["serverDocument"].is_null() && !has_operation && note["deleted"]!=true {
+            let path=if folder.is_empty(){format!("{id}.md")}else{format!("{folder}/{id}.md")};
+            let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+            tx.execute("UPDATE note_cache SET relative_path=?4,draft_generation=draft_generation+1 WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",params![binding.instance_id,binding.remote_vault_id,id,path]).map_err(fail)?;
+            crate::managed_vault_sync::commit(tx,&binding.instance_id,&binding.remote_vault_id)?;
+            return Ok((binding,Value::Null));
+        }
+        if note["dirty"]==true||note["deleted"]==true||!note["conflictDocument"].is_null()||fact["hasPending"]==true||fact["pending"]==true{return Err("VAULT_MOVE_WAIT_FOR_SYNC".into());}
+        let revision=note["serverDocument"]["revision"].as_str().filter(|s|!s.is_empty()).ok_or("VAULT_MOVE_REQUIRES_CONNECTION")?;
+        let request=json!({"opId":uuid::Uuid::new_v4().to_string(),"vaultId":binding.remote_vault_id,"expectedRevision":revision,"parentRelativePath":folder});
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        tx.execute("INSERT INTO app_meta(key,value) VALUES(?1,?2)",params![key,request.to_string()]).map_err(fail)?;
+        crate::managed_vault_sync::commit(tx,&binding.instance_id,&binding.remote_vault_id)?;
+        Ok((binding,request))
+    }
+    pub(crate) fn managed_move_ack(&self,instance:&str,vault:&str,id:&str,request:&Value,receipt:&Value)->Result<(),String>{
+        self.managed_recover()?;
+        if receipt["opId"]!=request["opId"]||receipt["noteId"]!=id||receipt["vaultId"]!=vault
+            ||receipt["parentRelativePath"]!=request["parentRelativePath"]||text(receipt,"revision").is_empty(){return Err("VAULT_MOVE_RECEIPT_INVALID".into());}
+        let key=managed_move_key(instance,vault,id);
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        let bytes:String=tx.query_row("SELECT value FROM app_meta WHERE key=?1",[&key],|r|r.get(0)).map_err(fail)?;
+        if serde_json::from_str::<Value>(&bytes).map_err(|_|"VAULT_MOVE_INTENT_INVALID")?!=*request{return Err("VAULT_MOVE_INTENT_CHANGED".into());}
+        let latest:Option<String>=tx.query_row("SELECT server_document FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",params![instance,vault,id],|r|r.get(0)).map_err(fail)?;
+        let latest=latest.and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
+        if latest["revision"]!=request["expectedRevision"] && latest["revision"]!=receipt["revision"] {
+            // A newer sync observation owns the path/tombstone. Keep the
+            // committed receipt as audit, but never regress its provenance.
+            tx.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES(?1,?2)",params![format!("managed.move.receipt.v1:{}",json!([instance,vault,id])),receipt.to_string()]).map_err(fail)?;
+            tx.execute("DELETE FROM app_meta WHERE key=?1",[key]).map_err(fail)?;
+            return crate::managed_vault_sync::commit(tx,instance,vault);
+        }
+        let (path,title):(String,String)=tx.query_row("SELECT relative_path,title FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3",params![instance,vault,id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(fail)?;
+        let basename=path.rsplit('/').next().ok_or("CONTENT_PATH_INVALID")?;
+        let parent=text(receipt,"parentRelativePath");
+        if !is_clean_vault_relative(parent){return Err("CONTENT_PATH_INVALID".into());}
+        let new_path=if parent.is_empty(){basename.to_owned()}else{format!("{parent}/{basename}")};
+        apply_document(&tx,instance,vault,&json!({"noteId":id,"vaultId":vault,"title":title,"relativePath":new_path,"revision":receipt["revision"],"updatedAt":now_iso(),"deleted":false}))?;
+        tx.execute("DELETE FROM app_meta WHERE key=?1",[key]).map_err(fail)?;
+        crate::managed_vault_sync::commit(tx,instance,vault)
+    }
+}
+
+impl Db {
+    /// Read-only background scheduler input. Does not select a UI vault,
+    /// connect a different Desktop, or mutate any Desktop global state.
+    pub(crate) fn managed_sync_targets(&self,store:&crate::managed_vault::Store,instance:&str)->Result<Value,String>{
+        self.managed_recover()?;let mut items=Vec::new();
+        let registry={let _gate=crate::managed_vault::lock()?;store.list()?};
+        for row in registry["items"].as_array().ok_or("VAULT_REGISTRY_INVALID")?{
+            let id=row["localVaultId"].as_str().ok_or("VAULT_ID_INVALID")?;let m={let _gate=crate::managed_vault::lock()?;store.manifest(id)?};
+            let Some(binding)=m.binding else{continue;};if binding.instance_id!=instance{continue;}
+            let pending:i64=self.conn.query_row("SELECT COUNT(*) FROM note_cache n WHERE n.desktop_instance_id=?1 AND n.vault_id=?2 AND (n.dirty=1 OR EXISTS(SELECT 1 FROM content_note_operation o WHERE o.desktop_instance_id=n.desktop_instance_id AND o.vault_id=n.vault_id AND o.note_id=n.note_id) OR EXISTS(SELECT 1 FROM content_note_attachment a WHERE a.desktop_instance_id=n.desktop_instance_id AND a.vault_id=n.vault_id AND a.note_id=n.note_id AND a.receipt IS NULL))",params![instance,binding.remote_vault_id],|r|r.get(0)).map_err(fail)?;
+            items.push(json!({"instanceId":instance,"vaultId":binding.remote_vault_id,"localVaultId":id,"pendingCount":pending+self.managed_pending_folders(instance,&binding.remote_vault_id)?.len() as i64+self.managed_pending_moves(instance,&binding.remote_vault_id)?.len() as i64}));
+        }
+        items.sort_by(|a,b|a["vaultId"].as_str().cmp(&b["vaultId"].as_str()));Ok(json!({"items":items}))
+    }
+}
+
+impl Db {
+    pub(crate) fn managed_import_bound(&self,store:&crate::managed_vault::Store,local_vault:&str,legacy_id:&str,source_fingerprint:&str,title:&str,content:&str,tags:Vec<String>,folder:&str)->Result<crate::managed_vault::Note,String>{
+        self.managed_import_bound_with_metadata(store,local_vault,legacy_id,source_fingerprint,title,content,tags,folder,&Value::Null)
+    }
+    pub(crate) fn managed_import_bound_with_metadata(&self,store:&crate::managed_vault::Store,local_vault:&str,legacy_id:&str,source_fingerprint:&str,title:&str,content:&str,tags:Vec<String>,folder:&str,initial_metadata:&Value)->Result<crate::managed_vault::Note,String>{
+        self.managed_recover()?;
+        if legacy_id.is_empty()||source_fingerprint.is_empty(){return Err("VAULT_IMPORT_SOURCE_INVALID".into());}
+        let unresolved_resources=super::local_note_upload_db::blocked_resource(content).is_some();
+        let binding={let _gate=crate::managed_vault::lock()?;let m=store.manifest(local_vault)?;
+            if !folder.is_empty()&&!m.folders.iter().any(|p|p==folder){return Err("VAULT_FOLDER_NOT_FOUND".into());}
+            m.binding.ok_or("VAULT_BINDING_REQUIRED")?};
+        let key=format!("managed.import.v1:{}",json!([binding.instance_id,binding.remote_vault_id,legacy_id]));
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        let receipt:Option<String>=tx.query_row("SELECT value FROM app_meta WHERE key=?1",[&key],|r|r.get(0)).optional().map_err(fail)?;
+        let id=if let Some(bytes)=receipt {
+            let receipt:Value=serde_json::from_str(&bytes).map_err(|_|"VAULT_IMPORT_RECEIPT_INVALID")?;
+            if receipt["sourceFingerprint"]!=source_fingerprint||receipt["folder"]!=folder{return Err("VAULT_IMPORT_SOURCE_CHANGED".into());}
+            text(&receipt,"noteId").to_owned()
+        }else{
+            let id=format!("kn-{}",uuid::Uuid::new_v4().simple());
+            self.content_create_in(&binding.instance_id,&binding.remote_vault_id,&id,title,content,folder)?;
+            tx.execute("INSERT INTO app_meta(key,value) VALUES(?1,?2)",params![key,json!({"noteId":id,"sourceFingerprint":source_fingerprint,"folder":folder,"tags":tags,"initialMetadata":initial_metadata}).to_string()]).map_err(fail)?;
+            if unresolved_resources {tx.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES(?1,'unresolved')",[format!("managed.import.resources.v1:{}",json!([binding.instance_id,binding.remote_vault_id,id]))]).map_err(fail)?;}
+            id
+        };
+        if id.is_empty(){return Err("VAULT_IMPORT_RECEIPT_INVALID".into());}
+        crate::managed_vault_sync::commit(tx,&binding.instance_id,&binding.remote_vault_id)?;
+        // Initial tags/presentation are part of the immutable receipt and
+        // original file publication. Replays never reset later user metadata.
+        let _gate=crate::managed_vault::lock()?;store.get(local_vault,&id)
+    }
+}
+impl Db {
+    pub(crate) fn managed_rebuild_preview(&self,store:&crate::managed_vault::Store,id:&str)->Result<Value,String>{crate::managed_vault_sync::rebuild_preview(&self.conn,store,id)}
+    pub(crate) fn managed_rebuild(&self,store:&crate::managed_vault::Store,id:&str,expected_hash:&str)->Result<Value,String>{crate::managed_vault_sync::rebuild(&self.conn,store,id,expected_hash)}
+}
+
+impl Db {
+    pub(crate) fn managed_folder_create(&self,store:&crate::managed_vault::Store,local_vault:&str,name:&str,parent:&str)->Result<Value,String>{
+        self.managed_recover()?;
+        let (binding,folders)={let _g=crate::managed_vault::lock()?;let m=store.manifest(local_vault)?;(m.binding.ok_or("VAULT_BINDING_REQUIRED")?,m.folders)};
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        let result=crate::managed_vault_folder_sync::enqueue(&tx,&binding.instance_id,&binding.remote_vault_id,parent,name,&folders)?;
+        crate::managed_vault_sync::commit(tx,&binding.instance_id,&binding.remote_vault_id)?;
+        Ok(result)
+    }
+    pub(crate) fn managed_pending_folders(&self,instance:&str,vault:&str)->Result<Vec<crate::managed_vault_folder_sync::FolderOperation>,String>{
+        self.managed_recover()?;crate::managed_vault_folder_sync::pending(&self.conn,instance,vault)
+    }
+    pub(crate) fn managed_folder_parent_ready(&self,instance:&str,vault:&str,parent:&str)->Result<bool,String>{
+        crate::managed_vault_folder_sync::parent_ready(&self.conn,instance,vault,parent)
+    }
+    pub(crate) fn managed_folder_ack(&self,op:&crate::managed_vault_folder_sync::FolderOperation,receipt:&Value)->Result<(),String>{
+        self.managed_recover()?;
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        crate::managed_vault_folder_sync::acknowledge(&tx,op,receipt)?;
+        crate::managed_vault_sync::commit(tx,&op.instance_id,&op.vault_id)
+    }
+    pub(crate) fn managed_pending_moves(&self,instance:&str,vault:&str)->Result<Vec<(String,Value)>,String>{
+        self.managed_recover()?;
+        let mut q=self.conn.prepare("SELECT key,value FROM app_meta WHERE key LIKE 'managed.move.v1:%' ORDER BY rowid").map_err(fail)?;
+        let mut output=Vec::new();
+        for row in q.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(fail)? {
+            let (key,bytes)=row.map_err(fail)?;
+            let scope:Vec<String>=serde_json::from_str(key.strip_prefix("managed.move.v1:").ok_or("VAULT_MOVE_INTENT_INVALID")?).map_err(|_|"VAULT_MOVE_INTENT_INVALID")?;
+            if scope.len()!=3{return Err("VAULT_MOVE_INTENT_INVALID".into());}
+            if scope[0]!=instance||scope[1]!=vault{continue;}
+            let request:Value=serde_json::from_str(&bytes).map_err(|_|"VAULT_MOVE_INTENT_INVALID")?;
+            if request["vaultId"]!=vault||text(&request,"opId").is_empty()||text(&request,"expectedRevision").is_empty(){return Err("VAULT_MOVE_INTENT_INVALID".into());}
+            crate::managed_vault_folder_sync::safe_path(request["parentRelativePath"].as_str().ok_or("VAULT_MOVE_INTENT_INVALID")?,true)?;
+            output.push((scope[2].clone(),request));
+        }
+        Ok(output)
+    }
+}
+
+impl Db {
+    /// Read-only complete migration preview; application DB mutex is held.
+    pub(crate) fn managed_migration_snapshot(&self) -> Result<Value, String> {
+        crate::managed_vault_sync::migration_snapshot(&self.conn)
+    }
+}
+impl Db {pub(crate) fn managed_transfer_body_portable(&self,body:&str)->bool{super::local_note_upload_db::blocked_resource(body).is_none()}}
+impl Db {
+    pub(crate) fn managed_folder_scan_cursor(&self,instance:&str,vault:&str)->Result<String,String>{
+        Ok(self.conn.query_row("SELECT value FROM app_meta WHERE key=?1",[format!("managed.folder.scan.v1:{}",json!([instance,vault,"cursor"]))],|r|r.get(0)).optional().map_err(fail)?.unwrap_or_default())
+    }
+    pub(crate) fn managed_folder_observe_page(&self,instance:&str,vault:&str,page:&Value)->Result<(usize,bool),String>{
+        self.managed_recover()?;
+        let items=page["items"].as_array().filter(|a|a.len()<=100).ok_or("MANAGED_FOLDER_SNAPSHOT_INVALID")?;
+        let more=page["hasMore"].as_bool().ok_or("MANAGED_FOLDER_SNAPSHOT_INVALID")?;
+        if page["vaultId"]!=vault{return Err("MANAGED_FOLDER_SNAPSHOT_INVALID".into());}
+        let next=if more {page["nextAfterPath"].as_str().filter(|s|!s.is_empty()).ok_or("MANAGED_FOLDER_SNAPSHOT_INVALID")?}else{""};
+        if more && next==self.managed_folder_scan_cursor(instance,vault)?{return Err("MANAGED_FOLDER_CURSOR_STALLED".into());}
+        let folders=items.iter().map(|item|item["parentRelativePath"].as_str().map(str::to_owned).ok_or("MANAGED_FOLDER_SNAPSHOT_INVALID")).collect::<Result<Vec<_>,_>>()?;
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        let before:i64=tx.query_row("SELECT total_changes()",[],|r|r.get(0)).map_err(fail)?;
+        crate::managed_vault_folder_sync::recognize(&tx,instance,vault,&json!({"vaultId":vault,"complete":!more,"folders":folders}))?;
+        let after:i64=tx.query_row("SELECT total_changes()",[],|r|r.get(0)).map_err(fail)?;
+        let changes=(after-before) as usize;
+        tx.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES(?1,?2)",params![format!("managed.folder.scan.v1:{}",json!([instance,vault,"cursor"])),next]).map_err(fail)?;
+        crate::managed_vault_sync::commit(tx,instance,vault)?;Ok((changes,more))
+    }
+}
+impl Db {
+    pub(crate) fn managed_mutation_blocked(&self,instance:&str,vault:&str,kind:&str,id:&str)->Result<bool,String>{
+        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM app_meta WHERE key=?1)",[format!("managed.{kind}.blocked.v1:{}",json!([instance,vault,id]))],|r|r.get(0)).map_err(fail)
+    }
+    pub(crate) fn managed_mutation_block(&self,instance:&str,vault:&str,kind:&str,id:&str,code:&str)->Result<(),String>{
+        if !matches!(kind,"folder"|"move"){return Err("MANAGED_MUTATION_KIND_INVALID".into());}
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        tx.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES(?1,?2)",params![format!("managed.{kind}.blocked.v1:{}",json!([instance,vault,id])),code]).map_err(fail)?;
+        crate::managed_vault_sync::commit(tx,instance,vault)
+    }
+}
+impl Db {
+    pub(crate) fn managed_linked_adopt(&self,store:&crate::managed_vault::Store,state:&crate::managed_vault_linked_import::State,rewritten:&[crate::managed_vault_wiki_plan::RewrittenNote])->Result<(),String>{
+        self.managed_recover()?;
+        let snapshot=&state.snapshot;let instance=&snapshot.target_binding.instance_id;let vault=&snapshot.target_binding.remote_vault_id;
+        let reservation=state.reservation.as_ref().ok_or("LINKED_IMPORT_MAPPING_MISSING")?;
+        let key=format!("managed.linked.plan.v1:{}",json!([instance,vault,snapshot.source_vault_id]));
+        let stored:Option<String>=self.conn.query_row("SELECT value FROM app_meta WHERE key=?1",[&key],|r|r.get(0)).optional().map_err(fail)?;
+        let serialized=serde_json::to_string(state).map_err(|e|e.to_string())?;
+        if let Some(stored)=stored {if stored!=serialized{return Err("LINKED_IMPORT_PLAN_CHANGED".into());}return Ok(());}
+        if rewritten.len()!=state.entries.len(){return Err("LINKED_IMPORT_MAPPING_INVALID".into());}
+        let mut known={let _g=crate::managed_vault::lock()?;crate::managed_vault_transfer::check(store,snapshot)?;store.manifest(&snapshot.target_vault_id)?.folders};
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        let mut folders=snapshot.folders.clone();folders.sort_by_key(|p|(p.matches('/').count(),p.clone()));
+        for folder in folders {if folder.is_empty()||known.iter().any(|p|p==&folder){continue;}
+            let (parent,name)=folder.rsplit_once('/').unwrap_or(("",&folder));crate::managed_vault_folder_sync::enqueue(&tx,instance,vault,parent,name,&known)?;known.push(folder);
+        }
+        for ((entry,note),body) in state.entries.iter().zip(&snapshot.notes).zip(rewritten){
+            if body.note_id!=entry.note_id||body.source_note_id!=entry.source_note_id{return Err("LINKED_IMPORT_MAPPING_INVALID".into());}
+            let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM note_cache WHERE desktop_instance_id=?1 AND vault_id=?2 AND note_id=?3)",params![instance,vault,entry.note_id],|r|r.get(0)).map_err(fail)?;
+            if exists{return Err("LINKED_IMPORT_NOTE_ID_CONFLICT".into());}
+            tx.execute("INSERT INTO note_cache(desktop_instance_id,vault_id,note_id,title,relative_path,content,revision,dirty,draft_generation,pending_kind,base_revision) VALUES(?1,?2,?3,?4,?5,?6,'',1,1,'create','')",params![instance,vault,entry.note_id,note.title,body.relative_path,body.content]).map_err(fail)?;
+            let initial=json!({"pinned":note.pinned,"favorite":note.favorite,"archived":note.archived,"createdAt":note.created_at,"historicalNames":note.historical_names,"transferSource":{"localVaultId":snapshot.source_vault_id,"noteId":note.note_id,"sourceHash":note.body_hash}});
+            let import_key=format!("managed.import.v1:{}",json!([instance,vault,format!("managed-linked:{}:{}",snapshot.source_vault_id,note.note_id)]));
+            tx.execute("INSERT INTO app_meta(key,value) VALUES(?1,?2)",params![import_key,json!({"noteId":entry.note_id,"sourceFingerprint":snapshot.snapshot_hash,"folder":note.folder,"tags":note.tags,"initialMetadata":initial}).to_string()]).map_err(fail)?;
+            let payload=json!({"opId":entry.op_id,"noteId":entry.note_id,"vaultId":vault,"kind":"create","expectedRevision":null,"title":note.title,"content":body.content,"parentRelativePath":note.folder,"importPlan":{"version":1,"planId":reservation["planId"],"mappingHash":reservation["mappingHash"],"relativePath":body.relative_path,"contentSha256":crate::managed_vault::hash(body.content.as_bytes())}});
+            // Stored planned route exists in the same transaction as every new
+            // body. There is no restart window for generic create to leak out.
+            tx.execute("INSERT INTO content_note_operation(desktop_instance_id,vault_id,note_id,op_id,payload,draft_generation,route) VALUES(?1,?2,?3,?4,?5,1,'knowledgeImportPlanned')",params![instance,vault,entry.note_id,entry.op_id,payload.to_string()]).map_err(fail)?;
+        }
+        tx.execute("INSERT INTO app_meta(key,value) VALUES(?1,?2)",params![key,serialized]).map_err(fail)?;
+        crate::managed_vault_sync::commit(tx,instance,vault)
+    }
+    pub(crate) fn managed_linked_block(&self,instance:&str,vault:&str,id:&str)->Result<(),String>{
+        let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
+        tx.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES(?1,'linked-import-review-required')",[format!("managed.linked.blocked.v1:{}",json!([instance,vault,id]))]).map_err(fail)?;
+        crate::managed_vault_sync::commit(tx,instance,vault)
     }
 }

@@ -84,7 +84,7 @@ export function LibraryListRow({ title, meta, thumb, onClick, onVisible, onLongP
     // click contract and stays untouched for every other consumer.
     <div
       ref={hostRef}
-      className={(selecting ? "is-selecting" : "") + (selected ? " is-selected" : "")}
+      className={"st-library-list-row" + (selecting ? " is-selecting" : "") + (selected ? " is-selected" : "")}
       data-asset-id={assetId}
       {...press.handlers}
     >

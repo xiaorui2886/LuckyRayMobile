@@ -137,8 +137,13 @@ test("R7-BACK — an active selection consumes BACK before any navigation", () =
   const before = app.slice(app.indexOf("onBackButtonPress(() => {"), idx);
   const overlayAt = before.indexOf("overlayStack.dismissTop()");
   const noteAt = before.indexOf("luckyray:desktop-note-back");
-  assert.ok(noteAt < overlayAt && overlayAt < before.length,
-    "the note guard and overlay dismissal keep their existing priority");
+  // A note listener cancels BACK and starts navigation even in reading mode.
+  // An open image preview must dismiss before that listener is dispatched.
+  assert.ok(overlayAt >= 0 && noteAt > overlayAt && noteAt < before.length,
+    "an overlay dismisses before the note guard; both precede selection and navigation");
+  const noteStmt = before.slice(before.lastIndexOf("if (!window.dispatchEvent", noteAt), noteAt + 120);
+  assert.match(noteStmt, /\)\)\) return;/u,
+    "with no overlay a prevented note event still blocks navigation until its save guard settles");
   assert.ok(overlayAt < idx, "selection-back is consulted AFTER overlays (an open sheet still closes first)");
 
   const lib = LIB();

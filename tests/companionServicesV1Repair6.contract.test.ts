@@ -100,7 +100,7 @@ test("P1-H8 — no polling or sleep workaround was introduced", () => {
 test("P1-H8 — the worker still refuses before constructing a dial", () => {
   const worker = code(WORKER);
   const installAt = worker.indexOf("state.install_cancellation_if_current(generation)");
-  const dialAt = worker.indexOf("hint_websocket_connect(&url, &authorization, &fingerprint)");
+  const dialAt = worker.indexOf("hint_scoped_websocket_connect(&url, &authorization, &fingerprint, library.as_deref(), vault.as_deref())");
   assert.ok(installAt >= 0 && dialAt > installAt, "install precedes the dial");
   assert.match(worker.slice(installAt, installAt + 220), /None => \{[\s\S]{0,120}?return;/u,
     "a refusal returns before any dial");

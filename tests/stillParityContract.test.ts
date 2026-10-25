@@ -1,3 +1,5 @@
+import {normalizeOvernightNavigation} from "./overnightNavigationAuthority.ts";
+import { normalizeNoteChrome } from './noteChromeAuthority.ts';
 // tests/stillParityContract.test.ts — STILL-01.1 parity rebuild guards.
 //
 // Deterministic contracts for [STILL-01.1-PARITY-REBUILD-R1]:
@@ -100,22 +102,57 @@ const NAVIGATION_CSS_BOUNDARY = "\n/* Read-only desktop knowledge navigation; us
 
 test("still parity — authority copies preserve the staged design blobs", () => {
   for (const [file, digest] of Object.entries(AUTHORITY_DIGESTS)) {
-    const source = read("src", "presentation", "still01", file);
+    const rawSource = read("src", "presentation", "still01", file);
+    // Authorized saved-library selector adds one bounded slot only. Normalize
+    // that slot to keep the pre-existing visual authority digest unchanged.
+    const scopedSource = file === "Views.tsx" ? rawSource.replace("sourceSwitchSlot?:ReactNode;", "").replace("{p.sourceSwitchSlot ?? <SourceSwitch value={p.source} onChange={p.onSource}/>}", "<SourceSwitch value={p.source} onChange={p.onSource}/>").replace(/\n$/, "").replace(";librarySlot?:ReactNode;", ";").replace("{p.librarySlot}", "").replace("label={p.source==='desktop'?'目录':library?'浏览本机素材':'选择知识库'}", "label={library?(p.source==='desktop'?'目录':'浏览本机素材'):'选择知识库'}") : rawSource;
+    let source = file === "Still.tsx" ? normalizeNoteChrome(rawSource) : file === "Views.tsx" ? normalizeOvernightNavigation(scopedSource) : scopedSource;
     const boundary = file === "still.css" ? source.indexOf(NAVIGATION_CSS_BOUNDARY) : -1;
     if (file === "still.css") assert.ok(boundary > 0, "the authorized append-only navigation boundary exists");
     // User screenshot request 2026-10-09 explicitly replaces NoteSurface
     // chrome, read toggle and command icons. Pin that bounded component plus
     // the untouched prefix independently; do not bless other kit changes.
     if (file === "Still.tsx") {
+   // Normalize only this reviewed paper-scroll touch owner, not generic styles.
+   const paperTouch = " {/* Touch arbitration stops at this scroll container, before the outer swipe owner. */}\n <main style={{touchAction:'pan-y'}} className={'st-note-paper'+(p.mode==='edit'?' is-editing':'')}>";
+   assert.equal(source.split(paperTouch).length, 2, 'the actual scroll paper owns pan-y exactly once');
+   source=source.replace(paperTouch, " <main className={'st-note-paper'+(p.mode==='edit'?' is-editing':'')}>");
       const marker = "export type NoteState=";
       const split = source.indexOf(marker); assert.ok(split > 0);
-      const prefix = source.slice(0, split).replace('import { systemBarScrim } from "../../services/systemBarAppearance";\n', "").replace("\n useEffect(() => systemBarScrim.acquire(), []);", "").replace("iconPaths[name]||noteActionPaths[name as keyof typeof noteActionPaths]||iconPaths.file", "iconPaths[name]||iconPaths.file").replace("import { NoteActionIcon, noteActionPaths } from './editor/NoteActionIcon';\n", "").replace("danger=false,icon,iconSlot}:{label:string;", "danger=false,icon}:{label:string;").replace("danger?:boolean;icon?:string;iconSlot?:ReactNode}", "danger?:boolean;icon?:string}").replace("{iconSlot??(icon&&<Icon name={icon} size={19}/>)}", "{icon&&<Icon name={icon} size={19}/>}");
+      const prefix = source.slice(0, split).replace("import { NoteBodyTransition } from './editor/NoteBodyTransition';\n", "").replace('import { systemBarScrim } from "../../services/systemBarAppearance";\n', "").replace("\n useEffect(() => systemBarScrim.acquire(), []);", "").replace("iconPaths[name]||noteActionPaths[name as keyof typeof noteActionPaths]||iconPaths.file", "iconPaths[name]||iconPaths.file").replace("import { NoteActionIcon, noteActionPaths } from './editor/NoteActionIcon';\n", "").replace("danger=false,icon,iconSlot}:{label:string;", "danger=false,icon}:{label:string;").replace("danger?:boolean;icon?:string;iconSlot?:ReactNode}", "danger?:boolean;icon?:string}").replace("{iconSlot??(icon&&<Icon name={icon} size={19}/>)}", "{icon&&<Icon name={icon} size={19}/>}");
       assert.equal(sha256(prefix), "39dd376a6e00119b35488010e48a964a33075493d33b9b9bc5d0e233e445e3cc");
-      assert.equal(sha256(source.slice(split)), "18bbe58d2a11aff2a9fc1d846dcee701614ca86aa611f8617d5eccb85ed77bd8");
+      // MOBILE-NOTES: normalize only reviewed title completion additions.
+      // Preserve every unrelated byte under its original digest.
+      const titleFocus = " const titleInput=useRef<HTMLInputElement>(null);\n // A committed reading transition ends title editing too; failed saves keep focus.\n useLayoutEffect(()=>{const title=titleInput.current;if(p.mode==='read'&&title&&title.ownerDocument.activeElement===title)title.blur()},[p.mode]);\n";
+      const titleDone = " enterKeyHint=\"done\" onKeyDown={e=>{if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229){e.preventDefault();p.onRead?.()}}}";
+      let body = source.slice(split);
+      // Only the reviewed first-preview handoff replaces the body branch.
+      const handoffStart = " <NoteBodyTransition mode={p.mode==='edit'&&editable?'edit':'read'} scope={p.editorScope} body={p.body} editor={p.bodyEditor??<textarea";
+      assert.equal(body.split(handoffStart).length, 2);
+      assert.equal(body.split(' </div></NoteBodyTransition>').length, 2);
+      assert.equal(body.split('bodyEditor?:ReactNode;editorScope?:string}').length, 2);
+      body = body.replace(handoffStart, " {p.mode==='edit'&&editable?(p.bodyEditor??<textarea")
+        .replace('spellCheck={false}/>}><div className=', 'spellCheck={false}/>):<div className=')
+        .replace(' </div></NoteBodyTransition>', ' </div>}')
+        .replace('bodyEditor?:ReactNode;editorScope?:string}', 'bodyEditor?:ReactNode}');
+      assert.equal(body.split(titleFocus).length, 2);
+      assert.equal(body.split(titleDone).length, 2);
+      assert.equal(body.split('<input ref={titleInput} className="st-note-title"').length, 2);
+      body = body.replace(titleFocus, '').replace(titleDone, '').replace('<input ref={titleInput} className="st-note-title"', '<input className="st-note-title"');
+      assert.equal(sha256(body), "18bbe58d2a11aff2a9fc1d846dcee701614ca86aa611f8617d5eccb85ed77bd8");
       continue;
     }
     const liveCurrentBlock = "\n// Paint may be retained; whether this page can act must remain live.\nconst PageCurrentContext=createContext<boolean|undefined>(undefined);\nexport function usePageCurrent(fallback=true):boolean {\n return useContext(PageCurrentContext)??fallback;\n}\nexport function useRetainedPage():boolean {\n return useContext(PageCurrentContext)!==undefined;\n}\n";
     let pinned = boundary < 0 ? source : source.slice(0, boundary);
+    if (file === "still.css") {
+      // 2026-10-22 parity repair: scope only note-name H1 selectors and restore
+      // CodeMirror's required virtual spacer. Keep all unrelated bytes pinned.
+      assert.equal(pinned.split(".st-note-paper > h1").length, 3);
+      const gapRepair = "/* Preserve CodeMirror virtual-document gap heights for long notes. */";
+      assert.equal(pinned.split(gapRepair).length, 2);
+      pinned = pinned.replaceAll(".st-note-paper > h1", ".st-note-paper h1")
+        .replace(gapRepair, ".st-note-editor.is-cm .cm-gap{display:none}");
+    }
     if (file === "PageLayer.tsx") {
       assert.equal(source.split(liveCurrentBlock).length, 2, "one exact scoped live-currentness addition");
       assert.equal(source.split('<PageCurrentContext.Provider value={current&&!leaving}>').length, 2);
@@ -126,6 +163,29 @@ test("still parity — authority copies preserve the staged design blobs", () =>
         .replace('</PageCurrentContext.Provider>', "");
     }
     if (file === "Views.tsx") {
+      // DESKTOP-FAMILY: only appearance labels/copy change. Normalize these
+      // exact authorized strings; keep every editor/view byte pinned.
+      assert.equal(pinned.split('LuckyRay · 默认').length, 2);
+      assert.equal(pinned.split('与桌面默认主题同系的中性色与蓝紫强调色。明暗切换不改变内容。').length, 2);
+      pinned = pinned.replace('LuckyRay · 默认', 'Still · 静面')
+        .replace('与桌面默认主题同系的中性色与蓝紫强调色。明暗切换不改变内容。', 'Still 是独立设计候选，不覆盖现有三套风格。选中通过勾选和明暗表达，不加高亮边框。');
+      // Settings child polish: normalize only the two new appearance wrappers.
+      // All existing option props, labels, callbacks, and every other view stay pinned.
+      const appearanceScope = 'className="st-view st-settings-page st-settings-appearance"';
+      const interactionGroup = '<div className="st-settings-group"><Option label="减少动态效果" detail="保留状态变化，减少页面位移" selected={p.reduced} onClick={p.onReduced}/></div>';
+      assert.equal(pinned.split(appearanceScope).length, 2, "one appearance scope");
+      assert.equal(pinned.split(interactionGroup).length, 2, "one unchanged grouped interaction control");
+      pinned = pinned.replace(appearanceScope, 'className="st-view"')
+        .replace(interactionGroup, '<Option label="减少动态效果" detail="保留状态变化，减少页面位移" selected={p.reduced} onClick={p.onReduced}/>');
+      // MOBILE-R8: user requested a directory-only desktop menu and no second
+      // visible desktop loading caption. Normalize ONLY these exact fragments
+      // back to the reviewed blob; keep every other byte under its old digest.
+      const r8FolderLabel = "label={library?(p.source==='desktop'?'目录':'浏览本机素材'):'选择知识库'}";
+      const r8LoadingCaption = "{p.source==='local'?<p className=\"st-loading-caption\">正在读取本机素材</p>:null}";
+      assert.equal(pinned.split(r8FolderLabel).length, 2, "one exact R8 folder label replacement");
+      assert.equal(pinned.split(r8LoadingCaption).length, 2, "one exact R8 loading caption replacement");
+      pinned = pinned.replace(r8FolderLabel, "label={library?'目录与标签':'选择知识库'}")
+        .replace(r8LoadingCaption, "<p className=\"st-loading-caption\">{p.source==='local'?'正在读取本机素材':'正在从电脑读取素材'}</p>");
       pinned = pinned.replace("onNoteVisibility?:(id:string,visible:boolean)=>void;", "").replaceAll(" onVisibility={p.onNoteVisibility}", "");
       // MOBILE-R6: one optional compact toolbar slot, strictly inside the scroll.
       // Undo precisely these two additions, preserving the accepted baseline hash.
@@ -133,7 +193,7 @@ test("still parity — authority copies preserve the staged design blobs", () =>
       assert.equal(pinned.split("{p.toolbarSlot}").length, 2);
       pinned = pinned.replace("toolbarSlot?:ReactNode;", "").replace("{p.toolbarSlot}", "");
       // UI R3: knowledge-only row layout scope and document symbols; library untouched.
-      pinned = pinned.replace('className={"st-view"+(!library?" st-knowledge-view":"")}', 'className="st-view"')
+      pinned = pinned.replace('className={"st-view"+(!library?" st-knowledge-view":" st-library-view")}', 'className="st-view"')
         .replaceAll('<span className="st-knowledge-note-symbol" aria-hidden="true"><Icon name="file" size={20}/></span>', '');
     }
     const actual = sha256(pinned);
@@ -215,10 +275,12 @@ test("still parity — every root renders an authority View", () => {
   for (const [cond, view] of [
     ['rootTab === "home"', "StillHome"],
     ['rootTab === "knowledge"', "StillKnowledge"],
-    ['rootTab === "ai"', "StillAgent"],
   ] as const) {
     assert.match(shellTsx, new RegExp(`${cond.replace(/"/g, '"')} [?:] <${view}`), `${view} is routed for its root`);
   }
+  assert.match(shellTsx,/agentVisited\.current \? <div key="retained-agent" hidden=\{rootTab !== "ai"\}/,"LSH retains one visited root, hidden on other tabs");
+  assert.match(shellTsx,/<StillAgent conn=\{conn\} active=\{rootTab === "ai" && !top\} \/>/,"retained Agent gets actual root/detail activity boundary");
+  assert.equal((shellTsx.match(/<StillAgent /g) || []).length, 1, "only one Agent root exists");
   assert.match(shellTsx,/libraryVisited\.current \? <div key="retained-library" hidden=\{rootTab !== "library"\}/,"#97 retains only the visited Library and hides it on other roots");
   assert.match(shellTsx,/<StillLibrary conn=\{conn\} active=\{rootTab === "library"\} \/>/,"the sole material root receives its actual activity boundary");
   assert.match(shellTsx, /: <StillSettingsRoot/, "settings root falls through to StillSettingsRoot");
@@ -238,7 +300,14 @@ test("still parity — this contract is registered in CI Lite", () => {
 // Exact hash prevents silently expanding selector scope during later work.
 test("navigation repair style suffix remains reviewed and exact", () => {
   const css = read("src", "presentation", "still01", "still.css");
-  const suffix = css.slice(css.indexOf("/* Navigation repair:"));
+  // MOBILE-R8 is append-only and has its own exact digest. Splitting at a
+  // unique boundary preserves the navigation suffix's existing reviewed hash;
+  // it does not authorize edits to any previous rule or an expanded R8 scope.
+  const r8Boundary = "\n/* R8: disconnected/probing/error states share the LightSeek page's centering.";
+  assert.equal(css.split(r8Boundary).length, 2, "one appended R8 state-centering block");
+  const r8Start = css.indexOf(r8Boundary);
+  assert.equal(sha256(css.slice(r8Start)), "d7faaf10f2388ceeded9bea640f76b8e54c79e5ffdf92bb9d6a6c91ac09d9b7b");
+  const suffix = css.slice(css.indexOf("/* Navigation repair:"), r8Start);
   // Browser repair: only the editor strip gains horizontal overscroll containment.
   assert.equal(sha256(suffix), "8001098ab1a0402be0393b5f6c1a7b00af522ec18d1f8f2b6a72599a6823b644");
 });

@@ -1,3 +1,4 @@
+import "./settingsPages.css";
 // STILL-01.1 — 连接电脑 page (Still composition, connectionShell authority).
 // State comes ONLY from createConnectionShellController, which wraps the
 // EXISTING pairing authorities. The secret/credential is never displayed;
@@ -48,8 +49,8 @@ export function StillConnect() {
   const online = snap.ws.state === "connected";
 
   return (
-    <>
-      <div className="st-view">
+    <div className="st-settings-overlay-scope">
+      <div className="st-view st-settings-page st-settings-connect">
         <Header title="连接电脑" left={<IconButton icon="back" label="返回上一页" onClick={back} />} />
         <div className="st-scroll">
           {snap.phase === "unpaired" ? (
@@ -136,8 +137,10 @@ export function StillConnect() {
             <>
               <Empty icon="monitor" title="LuckyRay Desktop"
                 body={online ? "已配对 · 当前连接正常" : "已配对 · 当前未连接"} />
-              <Row title="连接状态" trail={online ? "已连接" : snap.ws.state === "reconnecting" || snap.ws.state === "connecting" ? "正在连接" : "未实时连接"} onClick={() => void shell.refresh()} />
-              <Row title="连接方式" trail="同一局域网" onClick={() => void shell.refresh()} />
+              <div className="st-settings-group">
+                <Row title="连接状态" trail={online ? "已连接" : snap.ws.state === "reconnecting" || snap.ws.state === "connecting" ? "正在连接" : "未实时连接"} onClick={() => void shell.refresh()} />
+                <Row title="连接方式" trail="同一局域网" onClick={() => void shell.refresh()} />
+              </div>
               {/* 重新连接 is reachable in BOTH idle and reconnecting phases: a
                   wedged retry loop must be manually interruptible without
                   falling back to 断开连接 (which vetoes auto-resume). ws_start
@@ -177,6 +180,6 @@ export function StillConnect() {
           <p className="st-sheet-copy">清除配对后需要重新配对。不会删除手机上的本机笔记、素材或收集箱。</p>
         </Sheet>
       ) : null}
-    </>
+    </div>
   );
 }

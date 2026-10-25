@@ -1,0 +1,24 @@
+.st-safe-note-markdown { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.st-safe-note-markdown pre { max-width: 100%; overflow-x: auto; white-space: pre; }
+.st-safe-note-markdown table { display: block; max-width: 100%; overflow-x: auto; }
+.st-safe-note-markdown img, .st-safe-note-markdown video, .st-safe-note-markdown audio { max-width: 100%; }
+/* The app's text-input reset also matches GFM's read-only checkboxes. Restore
+   their native indicator only inside rendered notes, without changing fields. */
+.st-app .st-safe-note-markdown input[type="checkbox"] { -webkit-appearance: checkbox; appearance: auto; width: 1em; height: 1em; margin: 0 .4em 0 0; vertical-align: middle; }
+.st-app .st-safe-note-markdown .task-list-item { list-style: none; }
+.st-note-image-trigger { display: block; max-width: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; }
+.st-note-image-trigger img { display: block; max-width: 100%; height: auto; }
+.st-note-image-dialog { box-sizing: border-box; width: calc(100vw - 24px); max-width: 1100px; max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); padding: 12px; border: 0; border-radius: 12px; color: var(--text, #222); background: var(--surface, #fff); }
+.st-note-image-dialog::backdrop { background: #000b; }
+.st-note-image-dialog header { display: flex; align-items: center; gap: 12px; justify-content: space-between; overflow-wrap: anywhere; }
+.st-note-image-dialog header button { flex-shrink: 0; min-width: 44px; min-height: 44px; }
+.st-note-image-dialog img { display: block; max-width: 100%; max-height: calc(100vh - 130px); max-height: calc(100dvh - 130px); width: auto; height: auto; object-fit: contain; margin: 12px auto 0; }
+
+.st-note-image-dialog[data-modal-fallback] { position: fixed; z-index: 10000; inset: 0; margin: 0; width: 100vw; max-width: none; height: 100vh; max-height: none; border-radius: 0; background: #fff; }
+
+/* Shared semantic highlight without forcing an opaque light-theme background. */
+.st-safe-note-markdown mark { color: inherit; background: rgba(242,201,76,.34); background: color-mix(in srgb, #f2c94c 34%, transparent); border-radius: 2px; padding: 0 .04em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.st-safe-note-markdown .st-wiki-link.is-missing{text-decoration-style:dashed;opacity:.7}
+.st-safe-note-markdown .st-wiki-link.is-missing:after{content:' ?';font-size:.8em}
+.st-safe-note-markdown .st-wiki-link.is-ambiguous{text-decoration-style:dotted}
+.st-safe-note-markdown .st-wiki-link.is-ambiguous:after{content:' ⋯';font-size:.8em}

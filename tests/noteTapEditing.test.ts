@@ -100,9 +100,11 @@ test("tap entry: production mount never autofocuses or resets the reading/search
 
 test("tap entry: title stays the same input and note controls contain no Edit/Done switch", () => {
   const surface = readFileSync("src/presentation/still01/Still.tsx", "utf8").split("export function NoteSurface")[1];
-  assert.match(surface, /editable\?<input className="st-note-title"/);
+  assert.match(surface, /editable\?<input ref=\{titleInput\} className="st-note-title"/);
   assert.match(surface, /onFocus=\{\(\)=>\{if\(p.mode==='read'\)p.onEdit\(\)\}\}/);
   assert.match(surface, /editable=!noBody&&!p.readOnly/);
+  assert.match(surface, /title\.blur\(\)/);
+  assert.match(surface, /!e.nativeEvent.isComposing&&e.keyCode!==229/);
   assert.match(surface, /selection&&!selection.isCollapsed/);
   assert.match(surface, /Date.now\(\)-start.at>550/);
   assert.doesNotMatch(surface, /onMode|完成编辑|编辑笔记|>完成<|开始书写/);

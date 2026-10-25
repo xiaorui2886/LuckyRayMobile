@@ -44,6 +44,7 @@ export function contentSyncDiagnostic(snapshot: SyncSnapshot): ContentSyncDiagno
   if (snapshot.status === "idle" || snapshot.status === "syncing")
     return { status, errorCode: null as string | null, httpStatus: null as number | null };
   let raw = (snapshot.error || "").replace(/^Error: /, "");
+  if (raw === "CONTENT_PAIRING_REVIEW_REQUIRED") return {status:"重新配对前的修改已保留 · 提交暂停",errorCode:raw,httpStatus:null};
   if (raw === "CONTENT_SYNC_REQUIRES_ATTENTION") return {status:"草稿已保存在手机 · 需处理",errorCode:raw,httpStatus:null};
   const receiver = /^(CONTENT_MUTATION_HTTP_[^\r\n]*) receiverV=1 https=(YES|NO|UNKNOWN) port=([1-9]\d{0,4}|UNKNOWN) catalog=(MATCH|MISMATCH|MISSING|NOT_OBSERVED)$/.exec(raw);
   const receiverFacts = receiver && (receiver[3] === "UNKNOWN" || Number(receiver[3]) <= 65535)

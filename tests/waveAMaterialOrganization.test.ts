@@ -357,7 +357,7 @@ test("closure: wrong HTTP methods fail closed at the Desktop route", () => {
   const refuse = mutate.indexOf("return Err((405");
   assert.ok(refuse !== -1, "a mismatched method is refused with 405");
   // The 405 must precede the first authority call in the same function.
-  const firstAuthority = mutate.search(/(catalog|gateway|backend)\./);
+  const firstAuthority = mutate.search(/\b(catalog|gateway|backend)\./);
   assert.ok(
     firstAuthority === -1 || refuse < firstAuthority,
     "405 is returned before any authority is touched",
@@ -440,10 +440,10 @@ test("source-owner: every Desktop material open path carries the producing owner
   const desktopLibrary = read("src", "components", "DesktopLibrary.tsx");
 
   // Library opens against the owner that PRODUCED the committed rows.
-  assert.match(library, /open\("asset", desktopAssetRoute\(committedDesktopOwner, id \|\| ""\), \{ assetPreview: card \? \{ title: card\.title, thumbnail: card\.src, kind: card\.kind, version:\s*materialImageVersion\(desktopItems\.find\(a=>a\.desktopAssetId===id\)\)/,
+  assert.match(library, /open\("asset", desktopAssetRoute\(committedDesktopOwner, id \|\| "", library\), \{ assetPreview: card \? \{ title: card\.title, thumbnail: card\.src, kind: card\.kind, version:\s*materialImageVersion\(desktopItems\.find\(a=>a\.desktopAssetId===id\)\)/,
     "library rows open with their producing owner and same-card versioned preview");
   // Search opens against the committed search context, mirroring the note row.
-  assert.match(search, /desktopAssetRoute\(instance, hit\.assetId\)/,
+  assert.match(search, /desktopAssetRoute\(instance, hit\.assetId, library\)/,
     "search opens with the captured search identity (instance + hit assetId)");
   // The legacy Desktop library opens with the instance it is bound to.
   assert.match(desktopLibrary, /open\(desktopAssetRoute\(instance, a\.desktopAssetId\)\)/,
@@ -468,13 +468,13 @@ test("source-owner: the detail page fixes the owner from the route, not a live c
 test("source-owner: every Desktop material live read names an expected owner", () => {
   const asset = read("src", "still", "StillAsset.tsx");
   // Detail, thumbnail, navigation, original file — all bound to the page owner.
-  assert.match(asset, /api\.contentAssetDetail\(owner,\s*assetId\)/);
-  assert.match(asset, /api\.assetThumbnail\(owner,\s*assetId,\s*false,\s*false,\s*version\)/);
-  assert.match(asset, /api\.assetThumbnail\(owner,\s*assetId,\s*force,\s*true,\s*version\)/);
-  assert.match(asset, /api\.contentAssetFile\(owner, assetId, jobId\)/);
-  assert.match(asset, /api\.contentCachedResource\(owner, assetId\)/);
-  assert.match(asset, /api\.contentOpenResource\(owner, assetId\)/);
-  const nav = asset.split("api.contentNavigation(owner)").length - 1;
+  assert.match(asset, /scopedApi\.contentAssetDetail\(owner,\s*assetId\)/);
+  assert.match(asset, /scopedApi\.assetThumbnail\(owner,\s*assetId,\s*false,\s*false,\s*version\)/);
+  assert.match(asset, /scopedApi\.assetThumbnail\(owner,\s*assetId,\s*force,\s*true,\s*version\)/);
+  assert.match(asset, /scopedApi\.contentAssetFile\(owner, assetId, jobId\)/);
+  assert.match(asset, /scopedApi\.contentCachedResource\(owner, assetId\)/);
+  assert.match(asset, /scopedApi\.contentOpenResource\(owner, assetId\)/);
+  const nav = asset.split("scopedApi.contentNavigation(owner)").length - 1;
   assert.equal(nav, 2, `both organization sheets bind navigation to the owner, saw ${nav}`);
   // No read may be issued against the live connection value.
   assert.ok(!/contentAssetDetail\(routeId\)/.test(asset));
@@ -497,7 +497,7 @@ test("source-owner: revalidation uses the same fixed owner and a real generation
   const readDetail = asset.slice(readAt, asset.indexOf("},[owner,assetId]);", readAt) + 20);
   assert.match(readDetail, /const gen\s*=\s*detailGen\.current, seq\s*=\s*\+\+readSeq\.current;/);
   assert.match(readDetail, /const current\s*=\s*\(\)\s*=>\s*gen\s*===\s*detailGen\.current && seq\s*===\s*readSeq\.current;/);
-  assert.match(readDetail, /const value\s*=\s*await api\.contentAssetDetail\(owner,\s*assetId\);\s*if \(!current\(\)\) return;/,
+  assert.match(readDetail, /const value\s*=\s*await scopedApi\.contentAssetDetail\(owner,\s*assetId\);\s*if \(!current\(\)\) return;/,
     "latest-request and route generation both guard the expected-owner read");
 });
 
@@ -514,8 +514,9 @@ test("source-owner: a Desktop switch cannot render stale rows as the new Desktop
     "and reports THAT owner, not merely the bound one");
   // A bind retires the previous page before requesting the new one.
   const bind = authority.slice(authority.indexOf("bind(owner: string"));
-  assert.match(bind.slice(0, 900), /this\.committed = "";/,
-    "binding a new owner drops the previous committed page");
+  assert.match(bind.slice(0, 900), /this\.activate\(owner, source\);/,
+    "binding selects only the exact owner/source snapshot before requesting");
+  assert.match(authority, /this\.retained\.get\(this\.identity\)/, "restoration is keyed to the complete current identity");
   assert.match(bind.slice(0, 1200), /this\.request\(source\);/,
     "and then issues the new owner's first request");
   // Rows render only while their owner is current AND the retained snapshot's
@@ -534,9 +535,9 @@ test("source-owner: a Desktop switch cannot render stale rows as the new Desktop
   // bounded scheduler with a source+owner-qualified key (MATERIAL-LIBRARY-
   // INSTANT-R1); the owner argument is unchanged, and REPAIR-R2 added the
   // bounded `force` retry flag after it.
-  assert.match(library, /api\.assetThumbnail\(owner,\s*desktopAssetId,\s*force,\s*false,\s*revision\)/,
+  assert.match(library, /scopedApi\.assetThumbnail\(owner,\s*desktopAssetId,\s*force,\s*false,\s*revision\)/,
     "Desktop thumbnails still carry the producing owner and available version");
-  assert.match(library, /thumbnailScheduler[\s\S]{0,80}desktopThumbKey\(owner,\s*desktopAssetId,\s*revision\)/,
+  assert.match(library, /thumbnailScheduler[\s\S]{0,80}desktopThumbKey\(owner,\s*desktopAssetId,\s*revision,false,library\)/,
     "and go through the bounded scheduler with an owner/version-qualified key");
 });
 
@@ -552,14 +553,25 @@ test("source-owner: the Rust reads fail closed on a mismatched owner", () => {
   // The expected-owner read re-checks after the awaited capability probe.
   assert.match(content, /async fn cached_material_get_expected\(/);
   const expected = content.slice(content.indexOf("async fn cached_material_get_expected"));
-  assert.ok(expected.indexOf("capture_expected") < expected.indexOf("content_get(path)"),
-    "the owner is proven BEFORE any request reaches the wire");
+  const metadataCall = expected.indexOf("source.metadata_get(state, path).await?");
+  assert.ok(metadataCall >= 0 && expected.indexOf("capture_expected") < metadataCall,
+    "the owner is captured before entering the metadata wrapper");
+  const metadata = content.slice(content.indexOf("async fn metadata_request("), content.indexOf("async fn metadata_get("));
+  const wire = metadata.indexOf("self.gateway.content_request(reqwest::Method::GET, path, None)");
+  assert.ok(wire >= 0 && metadata.indexOf("self.check(state)?") < wire,
+    "the captured source is proven BEFORE preparing the wire read");
+  assert.ok(metadata.lastIndexOf("self.check(state)?") > metadata.lastIndexOf(".await"),
+    "the captured source is re-proven after either transport branch");
+  assert.match(metadata, /read_metadata_with_retry\(\|\| self\.check\(state\), read\)/,
+    "each bounded retry also receives the original source fence");
+  assert.match(metadata, /if self\.scoped_v1_proven\(\)/,
+    "legacy and unproven scopes never enter retry recovery");
 
   // The cache fallback is keyed by the EXPECTED owner and refuses when the
   // pairing has moved on — B's cache is never served as A.
   const fallback = expected.slice(expected.indexOf("CONTENT_OFFLINE"));
-  assert.match(fallback.slice(0, 600), /p\.instance_id == expected_instance/, "cache only for the expected owner");
-  assert.match(fallback.slice(0, 600), /content_cached_response\(expected_instance, path\)/, "A's cache, never B's");
+  assert.match(fallback.slice(0, 850), /p\.instance_id == expected_instance/, "cache only for the expected owner");
+  assert.match(fallback.slice(0, 850), /content_cached_response\(&guard\.cache_owner\(\), path\)/, "A's cache, never B's");
 
   // All three material reads route through the expected variant.
   for (const cmd of ["content_assets", "content_navigation", "content_asset_detail"]) {
@@ -576,7 +588,7 @@ test("source-owner: the Rust reads fail closed on a mismatched owner", () => {
   const thumb = lib.slice(lib.indexOf("async fn asset_thumbnail"));
   // The capture is still the first thing the command does (the bounded `force`
   // retry flag added by MATERIAL-LIBRARY-INSTANT-R1 sits on the signature line).
-  assert.match(thumb.slice(0, 1200), /expected_thumbnail_source\(&state, &instance\)/,
+  assert.match(thumb.slice(0, 1500), /expected_thumbnail_source\(&state, &instance, library\.as_deref\(\)\)/,
     "the thumbnail captures the expected Desktop once");
   assert.ok(thumb.indexOf("expected_thumbnail_source") < thumb.indexOf("thumbnail_meta"),
     "the capture precedes the instance-keyed cache lookup");
@@ -813,10 +825,10 @@ test("reader repair: note resource local IPC binds the expected Desktop without 
   );
 
   const command = rust.slice(rust.indexOf("pub(crate) async fn content_note_resource("), rust.indexOf("async fn download_resource("));
-  assert.match(command, /download_resource\(state, app, &instance, id, job_id, Some\(\(vault, note\)\), None, None\)/);
+  assert.match(command, /download_resource\(state, app, &instance, None, id, job_id, Some\(\(vault, note\)\), None, None\)/);
   // Composition guard only; behavior/late-result tests exercise this real session.
   const preview = read("src", "components", "DesktopNotePreview.tsx");
-  assert.match(preview, /new NoteResourceSession\(\{instance, vault, note\}, resource, api,/);
+  assert.match(preview, /new NoteResourceSession\(\{localVaultId, revision, instance, vault, note\}, resource, api,/);
   const session = read("src", "services", "noteResourceSession.ts");
   assert.match(session, /this\.effects\.contentNoteResource\(instance, vault, note, this\.resource\.resourceId, job\)/);
 });
@@ -824,10 +836,10 @@ test("reader repair: note resource local IPC binds the expected Desktop without 
 test("r3: material downloads keep their expected-owner binding", () => {
   const rust = read("src-tauri", "src", "content.rs");
   const rustParams = rustCommandParams(rust, "content_asset_file");
-  assert.deepEqual(rustParams, ["instance", "id", "job_id", "max_bytes", "expected_version"], "material downloads stay owner-bound with optional speculative limits");
+  assert.deepEqual(rustParams, ["instance", "library", "id", "job_id", "max_bytes", "expected_version"], "material downloads stay owner-bound with optional speculative limits");
 
   const jsParams = jsWrapperParams(read("src", "services", "client.ts"), "contentAssetFile");
-  assert.deepEqual(jsParams.map(snake), rustParams, "JS and Rust agree for the material path");
+  assert.deepEqual(jsParams.map(snake).sort(), [...rustParams].sort(), "named JS and Rust arguments agree including immutable library");
 
   // The owner binding is real: the material command captures an expected source.
   const dl = rust.slice(rust.indexOf("async fn download_resource"));
@@ -844,7 +856,7 @@ test("r3: the thumbnail uses ONE captured source for the whole request", () => {
   const body = lib.slice(at, lib.indexOf("fn thumb_json("));
 
   // The capture is retained...
-  assert.match(body, /let owner = crate::content::expected_thumbnail_source\(&state, &instance\)\?;/,
+  assert.match(body, /let owner = crate::content::expected_thumbnail_source\(&state, &instance, library\.as_deref\(\)\)\?;/,
     "one expected-source capture owns the operation");
   // ...and it is the ONLY thing that performs the network request.
   assert.match(body, /owner\s*\n?\s*\.fetch\(&state, &id,/, "the fetch goes through the captured owner");
@@ -861,8 +873,8 @@ test("r3: the thumbnail uses ONE captured source for the whole request", () => {
   assert.ok(verifyCalls >= 2, `the owner is re-proven before AND after the request, saw ${verifyCalls}`);
 
   // Cache rows and the fetch cannot disagree: both are keyed by the capture.
-  assert.match(body, /let instance = owner\.instance\(\)\.to_string\(\);/,
-    "the cache key comes from the captured owner");
+  assert.match(body, /let instance = owner\.cache_owner\(\);/,
+    "the cache key comes from the captured owner and immutable library");
   assert.ok(body.indexOf("owner.instance()") < body.indexOf("thumbnail_meta"),
     "the cache key is fixed before the cache is read");
 });

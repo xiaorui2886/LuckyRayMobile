@@ -53,7 +53,7 @@ test("R5-S7 — a long press enters selection and selects the held asset", () =>
   assert.match(handler, /setSelectedIds\(\(prev\) => selectionWithRange\(\{ anchorIndex: idx, baseline: prev \}, idx, orderedDesktopIds\)\)/u,
     "the held asset becomes the selected anchor");
   // Desktop-only: the local source keeps single-tap semantics.
-  assert.match(lib, /onLongPress=\{domain === "desktop" \?/u, "the gesture is Desktop-only");
+  assert.match(lib, /onLongPress=\{domain === "desktop" && writeGranted \?/u, "the gesture is Desktop-only");
 });
 
 // F6 + F11. short tap opens in normal mode; in selection mode it toggles exactly
@@ -65,10 +65,12 @@ test("R5-S6/S11 — a tap opens the detail normally and toggles in selection mod
     "selection mode intercepts the tap first");
   assert.match(body, /prev\.includes\(id\) \? prev\.filter\(\(x\) => x !== id\) : \[\.\.\.prev, id\]/u,
     "which toggles exactly that asset");
-  assert.match(body, /desktopAssetRoute\(committedDesktopOwner, id \|\| ""\)/u,
+  assert.match(body, /desktopAssetRoute\(committedDesktopOwner, id \|\| "", library\)/u,
     "and a normal Desktop tap still opens the owner-qualified detail route");
-  assert.match(body, /open\("asset", id \|\| "", \{ assetPreview: card \? \{ title: card\.title, thumbnail: card\.src, kind: card\.kind \}/u,
-    "a Local tap opens the same asset with its already-seen card");
+  assert.match(body, /open\("asset", id \|\| "", \{ assetPreview: card \? \{ title: card\.title, thumbnail: card\.src, kind: card\.kind, sequence: assets\.map/u,
+    "a Local tap opens the same asset with its already-seen card and ordered sequence");
+  assert.match(body, /route: desktopAssetRoute\(committedDesktopOwner, item\.id, library\)/u, "sequence items retain the committed Desktop owner");
+  assert.match(body, /route: item\.id, title: item\.title, thumbnail: item\.src, kind: item\.kind/u, "Local sequence preserves current card order and identity");
 });
 
 // The long press must NOT also open: this is enforced in the shared gesture.
@@ -141,7 +143,7 @@ test("R5-S13 — Cancel exits selection and clears it", () => {
 // F14. a Desktop owner change clears the selection (A selections never reach B)
 test("R5-S14 — a Desktop owner change exits and clears the selection", () => {
   const lib = LIB();
-  const idx = lib.indexOf("desktopAuthority.bind(desktopOwner, DESKTOP_SOURCE());");
+  const idx = lib.indexOf("desktopAuthority.bind(desktopOwner, source);");
   assert.ok(idx > 0, "the owner bind exists");
   const after = lib.slice(idx, idx + 460);
   assert.match(after, /setSelectedIds\(\[\]\)/u, "the selection is emptied on an owner bind");

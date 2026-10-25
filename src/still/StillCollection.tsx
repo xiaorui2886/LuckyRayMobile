@@ -1,3 +1,10 @@
+import { UnifiedNotesRoot } from "./kit/UnifiedNotesView";
+import type { ReactNode } from "react";
+import { DirectoryLibrarySheet, useDesktopLibraries } from "./kit/DesktopLibraryPicker";
+import { desktopLibraries, selectedLibraryReadable } from "../services/desktopLibraries";
+import { useSourceSwipe } from "./kit/useHorizontalSwipe";
+import { pickLocalNoteFile } from "./kit/LocalNoteImportBridge";
+import { LocalNoteUploadSheet } from "./kit/LocalNoteUploadSheet";
 import { desktopNotePrefetch } from "../services/desktopNotePrefetch";
 // STILL-01.1 — Knowledge root (Still CollectionView domain=knowledge).
 // 本机 notes run through the REAL generation-safe pager authority
@@ -29,7 +36,7 @@ import { sessionKnowledge } from "./kit/knowledgeSession";
 import "./kit/knowledgeNavigation.css";
 import { folderChildren } from "./kit/knowledgeFolderCatalog";
 import { FolderBreadcrumbs, FolderRows } from "./kit/knowledgeFolders";
-import { DirectorySheet } from "./kit/directorySheet";
+import { DirectorySheet, DirectoryContents } from "./kit/directorySheet";
 import { KnowledgeLibrarySheet } from "./kit/KnowledgeLibrarySheet";
 import { DirectoryStatusLine } from "./kit/directoryStatusLine";
 import {
@@ -111,11 +118,16 @@ function applyDesktopOverlay(item: NoteItem, overlayIndex: Record<string, Transi
 // like the retained controllers). A detail push/pop does not touch them —
 // the list stays exactly where the user left it.
 const rememberedScroll: Record<"local" | "desktop", number> = { local: 0, desktop: 0 };
+const desktopScrollByScope = new Map<string, number>();
 
 /** Local rows keep the Still NoteItem shape plus the favorite projection. */
 type LocalNoteRow = NoteItem & { favorite?: boolean; raw: any };
 
 export function StillKnowledge({ conn, active = true }: { conn: ConnState | null; active?: boolean }) {
+  return <UnifiedNotesRoot active={active} legacy={(modeSwitch, management) => <LegacyStillKnowledge conn={conn} active={active} modeSwitch={modeSwitch} management={management} />} />;
+}
+
+function LegacyStillKnowledge({ conn, active = true, modeSwitch, management }: { conn: ConnState | null; active?: boolean; modeSwitch: ReactNode; management: ReactNode }) {
   const { open, registerOverlay } = useStillNav();
   const [source, setSource] = useState<"local" | "desktop">(rememberedSource);
   // R4.1/R4.2: ONE session object owns the retention layer (Local pager +
@@ -140,8 +152,12 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
   // painting under a current Desktop B, including on the FIRST frame.
   const paired = Boolean(conn?.paired);
   const instanceId = conn?.identity?.instanceId || "";
+  const currentInstanceRef = useRef(instanceId); currentInstanceRef.current = instanceId;
   const wsState = conn?.ws?.state || "";
   const connected = wsState === "connected";
+  const libraries = useDesktopLibraries(instanceId, connected);
+  const selectedVault = libraries.catalog?.scopeSelectionVersion === 1 ? libraries.vault : undefined;
+  useEffect(() => { desktopCtrl.selectVault(selectedVault || "", selectedLibraryReadable(libraries,"knowledge"), libraries.knowledgeEpoch); }, [desktopCtrl, instanceId, selectedVault, libraries.knowledgeEpoch, libraries.phase]);
   // The Desktop-domain store signal, declared BEFORE the gated store (its
   // value is part of the gate's synchronous input).
   const desktopVersion = useSyncExternalStore(
@@ -154,7 +170,7 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
     // R4.2: the gate also sees the CURRENT connection truth and the
     // currentness signal — offline/old-vault snapshots never render as live
     // current truth on the first frame.
-    () => session.desktopViewFor({ paired, connected, instanceId })
+    () => session.desktopViewFor({ paired, connected, instanceId, vaultId:selectedVault, readable: selectedLibraryReadable(libraries, "knowledge") })
   );
   useEffect(() => {
     // Even a zero-document pass can persist a current-vault/permission change.
@@ -175,21 +191,20 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
     void folderCatalog.activate({ instance: instanceId, vault: desktop.vaultId }, connected);
   }, [folderCatalog, source, instanceId, desktop.vaultId, connected]);
   const setDesktopDirectory = (d: string) => {
-    rememberedScroll.desktop = 0;
     session.retainDirectory(instanceId, desktop ? desktop.vaultId : "", d);
     setDirectoryRev((n) => n + 1);
   };
   // ORG-1A: the directory-mode snapshot (Content V1 authority).
-  const rawDirectorySnap = useSyncExternalStore(
+  const directorySnap = useSyncExternalStore(
     (fn) => directoryCtrl.subscribe(fn),
-    () => directoryCtrl.snapshot()
+    () => directoryCtrl.snapshotFor({ instanceId, vaultId: desktop.vaultId, directory: desktopDirectory, query })
   );
-  const directorySnap = useMemo(() => rawDirectorySnap.instanceId === instanceId
-    && rawDirectorySnap.vaultId === desktop.vaultId && rawDirectorySnap.directory === desktopDirectory
-    && rawDirectorySnap.query === query.trim() ? rawDirectorySnap : {
-      ...rawDirectorySnap, instanceId, vaultId: desktop.vaultId, directory: desktopDirectory,
-      query: query.trim(), phase: "loading" as const, rows: [], page: 0, hasMore: false, source: "" as const,
-    }, [rawDirectorySnap, instanceId, desktop.vaultId, desktopDirectory, query]);
+  const desktopScrollKey = JSON.stringify([instanceId, desktop.vaultId, desktopDirectory, query.trim()]);
+  useEffect(() => {
+    if (libraries.catalog?.scopeSelectionVersion === 1 && !selectedLibraryReadable(libraries, "knowledge")) {
+      directoryCtrl.invalidateScope(instanceId, selectedVault);
+    }
+  }, [directoryCtrl, instanceId, selectedVault, libraries.knowledgeEpoch, libraries.phase]);
   // R1.6-B: the TRANSIENT Mobile Desktop-note projection for the CURRENT
   // exact scope — newly created/edited Desktop notes stay visible on the
   // list BEFORE the canonical authority converges (dedupe by noteId below).
@@ -198,7 +213,7 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
     () => session.projection.rowsFor(instanceId, desktop.vaultId),
   );
   const [sheet, setSheet] = useState<
-    "" | "filter" | "notebooks" | "vault" | "note-actions" | "confirm-delete" | "create-folder" | "move-local" | "desktop-filter" | "desktop-folder-info"
+    "" | "upload-local" | "filter" | "notebooks" | "vault" | "note-actions" | "confirm-delete" | "create-folder" | "move-local" | "desktop-filter" | "desktop-folder-info"
   >("");
   const [actionNote, setActionNote] = useState<any>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -835,7 +850,7 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
   useEffect(() => {
     if (!moveSheetOpen) { setMoveAuthority(null); return; }
     let alive = true;
-    void session.resolveMoveAuthority(instanceId).then((authority) => {
+    void session.resolveMoveAuthority(instanceId, desktop.vaultId).then((authority) => {
       if (alive) setMoveAuthority(authority);
     });
     return () => { alive = false; };
@@ -929,7 +944,7 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
     // DIFFERENT incarnation and can never resurrect this run.
     const capturedScope = moveCurrentness.capture();
     // Submit-time truth: the capability is re-proven before ANY request.
-    const authority = await session.resolveMoveAuthority(instanceId);
+    const authority = await session.resolveMoveAuthority(instanceId, desktop.vaultId);
     // REPAIR-R1.2/R1.4: the owner/scope/connection/generation can change
     // while the authority resolution was pending — re-prove before anything
     // is built or sent.
@@ -1215,6 +1230,8 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
     return ()=>{ document.removeEventListener("visibilitychange",publish); desktopNotePrefetch.setVisible(scope,[],false); };
   }, [active,source,connected,desktop.instanceId,desktop.vaultId,desktop.rows,desktop.query,directoryActive,directorySnap.rows,directorySnap.query,query,visibleBodyTick]);
 
+  const localSourceSwipe = {};
+
   // ------------------------------------------------------------------
   // Desktop source keeps the unchanged CollectionView path (read-only rows).
   // ------------------------------------------------------------------
@@ -1233,8 +1250,9 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
       <>
         <CollectionView
           domain="knowledge"
+          sourceSwitchSlot={modeSwitch}
           source={source}
-          onSource={(s) => setSource(s)}
+          onSource={() => {}}
           query={query}
           onQuery={setQuery}
           onFilter={undefined}
@@ -1312,8 +1330,8 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
           </div>}
           disableNew={!(createAuthority?.usable === true && (desktop.replica ? desktop.replica.writeState === "granted" : connected)) || busy}
           hideFilter
-          scrollTop={rememberedScroll[source]}
-          onScroll={(top) => { rememberedScroll[source] = top; }}
+          scrollTop={desktopScrollByScope.get(desktopScrollKey) ?? 0}
+          onScroll={(top) => { desktopScrollByScope.set(desktopScrollKey, top); }}
           statusSlot={<>
             {!query.trim() && desktop.vaultId ? <>
               <FolderRows showStatus={false} snapshot={folderSnapshot} current={desktopDirectory} online={connected} onSelect={setDesktopDirectory} />
@@ -1368,9 +1386,22 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
           />
         ) : null}
         {sheet === "vault" ? (
-          <KnowledgeLibrarySheet vaultName={desktop.vaultName} registerOverlay={registerOverlay} onClose={() => setSheet("")}
-            onLocal={() => { setSource("local"); setSheet(""); }}
-            management={<KnowledgeReplicaManagement instance={instanceId} vault={desktop.vaultId} connected={connected} onChanged={() => desktopCtrl.revalidateReplica()} />} />
+          <DirectoryLibrarySheet instance={instanceId} kind="knowledge" fallback={desktop.vaultName}
+            registerOverlay={registerOverlay} onClose={() => setSheet("")}
+            onSelect={async (id, isCurrent) => {
+              if (!await desktopLibraries.switchTo(instanceId, "knowledge", id, () => isCurrent() && currentInstanceRef.current === instanceId)) return false;
+              setSelectedIds([]); setSelecting(false);
+              return true;
+            }}
+            directory={<DirectoryContents registerOverlay={registerOverlay} onClose={() => setSheet("")}
+              instanceId={instanceId} vaultId={desktop.vaultId} vaultName={desktop.vaultName || "LuckyRay 知识库"}
+              connected={connected} current={desktopDirectory} title="目录" rootLabel="全部笔记"
+              onSelect={path => { setQuery(""); setDesktopDirectory(path); setSheet(""); }}
+              syncManagement={<>
+                {management}
+                <Option label="本机笔记" icon="knowledge" onClick={() => { setSource("local"); setSheet(""); }} />
+                <KnowledgeReplicaManagement instance={instanceId} vault={desktop.vaultId} connected={connected} onChanged={() => desktopCtrl.revalidateReplica()} />
+              </>} />} />
         ) : null}
         {/* ORG-1B: the batch/single move destination — ROOT + the existing
             synced directories ONLY (no create), with the real capability
@@ -1400,10 +1431,11 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
   // ------------------------------------------------------------------
   return (
     <>
-      <div className="st-view st-knowledge-view">
+      <div className="st-view st-knowledge-view" data-swipe-owner="sources" {...localSourceSwipe} style={{ touchAction: "pan-y" }}>
         <div className="st-collection-head">
-          <SourceSwitch value="local" onChange={(s) => setSource(s)} />
+          {modeSwitch}
           <IconButton icon="folder" label="选择知识库" onClick={() => setSheet("notebooks")} />
+          <IconButton icon="file" label="导入笔记文件" onClick={() => void pickLocalNoteFile()} />
           <IconButton icon="edit" label="新建笔记" onClick={() => void createNote()} disabled={busy} />
         </div>
         <div className="st-collection-top">
@@ -1531,6 +1563,7 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
               <Option label={actionNote.pinned ? "取消置顶" : "置顶"} icon="pin" onClick={() => void toggleNoteFlag("pinned")} />
               <Option label={actionNote.favorite ? "取消收藏" : "收藏"} onClick={() => void toggleNoteFlag("favorite")} />
               <Option label={actionNote.archived ? "取消归档" : "归档"} onClick={() => void toggleNoteFlag("archived")} />
+              <Option label="上传到电脑知识库" icon="monitor" onClick={() => setSheet("upload-local")} />
               <Option label="移动到文件夹" icon="folder" onClick={() => setSheet("move-local")} />
               <Option label="删除" danger onClick={() => setConfirmDelete(true)} />
             </>
@@ -1550,8 +1583,11 @@ export function StillKnowledge({ conn, active = true }: { conn: ConnState | null
         <Option label="根目录" icon="folder" selected={!actionNote?.folder} onClick={() => void moveLocalNote("")} />
         {localFolders.map(path => <Option key={path} label={path} icon="folder" selected={actionNote?.folder === path} onClick={() => void moveLocalNote(path)} />)}
       </Sheet> : null}
+      {sheet === "upload-local" && actionNote ? <LocalNoteUploadSheet noteId={actionNote.noteId} conn={conn} registerOverlay={registerOverlay} onClose={closeNoteActions} /> : null}
       {sheet === "notebooks" ? (
-        <Sheet title="知识库" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
+        <Sheet title="目录与库" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
+          {management}
+          <Option label="导入文件" detail="仅导入 .md / .markdown / .txt 的文字；关联附件不会自动复制" icon="file" onClick={() => { setSheet(""); void pickLocalNoteFile(); }} />
           <Option label="本机笔记" icon="knowledge" selected onClick={() => { setSource("local"); setSheet(""); }} />
           <Option label="LuckyRay 电脑知识库" icon="monitor" onClick={() => { setSource("desktop"); setSheet(""); }} />
         </Sheet>
@@ -1604,3 +1640,4 @@ function KnowledgeFilterSheet({ draft, source, availableTags = [], onEdit, onRes
 // between the toolbar and the notes), so a QA sweep of the real component IS
 // the product presentation. Desktop never falls through to the local
 // "给想法留个位置 / 新建笔记" empty composition.
+

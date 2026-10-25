@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::State;
 
-use crate::content::expected_gateway;
+use crate::content::expected_scoped_gateway;
 
 /// Canonical Services V1 namespace. Every allowed path starts with this.
 const SERVICES_PREFIX: &str = "/v1/services";
@@ -50,6 +50,10 @@ const FORBIDDEN_QUERY_KEYS: &[&str] = &[
 #[serde(deny_unknown_fields)]
 pub struct ServicesRequest {
     pub instance: String,
+    #[serde(default)]
+    pub library: Option<String>,
+    #[serde(default)]
+    pub vault: Option<String>,
     #[serde(rename = "operationId")]
     pub operation_id: String,
     pub method: String,
@@ -78,6 +82,8 @@ pub struct ChunkPayload {
 pub struct ServicesResponse {
     pub status: u16,
     pub body: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 /// Canonical error surface for a refusal that never reached the wire.
@@ -373,7 +379,7 @@ pub async fn services_v1_request(
     }
 
     // 3. Capture the pinned gateway for THAT owner (fences before the send).
-    let gateway = expected_gateway(&state, &request.instance).map_err(refusal_from)?;
+    let gateway = expected_scoped_gateway(&state, &request.instance, request.library.as_deref(), request.vault.as_deref()).map_err(refusal_from)?;
 
     let path = build_path(&request);
 
@@ -394,7 +400,7 @@ pub async fn services_v1_request(
             .services_request_with_chunk(&state, &request.method, &path, &bytes, &headers)
             .await
             .map_err(refusal_from)?;
-        return Ok(ServicesResponse { status, body });
+        return Ok(ServicesResponse { status, retry_after_ms: if status==429 {body["retryAfterMs"].as_u64()} else {None}, body });
     }
 
     // 5. JSON request. A body is sent only when the caller supplied one; a
@@ -409,7 +415,7 @@ pub async fn services_v1_request(
             .await
             .map_err(refusal_from)?,
     };
-    Ok(ServicesResponse { status: result.0, body: result.1 })
+    Ok(ServicesResponse { status: result.0, retry_after_ms: if result.0==429 {result.1["retryAfterMs"].as_u64()} else {None}, body: result.1 })
 }
 
 #[cfg(test)]
@@ -419,6 +425,16 @@ mod tests {
 
     fn q(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn rate_limit_hint_preserves_the_server_window_on_the_wire() {
+        let reply = ServicesResponse { status:429, body:serde_json::json!({"code":"RATE_LIMITED"}), retry_after_ms:Some(60_000) };
+        let json=serde_json::to_value(reply).unwrap();
+        assert_eq!(json["retry_after_ms"],60_000);
+        assert_eq!(json["body"]["code"],"RATE_LIMITED");
+        let reply=ServicesResponse {status:200,body:serde_json::json!({}),retry_after_ms:None};
+        assert!(serde_json::to_value(reply).unwrap().get("retry_after_ms").is_none());
     }
 
     // ---------------------------------------------------------------------
@@ -512,7 +528,7 @@ mod tests {
     #[test]
     fn a_services_request_fences_twice_around_the_await() {
         // Source-level proof that each Services path proves the captured
-        // connection BEFORE the send and AFTER the awaited response.
+        // connection around both scope negotiation and the transport response.
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/content.rs"))
             .expect("content.rs");
         for name in [
@@ -528,11 +544,24 @@ mod tests {
             let body = &source[at..next];
             let fences = body.matches("services_connection_current(state)?").count();
             assert_eq!(fences, 2, "{name} fences the captured epoch before and after");
-            assert_eq!(body.matches(".await?").count(), 1, "{name} has exactly one await");
+            assert!(body.contains("self.require_scope_protocol(state).await?;"),
+                "{name} negotiates the exact captured scope before transport");
+            let awaits: Vec<_> = body.match_indices(".await?").map(|(at, _)| at).collect();
+            let branching_read = name == "pub(crate) async fn services_request(";
+            let chunk = name == "pub(crate) async fn services_request_with_chunk(";
+            assert_eq!(awaits.len(), if branching_read {4} else if chunk {3} else {2},
+                "{name} negotiates, freshly fences mutations, then sends one transport branch");
+            assert!(body.contains(if branching_read || chunk {"self.source.prepare_mutation(state).await?"}
+                else {"self.source.mutate(state, path, http_method, body).await?"}),
+                "{name} never uses a retained read proof to authorize a mutation");
+            if branching_read {
+                assert!(body.contains("if http_method == reqwest::Method::GET"));
+                assert!(body.contains("self.source.metadata_request(state, path).await?"));
+            }
             let first = body.find("services_connection_current(state)?").expect("pre");
-            let await_at = body.find(".await?").expect("await");
             let last = body.rfind("services_connection_current(state)?").expect("post");
-            assert!(first < await_at && await_at < last, "{name} fences around the await");
+            assert!(first < awaits[0] && awaits[0] < awaits[1] && *awaits.last().unwrap() < last,
+                "{name} fences around scope negotiation and transport awaits");
         }
     }
 
@@ -669,6 +698,7 @@ mod tests {
     #[test]
     fn query_values_are_encoded() {
         let req = ServicesRequest {
+            library: None, vault: None,
             instance: "d".into(), operation_id: "search.unified".into(), method: "GET".into(),
             path: "/v1/services/search".into(), query: q(&[("q", "a b&c")]), body: None, chunk: None,
         };
@@ -678,6 +708,7 @@ mod tests {
     #[test]
     fn empty_directory_after_path_is_present_and_skips_root() {
         let req = ServicesRequest {
+            library: None, vault: None,
             instance: "A".into(), operation_id: "knowledge.directories".into(), method: "GET".into(),
             path: "/v1/services/knowledge/vaults/v/directories".into(), query: q(&[("afterPath","")]), body: None, chunk: None,
         };

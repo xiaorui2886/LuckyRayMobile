@@ -1,3 +1,5 @@
+import { DirectoryLibrarySheet, useDesktopLibraries } from "./kit/DesktopLibraryPicker";
+import { desktopLibraries, selectedLibraryReadable } from "../services/desktopLibraries";
 // STILL-01.1 — Library (Still CollectionView, real local pager + Desktop data).
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { CollectionView, type AssetItem } from "../presentation/still01/Views";
@@ -10,7 +12,7 @@ const LIST_NEAR_COUNT = 8;
 const LIST_THUMB_WINDOW = 20;
 type FilterValue = { kind: string; flags: string[]; sort: string; view: "grid" | "list"; tag: string; folder: string };
 type FilterOptions = { kinds: { value: string; label: string }[]; flags: { value: string; label: string }[]; sorts: { value: string; label: string }[] };
-import { api, type ConnState } from "../services/client";
+import { api, materialApi, type ConnState } from "../services/client";
 import { dataStore } from "../services/dataStore";
 import { localDataStore } from "../services/localDataStore";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -32,6 +34,7 @@ import {
 import { createDragAutoScroll, type DragAutoScroll } from "./kit/dragAutoScroll";
 import { indexOfId, selectionWithRange, type RangeDrag } from "./kit/rangeSelect";
 import { useStillNav } from "./StillShell";
+import { AssetSequenceSession } from "./kit/assetSequence";
 
 type Props = {
   conn: ConnState | null;
@@ -67,12 +70,24 @@ export function StillLibrary({ conn, active = true }: Props) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   // 浏览（folder/browse）与导入（plus/import）是两条完全独立的交互：
-  // browse 打开真实筛选/目录/标签，import 打开 native 导入。
+  // browse 只打开目录；标签属于筛选，import 打开 native 导入。
   const [browseOpen, setBrowseOpen] = useState(false);
-  const [desktopFolder, setDesktopFolder] = useState("");
-  const [desktopTag, setDesktopTag] = useState("");
-  const [desktopKind,setDesktopKind]=useState("");
-  const [desktopKindDraft,setDesktopKindDraft]=useState("");
+  useEffect(() => { setBrowseOpen(false); }, [conn?.identity?.instanceId]);
+  const libraries = useDesktopLibraries(conn?.identity?.instanceId || "", conn?.ws?.state === "connected");
+  const library = libraries.catalog?.scopeSelectionVersion === 1 ? libraries.material : undefined;
+  const desktopOwner = selectedLibraryReadable(libraries, "materials") ? conn?.identity?.instanceId || "" : "";
+  const desktopScope = JSON.stringify([conn?.identity?.instanceId || "", library || ""]);
+  const [desktopFilters, setDesktopFilters] = useState<Record<string, { folder: string; tag: string; kind: string; tagName: string }>>({});
+  const desktopFilter = desktopFilters[desktopScope] ?? { folder: "", tag: "", kind: "", tagName: "" };
+  const desktopFolder = desktopFilter.folder, desktopTag = desktopFilter.tag;
+  const desktopKind = desktopFilter.kind, desktopTagName = desktopFilter.tagName;
+  const updateDesktopFilter = (value: Partial<typeof desktopFilter>) => setDesktopFilters(previous => ({
+    ...previous, [desktopScope]: { ...(previous[desktopScope] ?? desktopFilter), ...value },
+  }));
+  const setDesktopFolder = (folder: string) => updateDesktopFilter({ folder });
+  const setDesktopTag = (tag: string) => updateDesktopFilter({ tag });
+  const setDesktopKind = (kind: string) => updateDesktopFilter({ kind });
+  const setDesktopTagName = (tagName: string) => updateDesktopFilter({ tagName });
   const [sourceQueries, setSourceQueries] = useState({ local: "", desktop: "" });
   const localQuery = sourceQueries.local, desktopQuery = sourceQueries.desktop;
   const query = sourceQueries[domain];
@@ -81,14 +96,16 @@ export function StillLibrary({ conn, active = true }: Props) {
   const [reloadKey, setReloadKey] = useState(0);
   // Wave A: batch organization. Selection mode applies to the Desktop material
   // source only; local materials keep their existing behaviour.
-  const org = useRef(new MaterialOrganizationController({
-    setFavorite: (i, id, fav) => api.contentMaterialSetFavorite(i, id, fav),
-    setTags: (i, id, patch) => api.contentMaterialSetTags(i, id, patch),
-    setFolder: (i, id, folderId) => api.contentMaterialSetFolder(i, id, folderId),
-    createTag: (i, name) => api.contentMaterialCreateTag(i, name),
-    createFolder: (i, name) => api.contentMaterialCreateFolder(i, name),
-    batch: (i, input) => api.contentMaterialBatch(i, input),
-  })).current;
+  const writeGranted = !library || libraries.catalog?.materials.find(row=>row.libraryId===library)?.writeGranted === true;
+  const scopedApi = useMemo(() => materialApi(library,writeGranted), [library,writeGranted]);
+  const org = useMemo(() => new MaterialOrganizationController({
+    setFavorite: (i, id, fav) => scopedApi.contentMaterialSetFavorite(i, id, fav),
+    setTags: (i, id, patch) => scopedApi.contentMaterialSetTags(i, id, patch),
+    setFolder: (i, id, folderId) => scopedApi.contentMaterialSetFolder(i, id, folderId),
+    createTag: (i, name) => scopedApi.contentMaterialCreateTag(i, name),
+    createFolder: (i, name) => scopedApi.contentMaterialCreateFolder(i, name),
+    batch: (i, input) => scopedApi.contentMaterialBatch(i, input),
+  }), [scopedApi]);
   const [orgSnapshot, setOrgSnapshot] = useState(org.snapshot());
   const [selecting, setSelecting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -135,7 +152,7 @@ export function StillLibrary({ conn, active = true }: Props) {
         const value = await api.contentAssets(owner, {
           page, limit: 100, q: source.query.trim(), kind: source.kind || "",
           folder: source.folder || undefined, tag: source.tag || undefined,
-        });
+        }, source.library);
         return value;
       },
       (e) => toast.error(failureCopy(e, "读取电脑素材失败。"))
@@ -144,12 +161,13 @@ export function StillLibrary({ conn, active = true }: Props) {
   const desktopAuthority = desktopAuthorityRef.current;
   const desktopSnapshot = useSyncExternalStore(
     (fn) => desktopAuthority.subscribe(fn),
-    () => desktopAuthority.snapshot()
+    () => desktopAuthority.snapshotFor(desktopOwner ? desktopIdentityOf({ owner: desktopOwner, library, query: desktopQuery.trim(), folder: desktopFolder, tag: desktopTag, kind: desktopKind }) : "")
   );
   useEffect(() => () => desktopAuthority.dispose(), [desktopAuthority]);
   // The Desktop instance the current page belongs to. A Desktop switch must
   // never silently retarget an A page onto B.
-  const desktopOwnerRef = useRef("");
+  const desktopOwnerRef = useRef(""); desktopOwnerRef.current = desktopOwner;
+  const libraryRef = useRef(library); libraryRef.current = library;
   // Desktop-domain store events (sync content, pairing, desktop cache) refresh
   // the DESKTOP list only. They must never blank the LOCAL list: the local
   // rows are revalidated in place through their own authority (UX-POLISH-R1
@@ -231,9 +249,10 @@ export function StillLibrary({ conn, active = true }: Props) {
    *  Delegates to the authority module so the page, the request and the render
    *  gate can never disagree about what "the same page" means. */
   const desktopIdentity = (owner: string): string =>
-    desktopIdentityOf({ owner, query: desktopQuery.trim(), folder: desktopFolder, tag: desktopTag,kind:desktopKind });
+    desktopIdentityOf({ owner, library, query: desktopQuery.trim(), folder: desktopFolder, tag: desktopTag,kind:desktopKind });
   /** The CURRENT Desktop source axes (owner added per call site). */
   const DESKTOP_SOURCE = () => ({
+    library,
     query: desktopQuery.trim(), folder: desktopFolder || "", tag: desktopTag || "",
     kind:desktopKind,
   });
@@ -335,7 +354,7 @@ export function StillLibrary({ conn, active = true }: Props) {
   // against that owner (the authority enforces it), and both the owner and the
   // generation must still be current for the response to commit — so a slower
   // A response can never repopulate a newer B page.
-  const desktopOwner = conn?.identity?.instanceId || "";
+  const filterOwnerRef = useRef(`${desktopOwner}|${library || ""}`);
   useEffect(() => {
     desktopOwnerRef.current = desktopOwner;
   }, [desktopOwner]);
@@ -350,22 +369,34 @@ export function StillLibrary({ conn, active = true }: Props) {
   // is requested, and a late A response can never commit (the authority fences
   // on generation AND owner).
   useEffect(() => {
+    const ownerChanged = filterOwnerRef.current !== `${desktopOwner}|${library || ""}`;
+    filterOwnerRef.current = `${desktopOwner}|${library || ""}`;
+    // Folder/tag IDs belong to one Desktop. Never submit A's filters to B,
+    // including the first bind before React has committed the cleared state.
+    const source = DESKTOP_SOURCE();
+    if (ownerChanged) {
+      setFiltersOpen(false);
+    }
     if (!conn?.paired || !desktopOwner) {
       // Unpaired / disconnected: retire the page rather than leaving A's rows
       // actionable behind a dead owner.
-      desktopAuthority.bind("", DESKTOP_SOURCE());
-      setDesktopThumbs({});
+      if (!conn?.paired) {
+        desktopAuthority.bind("", source);
+        session.discard("desktop");
+        setDesktopThumbs({});
+      } else if (libraries.catalog?.scopeSelectionVersion === 1) {
+        desktopAuthority.invalidateScope(conn.identity?.instanceId || "", library);
+      }
       return;
     }
-    desktopAuthority.bind(desktopOwner, DESKTOP_SOURCE());
+    desktopAuthority.bind(desktopOwner, source);
     // A new owner starts with a clean thumbnail namespace, and any selection
     // made against the previous owner is dropped (Desktop A selections must
     // never survive into B).
-    setDesktopThumbs({});
     setSelectedIds([]);
     setSelecting(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [desktopAuthority, conn?.paired, desktopOwner]);
+  }, [desktopAuthority, conn?.paired, desktopOwner, library, libraries.materialsEpoch]);
 
   // A query / folder / tag change is an IDENTITY change on the SAME owner: it
   // retires the retained rows and requests the new identity. Kept separate from
@@ -381,6 +412,22 @@ export function StillLibrary({ conn, active = true }: Props) {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [desktopAuthority, desktopQuery, desktopFolder, desktopTag,desktopKind]);
+
+  // A reconnected transport can retire an in-flight native read without
+  // changing this library's catalog facts. Reissue only the explicit live edge,
+  // keeping the selected scope and filters; partial snapshots are not edges.
+  const materialConnection = useRef<{ owner: string; state: string } | null>(null);
+  useEffect(() => {
+    const owner = conn?.identity?.instanceId || "";
+    const state = conn?.ws?.state;
+    if (!owner || !conn?.paired) { materialConnection.current = null; return; }
+    if (!state) return;
+    const previous = materialConnection.current;
+    materialConnection.current = { owner, state };
+    if (previous?.owner === owner && previous.state !== "connected" && state === "connected"
+        && desktopOwner === owner) desktopAuthority.revalidate(DESKTOP_SOURCE(), true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desktopAuthority, conn?.paired, conn?.identity?.instanceId, conn?.ws?.state]);
 
   // An explicit user refresh re-runs the CURRENT identity in place, and it
   // FORCES the read so an explicit refresh always reaches the wire.
@@ -452,29 +499,26 @@ export function StillLibrary({ conn, active = true }: Props) {
     const row=desktopRowsRef.current.find(a=>a.desktopAssetId===desktopAssetId);
     if (!row) return;
     const revision=materialImageVersion(row);
-    if (!force && desktopThumbsRef.current[desktopAssetId] && desktopThumbVersions.current[desktopAssetId]===revision) return;
+    const thumbId = desktopThumbKey(owner, desktopAssetId, "", false, library);
+    if (!force && desktopThumbsRef.current[thumbId] && desktopThumbVersions.current[thumbId]===revision) return;
     thumbnailScheduler
-      .enqueue(desktopThumbKey(owner, desktopAssetId,revision), () => api.assetThumbnail(owner, desktopAssetId, force,false,revision), priority)
+      .enqueue(desktopThumbKey(owner, desktopAssetId,revision,false,library), () => scopedApi.assetThumbnail(owner, desktopAssetId, force,false,revision), priority)
       .then((t: any) => {
-        if (desktopOwnerRef.current !== owner || !t?.uri) return;
+        if (desktopOwnerRef.current !== owner || libraryRef.current !== library || !t?.uri) return;
         const current=desktopRowsRef.current.find(a=>a.desktopAssetId===desktopAssetId);
         if (!current || materialImageVersion(current)!==revision) return;
-        desktopThumbVersions.current[desktopAssetId]=revision;
+        desktopThumbVersions.current[thumbId]=revision;
         const url = convertFileSrc(t.uri);
-        desktopThumbsRef.current = { ...desktopThumbsRef.current, [desktopAssetId]: url };
-        setDesktopThumbs((prev) => ({ ...prev, [desktopAssetId]: url }));
+        desktopThumbsRef.current = { ...desktopThumbsRef.current, [thumbId]: url };
+        setDesktopThumbs((prev) => ({ ...prev, [thumbId]: url }));
       })
       .catch(() => { /* placeholder art stays; the tile geometry is stable */ });
-  }, []);
+  }, [scopedApi, library]);
   useEffect(() => { desktopThumbsRef.current = desktopThumbs; }, [desktopThumbs]);
   useEffect(() => {
-    const valid=new Map(desktopItems.map(a=>[a.desktopAssetId,materialImageVersion(a)]));
-    const allowed=new Set(desktopItems.map(a=>desktopThumbKey(committedDesktopOwner,a.desktopAssetId,materialImageVersion(a))));
-    setDesktopThumbs(prev=> {
-      const next=Object.fromEntries(Object.entries(prev).filter(([id])=>valid.has(id)&&desktopThumbVersions.current[id]===valid.get(id)));
-      return Object.keys(next).length===Object.keys(prev).length ? prev : next;
-    });
-    desktopThumbVersions.current=Object.fromEntries(Object.entries(desktopThumbVersions.current).filter(([id])=>valid.has(id)));
+    const allowed=new Set(desktopItems.map(a=>desktopThumbKey(committedDesktopOwner,a.desktopAssetId,materialImageVersion(a),false,library)));
+    // Other libraries retain decoded URLs. Version-qualified reads below keep
+    // old revisions from rendering; only pending offscreen work is canceled.
     thumbnailScheduler.cancelPending(key=>key.startsWith("desktop:")&&!key.endsWith(":screen")&&!allowed.has(key));
   }, [desktopItems,committedDesktopOwner]);
 
@@ -540,11 +584,44 @@ export function StillLibrary({ conn, active = true }: Props) {
       : desktopItems.map((a: any) => ({
           id: a.desktopAssetId,
           title: a.name,
-          src: desktopThumbVersions.current[a.desktopAssetId]===materialImageVersion(a) ? desktopThumbs[a.desktopAssetId] || "" : "",
+          src: desktopThumbVersions.current[desktopThumbKey(committedDesktopOwner, a.desktopAssetId, "", false, library)]===materialImageVersion(a) ? desktopThumbs[desktopThumbKey(committedDesktopOwner, a.desktopAssetId, "", false, library)] || "" : "",
           kind: a.kind === "video" ? "video" : a.kind === "document" ? "document" : "image",
           source: "desktop" as const,
           meta: `${kindLabel(a.kind)} · 电脑缓存`,
         }));
+
+  // Viewer continuations freeze every request axis, rather than reading mutable
+  // filters after the user leaves this list. Pairing changes fence old responses.
+  const viewerAuthority = useRef("");
+  const viewerEpoch = useRef(0);
+  const viewerIdentity = domain === "local" ? localIdentity() : conn?.paired ? currentDesktopIdentity : "";
+  if (viewerAuthority.current !== viewerIdentity) { viewerAuthority.current = viewerIdentity; viewerEpoch.current++; }
+  const viewerSessions = useRef(new Set<AssetSequenceSession>());
+  useEffect(() => () => { viewerAuthority.current = ""; viewerSessions.current.forEach(value => value.retire()); viewerSessions.current.clear(); }, []);
+  function createViewerSequence() {
+    const identity = viewerAuthority.current, epoch = viewerEpoch.current;
+    const rows = assets.map(item => ({ route: domain === "desktop" ? desktopAssetRoute(committedDesktopOwner, item.id, library) : item.id,
+      title: item.title, thumbnail: item.src, kind: item.kind,
+      version: domain === "desktop" ? materialImageVersion(desktopItems.find(asset => asset.desktopAssetId === item.id)) : undefined }));
+    const source = domain, owner = committedDesktopOwner, filters = { ...localFilters() }, desktopFilters = { ...DESKTOP_SOURCE() };
+    const session = new AssetSequenceSession(rows, source === "local" ? localPage.page : desktopSnapshot.page,
+      source === "local" ? localPage.hasMore : desktopSnapshot.hasMore,
+      async page => {
+        const result = source === "local"
+          ? await api.localAssetList({ ...filters, page, limit: 50 })
+          : await api.contentAssets(owner, { page, limit: 100, q: desktopFilters.query, kind: desktopFilters.kind,
+            folder: desktopFilters.folder || undefined, tag: desktopFilters.tag || undefined }, desktopFilters.library);
+        return { items: (result.items || []).map(asset => ({
+          route: source === "local" ? `local:${asset.assetId}` : desktopAssetRoute(owner, asset.desktopAssetId, library),
+          title: asset.name, thumbnail: "", kind: asset.kind, version: materialImageVersion(asset),
+        })), hasMore: Boolean(result.hasMore), nextPage: 'nextPage' in result ? result.nextPage : undefined };
+      }, () => viewerAuthority.current === identity && viewerEpoch.current === epoch,
+      source === "desktop" ? desktopSnapshot.nextPage : undefined);
+    // One originating list only needs its latest viewer session. A previous
+    // detail has been replaced by navigation before another can be created.
+    viewerSessions.current.forEach(value => value.retire()); viewerSessions.current.clear(); viewerSessions.current.add(session);
+    return session;
+  }
 
   // R7c: RANGE drag-select (mainstream album semantics). A long press fixes
   // the ANCHOR; every drag move — and every auto-scroll tick while the finger
@@ -600,22 +677,22 @@ export function StillLibrary({ conn, active = true }: Props) {
   // stale-offline. Local reads the session; Desktop reads the Desktop
   // authority, which is the SAME object that requested and committed the rows —
   // so the reported state can never drift from the pipeline's real state.
-  const localView = session.view<any>("local");
+  const localView = session.view<any>("local", localIdentity());
   // Scroll offsets are per-SOURCE presentation state and always come from the
   // session, whatever authority owns the row truth.
-  const scrollView = domain === "local" ? localView : session.view<any>("desktop");
+  const scrollView = domain === "local" ? localView : session.view<any>("desktop", currentDesktopIdentity);
   const activeView = domain === "local" ? localView : desktopSnapshot;
   const showAssets = domain === "local" ? localPage.items.length > 0 : desktopItems.length > 0;
   const retainedTruth = domain === "local"
     ? localView.retained
     : desktopItems.length > 0;
-  const refreshingTruth = activeView.refreshing;
   const desktopError=desktopAuthority.isCurrent(currentDesktopIdentity) ? desktopSnapshot.error : "";
   const staleTruth = domain === "local" ? localView.stale : desktopAuthority.isCurrent(currentDesktopIdentity) && desktopSnapshot.stale;
   // "Settled" is only true once a request for the CURRENT identity returned.
   const settledTruth = domain === "local"
     ? (localPage.items.length > 0 || localView.settled)
     : (desktopSnapshot.identity===currentDesktopIdentity && desktopSnapshot.settled);
+  const refreshingTruth = activeView.refreshing && !retainedTruth && !settledTruth;
   // True cold loading (no retained rows at all) is distinct from a background
   // refresh over retained rows: only the latter may say the old results are
   // still on screen.
@@ -629,7 +706,7 @@ export function StillLibrary({ conn, active = true }: Props) {
     && desktopSnapshot.settled && desktopItems.length === 0
     && !desktopSnapshot.refreshing && !desktopSnapshot.cold;
 
-  const filterLabel = domain !== "local" ? `${desktopKind ? DESKTOP_KINDS.find(k=>k.value===desktopKind)?.label+" · " : ""}${desktopItems.length} 项` : (() => {
+  const filterLabel = domain !== "local" ? `${desktopKind ? DESKTOP_KINDS.find(k=>k.value===desktopKind)?.label+" · " : ""}${desktopTag ? (desktopTagName ? "#" + desktopTagName : "已筛选标签") + " · " : ""}${desktopItems.length} 项` : (() => {
     const parts = [
       applied.kind !== "全部" ? applied.kind : "",
       applied.favoriteOnly ? "仅收藏" : "",
@@ -706,7 +783,7 @@ export function StillLibrary({ conn, active = true }: Props) {
   async function openBatchTags(mode: "add" | "remove" = "add") {
     setBatchTagRemove(mode === "remove");
     try {
-      const nav: any = await api.contentNavigation(committedDesktopOwner);
+      const nav: any = await scopedApi.contentNavigation(committedDesktopOwner);
       setBatchTags((nav?.tags || []).map((t: any) => ({ id: t.id, name: t.name })));
     } catch { setBatchTags([]); }
     setBatchSheet("tags");
@@ -714,7 +791,7 @@ export function StillLibrary({ conn, active = true }: Props) {
 
   async function openBatchFolders() {
     try {
-      const nav: any = await api.contentNavigation(committedDesktopOwner);
+      const nav: any = await scopedApi.contentNavigation(committedDesktopOwner);
       const flat: { id: string; label: string }[] = [];
       const walk = (rows: any[], prefix: string) => {
         for (const row of rows || []) {
@@ -733,10 +810,10 @@ export function StillLibrary({ conn, active = true }: Props) {
       <CollectionView
         domain="library"
         source={domain}
-        onSource={(s) => setDomain(s === "desktop" ? "desktop" : "local")}
+        onSource={(s) => { setFiltersOpen(false); setBrowseOpen(false); setDomain(s === "desktop" ? "desktop" : "local"); }}
         query={query}
         onQuery={setQuery}
-        onFilter={() => { draft.current.begin();setDesktopKindDraft(desktopKind); setFiltersOpen(true); }}
+        onFilter={() => { draft.current.begin(); setFiltersOpen(true); }}
         onNew={() => setImportOpen(true)}
         onBrowse={() => setBrowseOpen(true)}
         onRefresh={() => { setReloadKey((k) => k + 1); }}
@@ -753,11 +830,11 @@ export function StillLibrary({ conn, active = true }: Props) {
           if (domain === "desktop") {
             if (!committedDesktopOwner) return;
             const card = assets.find(a => a.id === id);
-            open("asset", desktopAssetRoute(committedDesktopOwner, id || ""), { assetPreview: card ? { title: card.title, thumbnail: card.src, kind: card.kind, version:materialImageVersion(desktopItems.find(a=>a.desktopAssetId===id)) } : undefined });
+            open("asset", desktopAssetRoute(committedDesktopOwner, id || "", library), { assetPreview: card ? { title: card.title, thumbnail: card.src, kind: card.kind, version:materialImageVersion(desktopItems.find(a=>a.desktopAssetId===id)), sequence: assets.map(item => ({ route: desktopAssetRoute(committedDesktopOwner, item.id, library), title: item.title, thumbnail: item.src, kind: item.kind, version: materialImageVersion(desktopItems.find(a => a.desktopAssetId === item.id)) })), continuation: createViewerSequence() } : undefined });
             return;
           }
           const card = assets.find(a => a.id === id);
-          open("asset", id || "", { assetPreview: card ? { title: card.title, thumbnail: card.src, kind: card.kind } : undefined });
+          open("asset", id || "", { assetPreview: card ? { title: card.title, thumbnail: card.src, kind: card.kind, sequence: assets.map(item => ({ route: item.id, title: item.title, thumbnail: item.src, kind: item.kind })), continuation: createViewerSequence() } : undefined });
         }}
         // REPAIR-R5: a long press enters selection mode and selects the held
         // asset, WITHOUT also opening it (the gesture authority swallows the
@@ -784,7 +861,7 @@ export function StillLibrary({ conn, active = true }: Props) {
           rangeDragRef.current = null;
           endpointRef.current = null;
         } : undefined}
-        onLongPress={domain === "desktop" ? (id) => {
+        onLongPress={domain === "desktop" && writeGranted ? (id) => {
           if (!id || !committedDesktopOwner) return;
           // R7c: the long press is the range ANCHOR. Baseline = whatever was
           // picked before (manual picks survive the drag); the range itself
@@ -837,10 +914,11 @@ export function StillLibrary({ conn, active = true }: Props) {
             // same URI, and MediaTile's attempt key then remounts the image so
             // the retry is a real new attempt. Scoped to the exact owner, so
             // Desktop A's retry can never disturb B.
+            const thumbId = desktopThumbKey(committedDesktopOwner, aid, "", false, library);
             setDesktopThumbs((prev) => {
-              if (!(aid in prev)) return prev;
+              if (!(thumbId in prev)) return prev;
               const next = { ...prev };
-              delete next[aid];
+              delete next[thumbId];
               return next;
             });
             requestDesktopThumb(committedDesktopOwner, aid, true);
@@ -864,7 +942,7 @@ export function StillLibrary({ conn, active = true }: Props) {
         stale={staleTruth}
         settled={settledTruth}
         scrollTop={scrollView.scrollTop}
-        onScroll={(top) => { session.setScroll(domain === "local" ? "local" : "desktop", top); }}
+        onScroll={(top) => { session.setScroll(domain === "local" ? "local" : "desktop", top, domain === "local" ? localIdentity() : currentDesktopIdentity); }}
         footerSlot={((domain === "local" ? localPage.hasMore : desktopSnapshot.hasMore) ? <div className="st-material-page-footer">
           <Button kind="quiet" disabled={domain === "local" ? localPage.loading : desktopSnapshot.refreshing} onClick={loadMore}>
             {(domain === "local" ? localPage.loading : desktopSnapshot.refreshing) ? "加载中…" : "加载更多"}
@@ -873,11 +951,14 @@ export function StillLibrary({ conn, active = true }: Props) {
         </div> : undefined)}
       />
 
-      {filtersOpen && domain==="desktop" ? <Sheet title="筛选素材" registerDismiss={registerOverlay} onClose={()=>setFiltersOpen(false)}
-        footer={<><Button kind="quiet" onClick={()=>setDesktopKindDraft("")}>恢复默认</Button><Button onClick={()=>{setDesktopKind(desktopKindDraft);setFiltersOpen(false);}}>显示结果</Button></>}>
-        <p className="st-sheet-caption">类型</p>
-        {DESKTOP_KINDS.map(k=><Option key={k.value} label={k.label} selected={desktopKindDraft===k.value} onClick={()=>setDesktopKindDraft(k.value)} />)}
-      </Sheet> : null}
+      {filtersOpen && domain === "desktop" ? (
+        <DesktopFilterSheet key={committedDesktopOwner} owner={committedDesktopOwner} library={library}
+          kind={desktopKind} tag={desktopTag} tagName={desktopTagName}
+          onApply={(kind, tag, name) => {
+            setDesktopKind(kind); setDesktopTag(tag); setDesktopTagName(name); setFiltersOpen(false);
+          }}
+          onClose={() => setFiltersOpen(false)} registerOverlay={registerOverlay} />
+      ) : null}
       {filtersOpen && domain==="local" ? (
         <FilterSheet
           draft={draft.current.getDraft()}
@@ -955,9 +1036,8 @@ export function StillLibrary({ conn, active = true }: Props) {
               onClick={() => { setApplied({ ...applied, favoriteOnly: false, archivedOnly: true }); setBrowseOpen(false); }} />
           </Sheet>
         ) : (
-          <DesktopBrowseSheet owner={committedDesktopOwner} folder={desktopFolder} tag={desktopTag}
+          <DesktopBrowseSheet key={conn?.identity?.instanceId || ""} owner={conn?.identity?.instanceId || ""} readable={selectedLibraryReadable(libraries, "materials")} library={library} folder={desktopFolder}
             onFolder={(f) => { setDesktopFolder(f); setBrowseOpen(false); }}
-            onTag={(t) => { setDesktopTag(t); setBrowseOpen(false); }}
             onClose={() => setBrowseOpen(false)}
             registerOverlay={registerOverlay} />
         )
@@ -966,47 +1046,87 @@ export function StillLibrary({ conn, active = true }: Props) {
   );
 }
 
-/** 电脑素材 目录与标签: REAL Desktop folders/tags via the content navigation
- *  authority (folders arrive as a tree, flattened with path labels like the
- *  legacy Desktop library); selection stores IDs that drive the real
- *  contentAssets request axes. */
-function DesktopBrowseSheet({ owner, folder, tag, onFolder, onTag, onClose, registerOverlay }: {
-  owner: string; folder: string; tag: string;
-  onFolder: (id: string) => void; onTag: (id: string) => void;
+/** Directory navigation is independent of tag filtering. Both read the real
+ * owner-bound navigation authority; no tag can silently change on folder tap. */
+function DesktopBrowseSheet({ owner, readable, library, folder, onFolder, onClose, registerOverlay }: {
+  owner: string; readable: boolean; library?: string; folder: string;
+  onFolder: (id: string) => void;
   onClose: () => void; registerOverlay: (d: () => void) => () => void;
 }) {
-  const [nav, setNav] = useState<{ folders: { id: string; label: string }[]; tags: { id: string; name: string }[] } | null>(null);
+  const scopedApi = useMemo(() => materialApi(library), [library]);
+  const [folders, setFolders] = useState<{ id: string; label: string }[] | null>(null);
+  const scope = JSON.stringify([owner, library]);
+  const [foldersScope, setFoldersScope] = useState("");
+  const currentFolders = readable && foldersScope === scope ? folders : null;
+  const [error, setError] = useState(false);
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     let alive = true;
-    api.contentNavigation(owner).then((value) => {
+    setFolders(null); setError(false);
+    if (!owner || !readable) { setError(true); return; }
+    scopedApi.contentNavigation(owner).then((value) => {
       if (!alive) return;
-      const folders: { id: string; label: string }[] = [];
-      const flatten = (rows: any[], prefix: string) => {
-        for (const row of rows || []) {
-          folders.push({ id: row.id, label: prefix + row.name });
+      const rows: { id: string; label: string }[] = [];
+      const flatten = (items: any[], prefix: string) => {
+        for (const row of items || []) {
+          rows.push({ id: row.id, label: prefix + row.name });
           flatten(row.children || [], prefix + row.name + " / ");
         }
       };
       flatten(value?.folders || [], "");
-      setNav({ folders, tags: (value?.tags || []).map((t: any) => ({ id: t.id, name: t.name })) });
-    }).catch(() => { if (alive) setNav({ folders: [], tags: [] }); });
+      setFoldersScope(scope); setFolders(rows);
+    }).catch(() => { if (alive) setError(true); });
     return () => { alive = false; };
-  }, []);
+  }, [owner, readable, scopedApi, reload]);
   return (
-    <Sheet title="目录与标签" registerDismiss={registerOverlay} onClose={onClose}>
-      <p className="st-sheet-caption">目录</p>
-      <Option label="全部目录" icon="folder" selected={!folder} onClick={() => onFolder("")} />
-      {(nav?.folders || []).map((f) => (
+    <DirectoryLibrarySheet instance={owner} kind="materials" registerOverlay={registerOverlay} onClose={onClose}
+      onSelect={(id, isCurrent) => desktopLibraries.switchTo(owner, "materials", id, isCurrent)} directory={<>
+      {readable ? <Option label="全部目录" icon="folder" selected={!folder} onClick={() => onFolder("")} /> : null}
+      {readable && !currentFolders && !error ? <p className="st-sheet-copy" role="status">正在读取目录…</p> : null}
+      {(currentFolders || []).map((f) => (
         <Option key={f.id} label={f.label} icon="folder" selected={folder === f.id} onClick={() => onFolder(f.id)} />
       ))}
+      {error ? <><p className="st-sheet-copy" role="status">{readable ? "暂时读不到电脑目录，请重试。" : "当前库不可读取，请在“库”中选择其他库。"}</p>{readable ? <Button kind="quiet" onClick={() => setReload(n => n + 1)}>重试读取目录</Button> : null}</>
+        : currentFolders && !currentFolders.length ? <p className="st-sheet-copy">电脑还没有可用的目录。</p> : null}
+    </>} />
+  );
+}
+
+/** Draft-only tag/kind picker, matching local filters: Back/cancel discards,
+ * Apply commits both axes together, Reset stays a draft until Apply. */
+function DesktopFilterSheet({ owner, library, kind, tag, tagName, onApply, onClose, registerOverlay }: {
+  owner: string; library?: string; kind: string; tag: string; tagName: string;
+  onApply: (kind: string, tag: string, name: string) => void;
+  onClose: () => void; registerOverlay: (d: () => void) => () => void;
+}) {
+  const scopedApi = useMemo(() => materialApi(library), [library]);
+  const [kindDraft, setKindDraft] = useState(kind);
+  const [tagDraft, setTagDraft] = useState(tag);
+  const [tags, setTags] = useState<{ id: string; name: string }[]>([]);
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    setTags([]); setError(false);
+    if (!owner) { setError(true); return; }
+    scopedApi.contentNavigation(owner).then((nav) => {
+      if (alive) setTags((nav?.tags || []).map((t: any) => ({ id: t.id, name: t.name })));
+    }).catch(() => { if (alive) setError(true); });
+    return () => { alive = false; };
+  }, [owner, scopedApi]);
+  // Preserve an applied choice if a refresh fails or the tag was removed
+  // remotely; opening/cancelling the sheet must never clear the active filter.
+  const choices = tag && !tags.some(t => t.id === tag)
+    ? [{ id: tag, name: tagName || "当前标签" }, ...tags] : tags;
+  return (
+    <Sheet title="筛选素材" registerDismiss={registerOverlay} onClose={onClose}
+      footer={<><Button kind="quiet" onClick={() => { setKindDraft(""); setTagDraft(""); }}>恢复默认</Button>
+        <Button onClick={() => onApply(kindDraft, tagDraft, choices.find(t => t.id === tagDraft)?.name || "")}>显示结果</Button></>}>
+      <p className="st-sheet-caption">类型</p>
+      {DESKTOP_KINDS.map(k => <Option key={k.value} label={k.label} selected={kindDraft === k.value} onClick={() => setKindDraft(k.value)} />)}
       <p className="st-sheet-caption">标签</p>
-      <Option label="全部标签" icon="list" selected={!tag} onClick={() => onTag("")} />
-      {(nav?.tags || []).map((t) => (
-        <Option key={t.id} label={t.name} icon="list" selected={tag === t.id} onClick={() => onTag(t.id)} />
-      ))}
-      {nav && !(nav.folders || []).length && !(nav.tags || []).length ? (
-        <p className="st-sheet-copy">电脑还没有可用的目录或标签。</p>
-      ) : null}
+      <Option label="全部标签" selected={!tagDraft} onClick={() => setTagDraft("")} />
+      {choices.map(t => <Option key={t.id} label={"#" + t.name} selected={tagDraft === t.id} onClick={() => setTagDraft(t.id)} />)}
+      {error ? <p className="st-sheet-copy">暂时读不到电脑标签，已选筛选保持不变。</p> : null}
     </Sheet>
   );
 }

@@ -41,6 +41,10 @@ object ShareBridge {
     /** Notifies the Rust side that a share was persisted (warm-resume path). */
     private external fun nativeNotify()
 
+    fun notifyNoteImport() { nativeNotify() }
+    @JvmStatic fun noteImportDir(): String = NoteImportBridge.directory()
+    @JvmStatic fun launchNoteImport(): String = NoteImportBridge.launch()
+
     @JvmStatic
     fun init(act: Activity) {
         activity = act

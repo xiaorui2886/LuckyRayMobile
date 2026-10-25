@@ -50,9 +50,10 @@ export class MaterialsClient {
   }
 
   /** Canonical .3 detail read (source fidelity comes straight from the DTO). */
-  async detailV1(instance: string, assetId: string): Promise<MaterialDetail> {
+  async detailV1(instance: string, assetId: string, library?: string): Promise<MaterialDetail> {
     return callServices<MaterialDetail>(this.transport, {
       instance,
+      library,
       operationId: "materials.detailV1",
       method: "GET",
       path: `/v1/services/materials/assets/${encodeURIComponent(assetId)}`,

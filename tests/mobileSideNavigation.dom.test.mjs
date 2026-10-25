@@ -1,0 +1,42 @@
+// Real React gesture ownership and sidebar/pager; native data is deliberately mocked.
+// Does not certify Android pointer transport, IME, or visual layout.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {join,resolve} from 'node:path';
+import {tmpdir} from 'node:os';
+import {fileURLToPath} from 'node:url';
+const root=fileURLToPath(new URL('..',import.meta.url)),require=createRequire(import.meta.url);
+const tools=process.env.LR_DOM_TEST_TOOLS?createRequire(join(resolve(process.env.LR_DOM_TEST_TOOLS),'__harness__.cjs')):require;
+const {JSDOM}=tools('jsdom'),{build,stop}=createRequire(require.resolve('vite/package.json'))('esbuild');
+test('mobile horizontal ownership and folder side panel', async t=>{
+ const dom=new JSDOM('<div id="host"></div>',{url:'https://test.invalid/',pretendToBeVisual:true});
+ const keys=['window','document','navigator','HTMLElement','Element','Node','Event','MouseEvent','KeyboardEvent'];
+ const old=new Map(keys.map(k=>[k,Object.getOwnPropertyDescriptor(globalThis,k)]));
+ for(const k of keys)Object.defineProperty(globalThis,k,{configurable:true,writable:true,value:dom.window[k]});
+ globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+ const channels=[],OriginalMessageChannel=globalThis.MessageChannel;globalThis.MessageChannel=class extends OriginalMessageChannel{constructor(){super();channels.push(this)}};
+ const dir=mkdtempSync(join(tmpdir(),'lr-side-nav-'));let app;const calls=[],picks=[],overlays=[];
+ globalThis.__sideApi={localNoteFolders:async()=>({paths:['Research','Research/Ideas','Empty']}),localNoteList:async f=>{calls.push({...f});return {items:[{noteId:'note-1',title:f.folder||'All notes',content:'hello'}],hasMore:false}},contentReplicaNotes:async(...args)=>{calls.push(args);return {items:[],hasMore:false}}};
+ globalThis.__sideCatalog={subscribe:()=>()=>{},snapshot:()=>null,activate:async()=>{}};
+ try {
+  const out=join(dir,'entry.cjs');await build({stdin:{contents:`import {createElement as h} from 'react';import {useHorizontalSwipe} from './src/still/kit/useHorizontalSwipe';export {horizontalIntent} from './src/still/kit/useHorizontalSwipe';export {ScopedNoteSwitcher} from './src/still/kit/noteSwitcher';export {act,createElement} from 'react';export {createRoot} from 'react-dom/client';export function Gestures(p){const outer=useHorizontalSwipe(d=>p.record('outer',d),{disabled:p.disabled,editableEdge:true});const inner=useHorizontalSwipe(d=>p.record('inner',d));return h('div',{'data-swipe-owner':'outer',...outer},h('p',{id:'plain'},'text'),h('div',{'data-swipe-owner':'inner',...inner},h('button',{id:'nested',onClick:()=>p.record('click')},'row')),h('input',{id:'input'}),h('div',{id:'editable',contentEditable:true,suppressContentEditableWarning:true},'editable'),h('div',{className:'cm-lp-table-editable',id:'table'},'table'))}`,resolveDir:root,loader:'tsx'},outfile:out,bundle:true,platform:'node',format:'cjs',loader:{'.css':'empty'},plugins:[{name:'native',setup(b){b.onResolve({filter:/services\/client$/},()=>({path:'api',namespace:'mock'}));b.onResolve({filter:/knowledgeSession$/},()=>({path:'session',namespace:'mock'}));b.onResolve({filter:/systemBarAppearance$/},()=>({path:'bars',namespace:'mock'}));b.onResolve({filter:/StillImports$/},()=>({path:'ui',namespace:'mock'}));b.onLoad({filter:/.*/,namespace:'mock'},a=>({loader:'tsx',resolveDir:root,contents:a.path==='api'?'export const api=globalThis.__sideApi;':a.path==='session'?'export const sessionKnowledge=()=>({folders:globalThis.__sideCatalog});':a.path==='bars'?'export const systemBarScrim={acquire:()=>()=>{}};':`import React from 'react';export const Icon=()=>null;export const IconButton=({label,onClick})=><button aria-label={label} onClick={onClick}/>;export const Button=({children,onClick,disabled})=><button disabled={disabled} onClick={onClick}>{children}</button>;export const SearchField=({value,onChange})=><input value={value} onChange={e=>onChange(e.target.value)}/>;export const Sheet=({children})=><section>{children}</section>;`}))}}]});
+  const {act,createElement:h,createRoot,Gestures,horizontalIntent,ScopedNoteSwitcher}=require(out);app=createRoot(document.getElementById('host'));
+  const events=[];const render=async(component,props)=>act(async()=>app.render(h(component,props)));
+  const fire=async(target,type,values={})=>act(async()=>{const e=new dom.window.Event(type,{bubbles:true,cancelable:true});for(const [k,v]of Object.entries(values))Object.defineProperty(e,k,{value:v});target.dispatchEvent(e)});
+  const swipe=async(target,from=150,to=50)=>{const base={pointerId:1,pointerType:'touch',isPrimary:true,button:0,clientY:80};await fire(target,'pointerdown',{...base,clientX:from});await fire(target,'pointermove',{...base,clientX:to});await fire(target,'pointerup',{...base,clientX:to});};
+  await t.test('threshold/direction/vertical/long hold',()=>{assert.equal(horizontalIntent(-80,4,200),'left');assert.equal(horizontalIntent(90,4,200),'right');assert.equal(horizontalIntent(40,0,100),null);assert.equal(horizontalIntent(70,70,100),null);assert.equal(horizontalIntent(90,0,900),null)});
+  await t.test('nested owner consumes one swipe; trailing row click is swallowed',async()=>{await render(Gestures,{record:(...e)=>events.push(e)});await swipe(document.getElementById('nested'));await fire(document.getElementById('nested'),'click',{detail:1});assert.deepEqual(events,[['inner','left']]);events.length=0;await swipe(document.getElementById('plain'),50,150);assert.deepEqual(events,[['outer','right']]);events.length=0});
+  await t.test('input/table/central editable and multi-touch do not navigate',async()=>{const outer=document.querySelector('[data-swipe-owner="outer"]');outer.getBoundingClientRect=()=>({left:0,right:400});for(const id of ['input','table','editable'])await swipe(document.getElementById(id));assert.deepEqual(events,[]);await swipe(document.getElementById('editable'),10,100);assert.deepEqual(events,[['outer','right']]);events.length=0;await fire(outer,'pointerdown',{pointerId:1,pointerType:'touch',isPrimary:true,button:0,clientX:10,clientY:50});await fire(outer,'pointerdown',{pointerId:2,pointerType:'touch',isPrimary:false,button:0,clientX:20,clientY:50});await fire(outer,'pointerup',{pointerId:1,clientX:120,clientY:50});assert.deepEqual(events,[])});
+  await t.test('disabled in-flight gesture is retired',async()=>{const target=document.getElementById('plain');await fire(target,'pointerdown',{pointerId:1,pointerType:'touch',isPrimary:true,button:0,clientX:10,clientY:50});await render(Gestures,{disabled:true,record:(...e)=>events.push(e)});await fire(target,'pointerup',{pointerId:1,clientX:120,clientY:50});assert.deepEqual(events,[])});
+  await t.test('browse uses left dialog with true empty folders, expandable hierarchy and scoped folder paging',async()=>{
+   await render(ScopedNoteSwitcher,{variant:'browse',currentRoute:'note-1',onClose:()=>picks.push('close'),registerOverlay:f=>{overlays.push(f);return()=>overlays.splice(overlays.indexOf(f),1)},onPick:(...args)=>picks.push(args),onNew:()=>picks.push('new')});await act(async()=>{await new Promise(r=>setTimeout(r,30))});
+   assert.equal(document.querySelector('[role="dialog"]').getAttribute('aria-label'),'本机笔记');assert.ok(document.body.textContent.includes('Empty'));assert.ok(!document.body.textContent.includes('Ideas'));
+   await fire(document.querySelector('[aria-label="展开Research"]'),'click');assert.ok(document.body.textContent.includes('Ideas'));
+   const folder=[...document.querySelectorAll('.st-note-folder-title')].find(x=>x.textContent==='Ideas');await fire(folder,'click');await act(async()=>{await new Promise(r=>setTimeout(r,30))});assert.equal(calls.at(-1).folder,'Research/Ideas');
+   await fire(document.querySelector('.st-note-row'),'click');assert.equal(picks.at(-1)[0],'note-1');assert.equal(picks.at(-1)[2](),true);
+   await fire(document.querySelector('[aria-label="返回笔记"]'),'click');assert.equal(picks.at(-1),'close');assert.equal(picks.at(-2)[2](),false);
+  });
+ } finally {if(app)await require(join(dir,'entry.cjs')).act(async()=>app.unmount());stop();for(const c of channels){c.port1.close();c.port2.close()}globalThis.MessageChannel=OriginalMessageChannel;dom.window.close();for(const [k,v]of old)if(v)Object.defineProperty(globalThis,k,v);else delete globalThis[k];delete globalThis.IS_REACT_ACT_ENVIRONMENT;delete globalThis.__sideApi;delete globalThis.__sideCatalog;rmSync(dir,{recursive:true,force:true})}
+});

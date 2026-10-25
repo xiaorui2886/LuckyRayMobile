@@ -41,12 +41,12 @@ function detailWith(source: MaterialDetail["source"]): MaterialDetail {
 test("detail — Content V1 stays primary; Services enrichment is additive on the SAME asset", () => {
   const src = strip(read("src", "still", "StillAsset.tsx"));
   // The primary Content V1 read is untouched:
-  assert.match(src, /api\.contentAssetDetail\(owner,\s*assetId\)/u, "Content V1 detail read remains owner-bound");
-  assert.match(src, /api\.contentMaterialSetFavorite/u, "Content V1 organization actions remain");
+  assert.match(src, /scopedApi\.contentAssetDetail\(owner,\s*assetId\)/u, "Content V1 detail read remains owner-bound");
+  assert.match(src, /scopedApi\.contentMaterialSetFavorite/u, "Content V1 organization actions remain");
   // Services enrichment rides the same route owner/asset: the page binds the
   // route identity to the production controller and loadSource uses it.
   assert.match(src, /loadSource\(\);/u, "enrichment issued through the controller");
-  assert.match(src, /detailV1: \(ownerId, asset\) => services\.materials\.detailV1\(ownerId, asset\)/u,
+  assert.match(src, /detailV1: \(ownerId, asset\) => services\.materials\.detailV1\(ownerId, asset, library\)/u,
     "detailV1 uses the bound owner+asset verbatim");
   assert.match(src, /sourceCtrlRef\.bind\(\{ owner, assetId, isLive:/u,
     "the seam binds the exact route owner+asset");

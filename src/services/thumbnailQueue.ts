@@ -121,8 +121,8 @@ export function localThumbKey(localAssetId: string, version = "", preview = fals
   return `local:${localAssetId}${version ? ":v:"+encodeURIComponent(version) : ""}${preview ? ":screen" : ""}`;
 }
 
-export function desktopThumbKey(instanceId: string, desktopAssetId: string, version = "", preview = false): string {
-  return `desktop:${instanceId}:${desktopAssetId}${version ? ":v:"+encodeURIComponent(version) : ""}${preview ? ":screen" : ""}`;
+export function desktopThumbKey(instanceId: string, desktopAssetId: string, version = "", preview = false, library = ""): string {
+  return `desktop:${instanceId}:${library ? "library:"+encodeURIComponent(library)+":" : ""}${desktopAssetId}${version ? ":v:"+encodeURIComponent(version) : ""}${preview ? ":screen" : ""}`;
 }
 
 /** Existing Content fields only; no invented server revision semantics. */

@@ -209,15 +209,17 @@ test("R5c-W1 — the refresh effect is guarded on its FIRST run only", () => {
     "the first run returns before doing anything");
   assert.match(effect, /desktopAuthority\.revalidate\(DESKTOP_SOURCE\(\), true\);/u,
     "and every later run is a forced refresh");
-  // The guard is scoped to this effect: the forced call is the only one guarded.
+  // Only user refresh and an explicit same-owner reconnect force a read.
   const forced = lib.match(/revalidate\(DESKTOP_SOURCE\(\), true\)/gu) ?? [];
-  assert.equal(forced.length, 1, "there is exactly one forced refresh call site");
+  assert.equal(forced.length, 2, "only user refresh and reconnect force reads");
+  assert.match(lib, /previous\?\.owner === owner && previous\.state !== "connected" && state === "connected"/u);
+  assert.match(lib, /if \(!state\) return;/u, "partial snapshots are not reconnect edges");
 });
 
 test("R5c-W2 — the other Desktop effects are NOT mount-guarded (authority coalesces them)", () => {
   const lib = LIB();
-  const bindIdx = lib.indexOf('desktopAuthority.bind(desktopOwner, DESKTOP_SOURCE());');
-  const bindEffect = lib.slice(bindIdx, lib.indexOf("}, [desktopAuthority, conn?.paired, desktopOwner]);", bindIdx));
+  const bindIdx = lib.indexOf('desktopAuthority.bind(desktopOwner, source);');
+  const bindEffect = lib.slice(bindIdx, lib.indexOf("}, [desktopAuthority, conn?.paired, desktopOwner, library, libraries.materialsEpoch]);", bindIdx));
   assert.doesNotMatch(bindEffect, /current\) \{|firstRun|mounted/u,
     "the owner bind issues its page-1 on mount, unguarded (that IS the first request)");
   const idIdx = lib.indexOf("desktopAuthority.request(DESKTOP_SOURCE());");

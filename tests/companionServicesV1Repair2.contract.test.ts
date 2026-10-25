@@ -47,7 +47,7 @@ test("P1-W1 — TS emits exactly the keys Rust declares", async () => {
     path: "/v1/services/materials/assets/a", body: { opId: "o" },
   });
   assert.deepEqual(Object.keys(captured.request).sort(),
-    ["body", "chunk", "instance", "method", "operationId", "path", "query"]);
+    ["body", "chunk", "instance", "library", "method", "operationId", "path", "query", "vault"]);
   assert.equal("operation_id" in captured.request, false);
 });
 
@@ -76,7 +76,7 @@ test("P1-W2 — TS never opens a WebSocket itself", () => {
 });
 
 test("P1-W2 — Rust owns the pinned hint WebSocket with the bearer out of JS/URL", () => {
-  assert.match(HINTS_RUST, /expected_gateway\(&shared, &instance\)/u, "owner captured");
+  assert.match(HINTS_RUST, /expected_scoped_gateway\(&shared, &instance, library\.as_deref\(\), vault\.as_deref\(\)\)/u, "owner captured");
   assert.match(HINTS_RUST, /services_hint_url/u, "the wss URL comes from the captured gateway");
   assert.match(HINTS_RUST, /ws_authorization/u, "the bearer is read Rust-side");
   const WORKER_RUST = read("src-tauri", "src", "eventstream.rs");

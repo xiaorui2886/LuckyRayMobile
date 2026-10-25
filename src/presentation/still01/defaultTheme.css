@@ -1,0 +1,115 @@
+/* LuckyRay desktop family, mobile edition (2026-10-22).
+ * Semantic colors only in the editor: its markup, tool order, icon paths,
+ * hit targets, typography, scrolling and input contracts are unchanged.
+ * The original Still kit and legacy quiet/ledger/night presets remain intact.
+ */
+.st-app {
+  --st-canvas: #f1f2f5;
+  --st-surface: #e8eaf0;
+  --st-sheet: #f6f7f9;
+  --st-card: #ffffff;
+  --st-ink: #18191f;
+  --st-secondary: #555966;
+  --st-muted: #606472;
+  --st-line: rgba(25, 28, 39, .11);
+  --st-selected: #dfe2eb;
+  --st-brand: #7c8aff;
+  /* Accessible tonal variant for small text and controls on light surfaces. */
+  --st-accent: #4b57c4;
+  --st-action: #4b57c4;
+  --st-on-action: #ffffff;
+  --st-danger: #b53149;
+  --st-danger-soft: #f9e8ec;
+  --st-pending: #89580c;
+  --st-success: #247149;
+  --st-shadow: 0 3px 14px rgba(29, 32, 44, .08);
+  --st-scrim: rgba(29, 31, 40, .30);
+  --st-focus: #dfe2eb;
+  --st-chrome-rgb: 241, 242, 245;
+}
+.st-app[data-mode=dark] {
+  --st-canvas: #0a0a0c;
+  --st-surface: #1a1a1f;
+  --st-sheet: #111114;
+  --st-card: #151519;
+  --st-ink: #f0f0f2;
+  --st-secondary: #92929b;
+  --st-muted: #92929b;
+  --st-line: rgba(255, 255, 255, .06);
+  --st-selected: #2a2a32;
+  --st-brand: #7c8aff;
+  --st-accent: #7c8aff;
+  --st-action: #7c8aff;
+  --st-on-action: #111114;
+  --st-danger: #fb7185;
+  --st-danger-soft: #342129;
+  --st-pending: #fbbf24;
+  --st-success: #4ade80;
+  --st-shadow: 0 3px 14px rgba(0, 0, 0, .36);
+  --st-scrim: rgba(3, 3, 5, .64);
+  --st-focus: #2a2a32;
+  --st-chrome-rgb: 10, 10, 12;
+}
+/* Quiet desktop-like grouping without compressing mobile touch targets. */
+.st-app .st-setting-section {
+  background: var(--st-card);
+  border: 1px solid var(--st-line);
+  border-radius: 12px;
+  padding: 0 12px;
+}
+.st-app .st-setting-section .st-row-copy strong { font-weight: 550; }
+.st-app .st-section-label h2 { font-weight: 600; }
+.st-app .st-tab-bar {
+  background: var(--st-sheet);
+  border: 1px solid var(--st-line);
+}
+.st-app .st-tab.is-current { color: var(--st-accent)!important; }
+/* Fixed preview colors describe the candidate mode, not the current mode. */
+.st-app .st-theme-preview.light {
+  background: #f1f2f5;
+  color: #18191f;
+  border: 1px solid rgba(25, 28, 39, .11);
+}
+.st-app .st-theme-preview.dark {
+  background: #0a0a0c;
+  color: #f0f0f2;
+  border: 1px solid rgba(255, 255, 255, .06);
+}
+.st-app .st-theme-preview.light .dock { background: #dfe2eb; }
+.st-app .st-theme-preview.dark .dock { background: #1a1a1f; }
+.st-app .st-theme-preview .dock:after {
+  content: '';
+  display: block;
+  width: 18px;
+  height: 4px;
+  margin: 10px auto;
+  border-radius: 2px;
+  background: #7c8aff;
+}
+/* Visible keyboard focus survives aria-pressed/current resets in the kit.
+   No forced border or changed dimensions on pointer/touch selection. */
+.st-app button:focus-visible {
+  outline: 2px solid var(--st-accent)!important;
+  outline-offset: -2px;
+}
+.st-app .st-search:focus-within { box-shadow: inset 0 0 0 2px var(--st-accent); }
+/* The topmost header pixel is opaque canvas, matching the native status inset.
+ * Keep the rest of the image chrome translucent; a .94 top stop exposed image
+ * pixels underneath and could never match a solid native status-bar base. */
+.st-app .st-asset-view.is-image .st-asset-header,
+.st-app[data-mode=dark] .st-asset-view.is-image .st-asset-header {
+  background: linear-gradient(to bottom,rgba(var(--st-chrome-rgb),1),rgba(var(--st-chrome-rgb),.72) 70%,rgba(var(--st-chrome-rgb),0));
+}
+.st-app .st-asset-view.is-image .st-asset-actions,
+.st-app[data-mode=dark] .st-asset-view.is-image .st-asset-actions {
+  background: linear-gradient(to bottom,rgba(var(--st-chrome-rgb),0),rgba(var(--st-chrome-rgb),.8) 35%,rgba(var(--st-chrome-rgb),.94));
+}
+/* Respect both the existing in-app preference and the OS motion preference. */
+.st-app[data-reduced=true] .st-icon-button:active,
+.st-app[data-reduced=true] .st-button:active,
+.st-app[data-reduced=true] .st-tab:active svg { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .st-app .st-icon-button:active,
+  .st-app .st-button:active,
+  .st-app .st-tab:active svg { transform: none; }
+}

@@ -130,8 +130,8 @@ test("repair-C — grant/runtime states still drive the same section (D/E/F)", (
   // One line selection covers grant-off, runtime-down and ready.
   assert.match(AGENT, /!lshSnap\.granted[\s\S]{0,200}?还没有授权/);
   assert.match(AGENT, /!lshSnap\.runtimeAvailable[\s\S]{0,160}?正在启动或暂时不可用/);
-  assert.match(AGENT, /等待电脑授权/, "D: grant-off action");
-  assert.match(AGENT, /暂时不可用/, "E: runtime-down action");
+  assert.match(AGENT, /重新检查授权/, "D: grant-off action");
+  assert.match(AGENT, /重新连接/, "E: runtime-down action");
   assert.match(AGENT, /lshReady \? \([\s\S]{0,240}?进入 LightSeek/, "F: ready action");
   // Authority untouched.
   assert.match(AGENT, /lsh\.openSurface\(snap\.instanceId\)/);
