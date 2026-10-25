@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute the application's actual append-only v14 SQL with SQLite.
+"""Execute the application's actual append-only v14/v15 SQL with SQLite.
 No app runtime, live device, credentials or network required.
 """
 import json
@@ -69,8 +69,10 @@ def retained(db):
 
 class MigrationTests(unittest.TestCase):
     def test_append_only(self):
-        self.assertEqual(len(MIGRATIONS), 14)
-        self.assertIn('pub const SCHEMA_VERSION: i64 = 14;', SOURCE)
+        self.assertEqual(len(MIGRATIONS), 15)
+        self.assertIn('pub const SCHEMA_VERSION: i64 = 15;', SOURCE)
+        self.assertIn('note_cache_scope_v14', MIGRATIONS[13])
+        self.assertIn('knowledgeImportPlanned', MIGRATIONS[14])
 
     def test_preserves_every_column_operation_audit_fk_and_index(self):
         db = fixture()
@@ -98,7 +100,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(retained(db), before)
         self.assertEqual(db.execute("SELECT name FROM sqlite_master WHERE name='note_cache_scope_v14'").fetchall(), [])
         migrate(db)
-        self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 14)
+        self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 15)
         self.assertEqual(retained(db), before)
         migrate(db)  # Startup rerun must be a no-op.
         self.assertEqual(retained(db), before)

@@ -1,0 +1,54 @@
+{
+  "commit": "200433932c465ea26b16e8e4fa272507ce692388",
+  "byteIdentical": [
+    {
+      "file": "graphCamera.ts",
+      "desktopPath": "src/features/graph/graphCamera.ts",
+      "sha256": "4a0860f8b5c86ed2962bc22b10df9b9e7a4e30388ded799cbd3299432b8d1e75",
+      "gitBlobSha": "5bcd3f24401295500cd7fbd5eb38de2f91aa1c09"
+    },
+    {
+      "file": "graphPhysics.ts",
+      "desktopPath": "src/features/graph/graphPhysics.ts",
+      "sha256": "00b49816f4bfe358d37521ef8f9758de64307a6bd79432c3618804bdc34d38b8",
+      "gitBlobSha": "36ca5a01485a169560312316ff924abd167fba5d"
+    },
+    {
+      "file": "graphPhysics.worker.ts",
+      "desktopPath": "src/features/graph/graphPhysics.worker.ts",
+      "sha256": "0cda77ee82e6515a4380c9c0cfd206c01a36422e996350460d40569a514d37de",
+      "gitBlobSha": "91411204fff38bcddc2801609d2965e3d39fb66d"
+    },
+    {
+      "file": "graphPresentation.ts",
+      "desktopPath": "src/features/graph/graphPresentation.ts",
+      "sha256": "4ca9021ec3343d1c1293124528480ed2abdf5e6e1021c5489ce7eb0c3012e2f9",
+      "gitBlobSha": "726ae2b4b8d0291e125033e9a779b69f036228a7"
+    },
+    {
+      "file": "graphSpatial.ts",
+      "desktopPath": "src/features/graph/graphSpatial.ts",
+      "sha256": "30b384f777bd02256e04e8a7e06c67065a36bfcbf817850f9e794eae746094bb",
+      "gitBlobSha": "b5ef8b4667e89a31ddd5631285651eb41a3e87f4"
+    },
+    {
+      "file": "graphPlayback.ts",
+      "desktopPath": "src/core/services/graphPlayback.ts",
+      "sha256": "a95f9a5931e920fda6b539b61f9b3ff9664cb530bf2e85ba5a4ff4dd54d4f61d",
+      "gitBlobSha": "4cf3163d27e7715941c5aa616bc21bfd61667725"
+    },
+    {
+      "file": "wikiTargets.ts",
+      "desktopPath": "src/core/markdown/wikiTargets.ts",
+      "sha256": "1c06ee1afd9d4e9383f82386dfaa54af5aab671d61b6749eed480496b276b88d",
+      "gitBlobSha": "d882b67354b7cc98b1e926ba55c9dbbd5b56a3fc"
+    }
+  ],
+  "adapted": [
+    "graphTypes.ts",
+    "graphSemantics.ts",
+    "graphRenderer.ts",
+    "graphPlaybackSession.ts"
+  ],
+  "source": "LuckyRay desktop graph source snapshot"
+}

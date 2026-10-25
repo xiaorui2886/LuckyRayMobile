@@ -1398,7 +1398,7 @@ function LegacyStillKnowledge({ conn, active = true, modeSwitch, management }: {
               connected={connected} current={desktopDirectory} title="目录" rootLabel="全部笔记"
               onSelect={path => { setQuery(""); setDesktopDirectory(path); setSheet(""); }}
               syncManagement={<>
-                {management}
+                <div onClick={() => setSheet("")}>{management}</div>
                 <Option label="本机笔记" icon="knowledge" onClick={() => { setSource("local"); setSheet(""); }} />
                 <KnowledgeReplicaManagement instance={instanceId} vault={desktop.vaultId} connected={connected} onChanged={() => desktopCtrl.revalidateReplica()} />
               </>} />} />
@@ -1586,7 +1586,7 @@ function LegacyStillKnowledge({ conn, active = true, modeSwitch, management }: {
       {sheet === "upload-local" && actionNote ? <LocalNoteUploadSheet noteId={actionNote.noteId} conn={conn} registerOverlay={registerOverlay} onClose={closeNoteActions} /> : null}
       {sheet === "notebooks" ? (
         <Sheet title="目录与库" registerDismiss={registerOverlay} onClose={() => setSheet("")}>
-          {management}
+          <div onClick={() => setSheet("")}>{management}</div>
           <Option label="导入文件" detail="仅导入 .md / .markdown / .txt 的文字；关联附件不会自动复制" icon="file" onClick={() => { setSheet(""); void pickLocalNoteFile(); }} />
           <Option label="本机笔记" icon="knowledge" selected onClick={() => { setSource("local"); setSheet(""); }} />
           <Option label="LuckyRay 电脑知识库" icon="monitor" onClick={() => { setSource("desktop"); setSheet(""); }} />
@@ -1640,4 +1640,3 @@ function KnowledgeFilterSheet({ draft, source, availableTags = [], onEdit, onRes
 // between the toolbar and the notes), so a QA sweep of the real component IS
 // the product presentation. Desktop never falls through to the local
 // "给想法留个位置 / 新建笔记" empty composition.
-

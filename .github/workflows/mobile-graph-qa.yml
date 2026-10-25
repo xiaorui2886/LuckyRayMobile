@@ -1,0 +1,112 @@
+name: Mobile graph isolated Android QA
+on:
+  push:
+    branches: [ray/mobile-graph-check-20261026]
+  workflow_dispatch:
+    inputs:
+      synthetic_only_ack:
+        description: 'Type SYNTHETIC-ONLY after reviewing source/publication diff and notifying owner'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: graph-qa-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  installed-app:
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/ray/mobile-graph-check-20261026') || (github.event_name == 'workflow_dispatch' && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [29, 35]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CI_GRAPH_QA_REVIEWED: 'yes'
+      GRAPH_API: ${{ matrix.api }}
+      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.workers.max=2
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install using existing SDK licenses only
+        run: |
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" platform-tools emulator 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018' "system-images;android-${GRAPH_API};google_apis;x86_64" < /dev/null
+          test -d "$ANDROID_HOME/system-images/android-${GRAPH_API}/google_apis/x86_64"
+      - name: Install locked dependencies and Android Rust target
+        run: |
+          pnpm install --frozen-lockfile
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+          rustup target add x86_64-linux-android
+      - name: Build real Rust Kotlin debug APK (no production keys)
+        run: bash scripts/graph-qa/build-debug.sh
+      - name: Installed offline app checks
+        run: |
+          export GRAPH_TEST_DRIVER="$GITHUB_WORKSPACE/scripts/graph-qa/run-installed.sh"
+          bash scripts/graph-qa/boot-avd.sh
+      - name: Upload explicit synthetic evidence only (never APK or raw logs)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: graph-qa-api${{ matrix.api }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/graph-qa/evidence/*.json
+            ${{ runner.temp }}/graph-qa/evidence/*.png
+            ${{ runner.temp }}/graph-qa/evidence/*.txt
+          if-no-files-found: warn
+          retention-days: 7
+  host-browser:
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/ray/mobile-graph-check-20261026') || (github.event_name == 'workflow_dispatch' && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI_GRAPH_QA_REVIEWED: 'yes'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Deterministic graph data Desktop parity and gestures
+        run: node --experimental-strip-types --test tests/mobileGraphData.test.ts tests/mobileGraphDesktopParity.test.ts tests/graph-core/*.test.ts tests/graphCanvas/mobileGraphGestures.test.mjs
+      - name: Validate synthetic native command payloads and Markdown
+        run: node --test scripts/graph-qa/seed-expressions.test.mjs
+      - name: Native production PNG module tests
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          cargo +1.95.0 test --locked --manifest-path tests/graph-export-native/Cargo.toml
+      - name: Synthetic actual Canvas Worker and settings in host Chromium
+        run: bash scripts/graph-qa/run-host-browser.sh
+      - name: Explicit host-only synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: graph-host-browser-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/graph-host-evidence/*.json
+            ${{ runner.temp }}/graph-host-evidence/*.png
+            ${{ runner.temp }}/graph-host-evidence/browser-version.txt
+          if-no-files-found: warn
+          retention-days: 7

@@ -11,14 +11,15 @@ const dir=await mkdtemp(path.join(repo,'tests/.managed-import-'));
 try {
  const source=await readFile(path.join(repo,'src/still/kit/LocalNoteImportBridge.tsx'),'utf8');
  const body=source.slice(source.indexOf('let picking:'));
- const code=`import {useEffect,useRef,useState} from 'react';
+ const code=`import {useEffect,useRef,useState,useSyncExternalStore} from 'react';
+ import {systemBarScrim} from ${JSON.stringify(path.join(repo,'src/services/systemBarAppearance.ts'))};
  import {ManagedImportIntents,snapshotManagedImportTarget,currentManagedImportTarget,setManagedImportTarget,invalidateManagedImportTarget} from ${JSON.stringify(path.join(repo,'src/services/managedImportIntents.ts'))};
  const api=globalThis.__import.api,managedVault=globalThis.__import.managedVault;
- const useStillNav=()=>({open:(...args)=>globalThis.__import.opens.push(args)});
+ const useStillNav=()=>({open:(...args)=>{globalThis.__import.opens.push(args);globalThis.__import.onOpen?.();}});
  const listen=async()=>()=>{}; const toast={error:()=>{},success:()=>{}};const noteImportFailure=()=>'';const localDataStore={publish:()=>{}};
  const managedNoteRoute=(v,n)=>'vault:'+v+':'+n;
  ${body}
- export {setManagedImportTarget,invalidateManagedImportTarget};`;
+ export {setManagedImportTarget,invalidateManagedImportTarget,systemBarScrim};`;
  await build({stdin:{contents:code,resolveDir:repo,loader:'tsx'},outfile:path.join(dir,'test.mjs'),bundle:true,format:'esm',platform:'node',jsx:'automatic',plugins:[{name:'react-identity',setup(b){b.onResolve({filter:/^(react|react\/jsx-runtime)$/},a=>({path:pathToFileURL(require.resolve(a.path)).href,external:true}));}}]});
  const dom=new JSDOM('<!doctype html><div id="root"></div>',{url:'https://test.invalid/',pretendToBeVisual:true});
  for(const name of ['window','document','HTMLElement','Event','localStorage'])globalThis[name]=dom.window[name];
@@ -39,6 +40,11 @@ try {
  receipts=[receipt(2)];await act(async()=>{release({status:'launched',requestId:id(2)});await staleLaunch;await new Promise(ok=>setTimeout(ok,0));});
  assert.equal(adopted.length,1,'source switch must retire automatic grant');assert.equal(acks.length,1,'unadopted receipt must survive');
  assert(document.querySelector('select[aria-label="导入目标笔记库"]'));assert.equal(document.querySelector('select').value,'','recovery must never guess selected vault');
+ let releaseModal;await act(async()=>{releaseModal=bridge.systemBarScrim.acquire();});
+ assert.equal(document.querySelector('.st-import-notice'),null,'pending import must not cover a migration or editor sheet');
+ assert.equal(acks.length,1,'hiding the notice must retain the unadopted receipt');
+ await act(async()=>releaseModal());
+ assert.equal(document.querySelector('select').value,'','closing a modal restores the explicit unselected target');
  await flush();assert.equal(adopted.length,1,'repeated delivery must not bypass recovery');
  assert(document.querySelector('option[value="B"]'), 'a bound vault remains an explicit import target');
  const select=document.querySelector('select');await act(async()=>{select.value='B';select.dispatchEvent(new Event('change',{bubbles:true}));});
@@ -50,6 +56,16 @@ try {
  const cancelled=bridge.pickLocalNoteFile();receipts=[{requestId:id(4),source:'picker',status:'cancelled'}];
  await act(async()=>{release({status:'launched',requestId:id(4)});await cancelled;await new Promise(ok=>setTimeout(ok,0));});
  assert(acks.includes(id(4)));assert.equal(adopted.length,2,'cancel never adopts');
+ // An earlier migrated receipt must not navigate away before this picker adopts its captured folder.
+ bridge.setManagedImportTarget('A','Current Picker Folder');
+ aliases.set(receipt(6).noteId,{localVaultId:'A',noteId:'already-migrated'});
+ globalThis.__import.onOpen=()=>bridge.invalidateManagedImportTarget();
+ const priorOpens=opens.length;const currentPicker=bridge.pickLocalNoteFile();receipts=[receipt(6),receipt(7)];
+ await act(async()=>{release({status:'launched',requestId:id(7)});await currentPicker;await new Promise(ok=>setTimeout(ok,0));});
+ assert.deepEqual(adopted.at(-1),['A',receipt(7).noteId,'Current Picker Folder'],'older alias replay cannot invalidate the current picker target');
+ assert.deepEqual(opens.slice(priorOpens).map(args=>args[1]),['vault:A:'+receipt(7).noteId],'only current picker may automatically navigate');
+ assert(acks.includes(id(6))&&acks.includes(id(7)),'both durable copies verified before acknowledgment');
+ globalThis.__import.onOpen=undefined;bridge.setManagedImportTarget('A');
  failCopy=true;const failed=bridge.pickLocalNoteFile();receipts=[receipt(5)];
  await act(async()=>{release({status:'launched',requestId:id(5)});await failed;await new Promise(ok=>setTimeout(ok,0));});
  assert(!acks.includes(id(5)),'failed managed copy must retain receipt');assert(document.querySelector('select'));

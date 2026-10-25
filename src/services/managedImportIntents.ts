@@ -1,3 +1,5 @@
+import { secureUuidV4 } from "./secureUuid.ts";
+
 /** Bounded local intent, not authority to use a remote account or URI grant. */
 export type ImportTarget = { localVaultId: string; folder: string; sessionGeneration: string };
 type Intent = ImportTarget & { requestId: string; createdAt: number };
@@ -27,11 +29,20 @@ export class ManagedImportIntents {
   }
   forget(requestId: string) { this.storage.setItem(KEY, JSON.stringify(this.read().filter(item => item.requestId !== requestId))); }
 }
-const incarnation = typeof crypto !== "undefined" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+let incarnation: string | null = null;
+function importIncarnation(): string | null {
+  if (incarnation) return incarnation;
+  try { return incarnation = secureUuidV4(); }
+  catch { return null; } // No secure owner: keep receipts for explicit recovery, never crash app startup.
+}
 let generation = 0, active: ImportTarget | null = null;
 export function invalidateManagedImportTarget() { generation++; active = null; }
 export function setManagedImportTarget(localVaultId: string, folder = "") {
-  if (active?.localVaultId !== localVaultId || active?.folder !== folder) { generation++; active = localVaultId ? { localVaultId, folder, sessionGeneration: `${incarnation}:${generation}` } : null; }
+  if (active?.localVaultId !== localVaultId || active?.folder !== folder) {
+    generation++;
+    const owner = localVaultId ? importIncarnation() : null;
+    active = owner ? { localVaultId, folder, sessionGeneration: `${owner}:${generation}` } : null;
+  }
 }
 export function snapshotManagedImportTarget(): ImportTarget | null { return active ? { ...active } : null; }
 export function currentManagedImportTarget(target: ImportTarget): boolean { return active?.localVaultId === target.localVaultId && active.sessionGeneration === target.sessionGeneration && active.folder === target.folder; }

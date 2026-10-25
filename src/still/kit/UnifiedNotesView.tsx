@@ -2,12 +2,14 @@ import { managedWikiProof } from "./managedWikiProof";
 import { failureCopy } from "../../services/feedback";
 import { pickLocalNoteFile } from "./LocalNoteImportBridge";
 import { setManagedImportTarget, invalidateManagedImportTarget } from "../../services/managedImportIntents";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { managedVault, managedNoteRoute, type ManagedVault, type ManagedNote, type ManagedMigrationStatus, type ManagedTransferPreview } from "../../services/managedVault";
 import { KnowledgeModeSwitch, type KnowledgeMode } from "./KnowledgeModeSwitch";
 import { Button, Empty, Icon, IconButton, Option, SearchField, Sheet } from "./StillImports";
 import { FolderBreadcrumbs } from "./knowledgeFolders";
 import { useStillNav } from "../StillShell";
+
+const MobileGraphView = lazy(() => import("../../features/graph/MobileGraphView"));
 
 let rememberedMode: KnowledgeMode = "notes";
 type BrowseState = { query: string; folder: string; sort: "name" | "recent"; range: "all" | "pinned" | "favorite" | "archived"; tag: string; scroll: number };
@@ -20,7 +22,7 @@ export function UnifiedNotesRoot({ legacy, active = true }: { legacy: LegacyNote
   const [mode, setMode] = useState<KnowledgeMode>(rememberedMode);
   const changeMode = (next: KnowledgeMode) => { rememberedMode = next; setMode(next); };
   const modeSwitch = <KnowledgeModeSwitch value={mode} onChange={changeMode} />;
-  if (mode === "graph") return <div className="st-view st-knowledge-view" aria-label="图谱"><div className="st-collection-head">{modeSwitch}</div></div>;
+  if (mode === "graph") return <Suspense fallback={<div className="st-view st-knowledge-view"><div className="st-collection-head">{modeSwitch}</div><p role="status">正在打开图谱…</p></div>}><MobileGraphView modeSwitch={modeSwitch} active={active} /></Suspense>;
   return <NotesAuthority modeSwitch={modeSwitch} legacy={legacy} active={active} />;
 }
 
@@ -170,7 +172,7 @@ function ManagedNotesCollection({ catalog, modeSwitch, management, onSelect, onL
     </div>
     {sheet === "directory" ? <Sheet headingSlot={<div className="st-source" role="group" aria-label="目录与库"><span className={"st-source-glide " + (tab === "libraries" ? "is-desktop" : "")} aria-hidden="true" />{(["directory", "libraries"] as const).map(value => <button key={value} aria-pressed={tab === value} onClick={() => setTab(value)}><span className="st-source-label">{value === "directory" ? "目录" : "库"}</span></button>)}</div>} title="目录与库" registerDismiss={registerOverlay} onClose={() => setSheet("")} busy={busy}>
 
-      {tab === "directory" ? <><Option label="全部笔记" icon="knowledge" selected={!browse.folder} onClick={() => { setBrowse({ folder: "", query: "", scroll: 0 }); setSheet(""); }} />{paths.map(path => <Option key={path} label={path} icon="folder" selected={browse.folder === path} onClick={() => { setBrowse({ folder: path, query: "", scroll: 0 }); setSheet(""); }} />)}<fieldset disabled={readOnly} style={{border:0,padding:0,margin:0}}><Option label="新建文件夹" icon="plus" onClick={() => { if (!readOnly) { setFolderName(""); setSheet("folder"); } }} /></fieldset></> : <>{catalog.items.filter(item => item.transferState !== "completed").map(item => <Option key={item.localVaultId} label={item.name} detail={item.migrationState !== "ready" ? "尚未整理，保留原有入口" : item.binding ? "本地文件 · 保留来源关联" : "本地文件"} selected={item.localVaultId === vaultId} onClick={() => { if (item.migrationState === "ready") void run(() => onSelect(item.localVaultId)); }} />)}{!vault?.binding ? <Option label="加入同步库" icon="folder" detail="将此本地库的笔记加入一个已关联的库，原始内容保留。" onClick={() => { setTransferTarget(""); setTransferPreview(null); setSheet("transfer"); }} /> : null}<Option label="原有笔记与电脑知识库" icon="folder" detail="访问未整理或尚未下载的内容" onClick={onLegacy} />{management}</>}
+      {tab === "directory" ? <><Option label="全部笔记" icon="knowledge" selected={!browse.folder} onClick={() => { setBrowse({ folder: "", query: "", scroll: 0 }); setSheet(""); }} />{paths.map(path => <Option key={path} label={path} icon="folder" selected={browse.folder === path} onClick={() => { setBrowse({ folder: path, query: "", scroll: 0 }); setSheet(""); }} />)}<fieldset disabled={readOnly} style={{border:0,padding:0,margin:0}}><Option label="新建文件夹" icon="plus" onClick={() => { if (!readOnly) { setFolderName(""); setSheet("folder"); } }} /></fieldset></> : <>{catalog.items.filter(item => item.transferState !== "completed").map(item => <Option key={item.localVaultId} label={item.name} detail={item.migrationState !== "ready" ? "尚未整理，保留原有入口" : item.binding ? "本地文件 · 保留来源关联" : "本地文件"} selected={item.localVaultId === vaultId} onClick={() => { if (item.migrationState === "ready") void run(() => onSelect(item.localVaultId)); }} />)}{!vault?.binding ? <Option label="加入同步库" icon="folder" detail="将此本地库的笔记加入一个已关联的库，原始内容保留。" onClick={() => { setTransferTarget(""); setTransferPreview(null); setSheet("transfer"); }} /> : null}<Option label="原有笔记与电脑知识库" icon="folder" detail="访问未整理或尚未下载的内容" onClick={onLegacy} /><div onClick={() => setSheet("")}>{management}</div></>}
       {error ? <p role="alert" className="st-sheet-copy">{error}</p> : null}
     </Sheet> : null}
     {sheet === "transfer" && !vault?.binding ? <Sheet title="加入同步库" registerDismiss={registerOverlay} onClose={() => setSheet("")} busy={busy}>

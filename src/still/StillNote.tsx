@@ -460,8 +460,9 @@ function LocalStillNote({ id, managed, onManagedRedirect, startInEdit, current, 
     onBack={() => void guardedBack()} onBrowse={() => {}} onMore={() => {}} onNew={() => {}} onEdit={() => {}} onChange={() => {}} onFormat={() => {}} onSearch={() => {}} onState={() => {}}
     readingContent={<><p className="st-sheet-copy" role="status">{bodyProblem}</p>{managedRecord.current?.bodyState === "missing" && managedInfo?.binding ? <><Button disabled={hydrating || !managedConnectionAvailable} onClick={() => void hydrateBody()}>{hydrating ? "正在获取正文…" : "从关联电脑获取正文"}</Button>{!managedConnectionAvailable ? <p className="st-sheet-copy">请先连接此库关联的电脑。</p> : null}</> : null}{saveMsg ? <p className="st-sheet-copy" role="status">{saveMsg}</p> : null}{content ? managed ? <DesktopNotePreview localVaultId={managed.localVaultId} revision={resourceRevision} instance="" vault={managed.localVaultId} note={managed.noteId} content={content} resources={resources} online={false} registerOverlay={registerOverlay} /> : <SafeNoteMarkdown content={content} /> : null}</>} />;
 
+  // Body availability is guarded above. Missing attachments must not hide a verified local file.
   const syncState = managedRecord.current?.syncState;
-  const state: NoteState = saveState === "error" ? "error" : !managed ? "local" : syncState === "incomplete" ? "metadata" : syncState === "pending" || syncState === "synced" || syncState === "conflict" ? syncState : "local";
+  const state: NoteState = saveState === "error" ? "error" : !managed ? "local" : syncState === "incomplete" ? "local" : syncState === "pending" || syncState === "synced" || syncState === "conflict" ? syncState : "local";
   const managedLabel = syncState === "pending" ? "已保存在本地 · 待同步" : syncState === "synced" ? "已同步" : syncState === "incomplete" ? "本地文件 · 附件尚不完整" : syncState === "conflict" ? "本地文件 · 需处理冲突" : "已保存在本地";
   const savedLabel = mode === "edit"
     ? (saveState === "saving" ? "正在保存…" : saveState === "unsaved" ? "未保存" : saveState === "error" ? (saveMsg || "保存出错") : managed ? managedLabel : "已自动保存")

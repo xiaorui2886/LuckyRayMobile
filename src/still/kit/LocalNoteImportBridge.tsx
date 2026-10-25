@@ -1,6 +1,7 @@
 import { noteImportFailure, type ImportReceipt } from "../../services/knowledgeActions";
 import { useStillNav } from "../StillShell";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { systemBarScrim } from "../../services/systemBarAppearance";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../services/client";
 import { localDataStore } from "../../services/localDataStore";
@@ -29,6 +30,7 @@ export async function pickLocalNoteFile() {
 }
 /** Receipt acknowledgement follows validated managed copy, never mere discovery. */
 export function LocalNoteImportBridge() {
+  const modalOpen = useSyncExternalStore(listener => systemBarScrim.subscribe(listener), () => systemBarScrim.active());
   const { open } = useStillNav();
   const openRef = useRef(open); openRef.current = open;
   const [waiting, setWaiting] = useState<{noteId: string; title: string}[]>([]);
@@ -44,7 +46,7 @@ export function LocalNoteImportBridge() {
     else setWaiting(previous => previous.some(item => item.noteId === noteId) ? previous : [...previous, { noteId, title }]);
     toast.success(`已导入本地笔记库：${title}`);
   };
-  const adopt = async (item: ImportReceipt, localVaultId: string, captured?: ImportTarget) => {
+  const adopt = async (item: ImportReceipt, localVaultId: string, captured?: ImportTarget, allowOpen = true) => {
     if (!item.noteId || adopting.current.has(item.requestId)) return false;
     if (captured && !currentManagedImportTarget(captured)) return false;
     adopting.current.add(item.requestId);
@@ -65,7 +67,7 @@ export function LocalNoteImportBridge() {
       intents().forget(item.requestId);
       localDataStore.publish("note");
       window.dispatchEvent(new Event("luckyray:managed-vault-change"));
-      present(managedNoteRoute(note.localVaultId, note.noteId), note.title || "未命名笔记", !captured || currentManagedImportTarget(captured));
+      present(managedNoteRoute(note.localVaultId, note.noteId), note.title || "未命名笔记", allowOpen && (!captured || currentManagedImportTarget(captured)));
       setRecovery(previous => previous.filter(value => value.requestId !== item.requestId));
       setTargetId("");
       return true;
@@ -88,13 +90,16 @@ export function LocalNoteImportBridge() {
           if (!alive) return;
           let acknowledged = false;
           for (const item of result.items) {
+            // Replaying an older alias must not navigate away and retire the
+            // folder captured by a different, currently active picker.
+            const anotherPicker = typeof picking === "string" && picking !== item.requestId;
             if (picking === item.requestId) picking = false;
             if (item.status === "imported" && item.noteId) {
               const captured = item.source === "picker" ? intents().matching(item.requestId, snapshotManagedImportTarget()) : null;
               let adopted = false;
               try {
                 const alias = await managedVault.resolveLegacy(item.noteId);
-                if (alias) adopted = await adoptRef.current(item, alias.localVaultId);
+                if (alias) adopted = await adoptRef.current(item, alias.localVaultId, undefined, !anotherPicker);
                 else if (captured) adopted = await adoptRef.current(item, captured.localVaultId, captured);
               } catch { /* Keep receipt and expose explicit retry. */ }
               if (adopted) acknowledged = true;
@@ -126,7 +131,7 @@ export function LocalNoteImportBridge() {
     return () => { live = false; window.removeEventListener("luckyray:managed-vault-change", refresh); };
   }, [recovery.length]);
   return <>
-    {recovery.length ? <div className="st-import-notice" role="status">
+    {!modalOpen && recovery.length ? <div className="st-import-notice is-recovery" role="status">
       <span>待处理导入：{recovery[0].title || "笔记"}。请选择保存的笔记库，将存入根目录；原始文件仍保留。</span>
       <select aria-label="导入目标笔记库" value={targetId} disabled={busy} onChange={event => setTargetId(event.target.value)}><option value="">请选择笔记库</option>{vaults.map(vault => <option key={vault.localVaultId} value={vault.localVaultId}>{vault.name}</option>)}</select>
       <button type="button" disabled={busy || !vaults.some(vault => vault.localVaultId === targetId)} onClick={() => {
@@ -135,7 +140,7 @@ export function LocalNoteImportBridge() {
       }}>保存到所选库</button>
       {!vaults.length ? <span>请先在笔记中整理为本地笔记库。</span> : null}
     </div> : null}
-    {waiting.length ? <div className="st-import-notice" role="status">
+    {!modalOpen && waiting.length ? <div className="st-import-notice" role="status">
       <span>已导入本地库：{waiting[0].title}{waiting.length > 1 ? ` 等 ${waiting.length} 篇` : ""}</span>
       <button type="button" onClick={() => {
         if (document.querySelector(".st-note-surface")) { toast.error("请先保存并关闭当前笔记，再查看导入内容。"); return; }

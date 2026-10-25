@@ -68,7 +68,13 @@ test('saved libraries live inside the production directory sheet: stable selecti
       b.onResolve({ filter: /services\/client$/ }, () => ({ path: 'client', namespace: 'r8-mock' }));
       b.onResolve({ filter: /StillShell$/ }, () => ({ path: 'nav', namespace: 'r8-mock' }));
       b.onResolve({ filter: /^@tauri-apps\/api\/core$/ }, () => ({ path: 'core', namespace: 'r8-mock' }));
-      b.onLoad({ filter: /.*/, namespace: 'r8-mock' }, ({ path }) => ({ contents: path === 'client' ? 'export const api = globalThis.__r8Api; export const materialApi = library => new Proxy({}, {get:(_,name)=>(...args)=>api[name](...args,library)});' : path === 'nav' ? 'const nav = { open(){}, registerOverlay(){ return () => {}; } }; export const useStillNav = () => nav;' : 'export const convertFileSrc = x => x; export const invoke = async () => ({});', loader: 'js' }));
+      b.onLoad({ filter: /.*/, namespace: 'r8-mock' }, ({ path }) => ({ contents: path === 'client' ? 'export const api = globalThis.__r8Api; export const materialApi = library => new Proxy({}, {get:(_,name)=>(...args)=>api[name](...args,library)});' : path === 'nav' ? 'const nav = { open(){}, registerOverlay(){ return () => {}; } }; export const useStillNav = () => nav;' : `
+        export const convertFileSrc = x => x;
+        export const invoke = async command => {
+          if (command === 'managed_vault_list') return {items: [], selectedVaultId: null};
+          if (command === 'managed_vault_migration_status') return {state: 'not-migrated', localVaultId: 'local', noteCount: 0, warnings: []};
+          throw Error('Unexpected native command in legacy saved-library regression: ' + command);
+        };`, loader: 'js' }));
     }}] });
     const { React, act, createRoot, StillLibrary, StillKnowledge, desktopLibraries } = require(out);
     app = createRoot(document.getElementById('root'));
@@ -155,7 +161,12 @@ test('saved libraries live inside the production directory sheet: stable selecti
     await escape();
     // The actual Knowledge page uses the same directory sheet, not a separate picker.
     await act(async()=>app.render(React.createElement(StillKnowledge,{conn:connection('K')}))); await wait();
-    await click('电脑'); await wait(); assertHeader();
+    await click('选择知识库'); await click('整理为本地笔记库'); await wait();
+    assert.equal(document.querySelectorAll('[role="dialog"]').length,1,'migration replaces source sheet instead of leaving two focus traps');
+    assert.match(document.querySelector('[role="dialog"]').textContent,/预览整理计划/);
+    await escape(); await wait();
+    // Notes/Graph now owns the header; legacy source selection remains in Directory.
+    await click('选择知识库'); await click('LuckyRay 电脑知识库'); await wait(); assertHeader();
     await click('目录');
     assert.ok(button('本机笔记'),'source-management control retained inside directory');
     assert.match(document.querySelector('.st-sheet').textContent,/手机保存/,'replica controls retained inside directory');

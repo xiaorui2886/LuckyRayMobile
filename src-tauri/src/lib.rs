@@ -3,6 +3,7 @@
 
 mod capture_media;
 mod companion_export;
+mod graph_export;
 mod db;
 mod device;
 mod eventstream;
@@ -2995,6 +2996,7 @@ pub fn run() {
             local_asset_reconcile,
             companion_export,
             companion_share_file,
+            graph_export::graph_export_png,
             companion_share_text,
             open_attachment,
             companion_storage_stats,
@@ -4759,4 +4761,3 @@ mod tests {
         }
     }
 }
-

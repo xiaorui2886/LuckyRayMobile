@@ -105,7 +105,7 @@ test("still parity — authority copies preserve the staged design blobs", () =>
     const rawSource = read("src", "presentation", "still01", file);
     // Authorized saved-library selector adds one bounded slot only. Normalize
     // that slot to keep the pre-existing visual authority digest unchanged.
-    const scopedSource = file === "Views.tsx" ? rawSource.replace("sourceSwitchSlot?:ReactNode;", "").replace("{p.sourceSwitchSlot ?? <SourceSwitch value={p.source} onChange={p.onSource}/>}", "<SourceSwitch value={p.source} onChange={p.onSource}/>").replace(/\n$/, "").replace(";librarySlot?:ReactNode;", ";").replace("{p.librarySlot}", "").replace("label={p.source==='desktop'?'目录':library?'浏览本机素材':'选择知识库'}", "label={library?(p.source==='desktop'?'目录':'浏览本机素材'):'选择知识库'}") : rawSource;
+    const scopedSource = file === "Views.tsx" ? rawSource.replace("sourceSwitchSlot?:ReactNode;", "").replace("{p.sourceSwitchSlot ?? <SourceSwitch value={p.source} onChange={p.onSource}/>}", "<SourceSwitch value={p.source} onChange={p.onSource}/>").replace(";librarySlot?:ReactNode;", ";").replace("{p.librarySlot}", "").replace("label={p.source==='desktop'?'目录':library?'浏览本机素材':'选择知识库'}", "label={library?(p.source==='desktop'?'目录':'浏览本机素材'):'选择知识库'}") : rawSource;
     let source = file === "Still.tsx" ? normalizeNoteChrome(rawSource) : file === "Views.tsx" ? normalizeOvernightNavigation(scopedSource) : scopedSource;
     const boundary = file === "still.css" ? source.indexOf(NAVIGATION_CSS_BOUNDARY) : -1;
     if (file === "still.css") assert.ok(boundary > 0, "the authorized append-only navigation boundary exists");

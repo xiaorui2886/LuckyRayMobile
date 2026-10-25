@@ -48,6 +48,14 @@ test('managed editor uses file revisions, awaits dirty Back, and preserves unava
   await render({id:'vault:local-v:missing',startInEdit:true});assert.equal(document.querySelector('.st-note-title')?.tagName,'H1');assert.match(document.body.textContent,/不能作为空白笔记编辑/);assert.equal(document.querySelector('.cm-editor'),null);
   base.bodyState='conflict';base.content='preserved conflict body';
   await render({id:'vault:local-v:conflict',startInEdit:true});assert.match(document.body.textContent,/preserved conflict body/);assert.equal(document.querySelector('.cm-editor'),null);
+  base.bodyState='ready';base.content='QA_READY_BODY with an unresolved resource';base.syncState='incomplete';base.remote={resourcesComplete:false};
+  await render({id:'vault:local-v:incomplete-readable',startInEdit:false});
+  assert.match(document.body.textContent,/QA_READY_BODY/,'resource incompleteness cannot hide a verified local Markdown body');
+  assert.doesNotMatch(document.body.textContent,/正文还没存到手机|标题和位置已保存，正文尚未缓存/);
+  await render({id:'vault:local-v:incomplete-editable',startInEdit:true});
+  const incompleteCm=peekCmView('cm|local|||vault:local-v:incomplete-editable');assert.ok(incompleteCm,'ready body remains editable while attachments are incomplete');
+  assert.equal(incompleteCm.state.doc.toString(),base.content);
+  base.syncState='local';base.remote={};
   base.bodyState='ready';base.content='reopened file body';
   await render({id:'note-legacy',startInEdit:true});
   assert.ok(peekCmView('cm|local|||vault:local-v:desktop-id'));

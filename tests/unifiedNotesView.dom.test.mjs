@@ -12,9 +12,11 @@ const temporary = await mkdtemp(path.join(repo, 'tests/.unified-notes-'));
 try {
   await build({ stdin: { contents: `export { UnifiedNotesRoot } from './src/still/kit/UnifiedNotesView'; export {SourceSwitch} from './src/presentation/still01/Still'; export {snapshotManagedImportTarget} from './src/services/managedImportIntents';`, resolveDir: repo, loader: 'tsx' }, outfile: path.join(temporary, 'test.mjs'), bundle: true, format: 'esm', platform: 'node', jsx: 'automatic', loader: { '.css': 'empty' }, plugins: [{ name: 'test-host-seams', setup(b) {
     b.onResolve({ filter: /^(react|react\/jsx-runtime|react-dom|react-dom\/client)$/ }, a => ({ path: pathToFileURL(require.resolve(a.path)).href, external: true }));
+    // Canvas has its own real-render/gesture suite; this suite tests authority wiring, not jsdom graphics.
+    b.onResolve({ filter: /MobileGraphCanvas$/ }, () => ({ path: 'canvas', namespace: 'fake' }));
     b.onResolve({ filter: /StillShell$/ }, () => ({ path: 'nav', namespace: 'fake' }));
     b.onResolve({ filter: /^@tauri-apps\/api\/core$/ }, () => ({ path: 'native', namespace: 'fake' }));
-    b.onLoad({ filter: /.*/, namespace: 'fake' }, a => ({ contents: a.path === 'nav' ? 'export const useStillNav=()=>({open:(...args)=>globalThis.__opens.push(args),registerOverlay:()=>()=>{}})' : 'export const invoke=(...args)=>globalThis.__invoke(...args);export const convertFileSrc=(v)=>v; export const isTauri=()=>false;', loader: 'js' }));
+    b.onLoad({ filter: /.*/, namespace: 'fake' }, a => ({ contents: a.path === 'canvas' ? 'import {forwardRef,useImperativeHandle} from "react"; export const MobileGraphCanvas=forwardRef((props,ref)=>{globalThis.__graphSeed=props.seed;useImperativeHandle(ref,()=>({fit(){},reset(){},zoomBy(){},capture(){return Promise.reject(new Error("not exercised"))}}));return null;});' : a.path === 'nav' ? 'export const useStillNav=()=>({open:(...args)=>globalThis.__opens.push(args),registerOverlay:()=>()=>{}})' : 'export const invoke=(...args)=>globalThis.__invoke(...args);export const convertFileSrc=(v)=>v; export const isTauri=()=>false;', loader: 'js' }));
   } }] });
   const dom = new JSDOM('<!doctype html><div class="st-app" data-reduced="true"><div id="root"></div></div>', { url: 'https://test.invalid' });
   for (const name of ['window','document','HTMLElement','Event','MouseEvent','CustomEvent','KeyboardEvent','HTMLInputElement','HTMLTextAreaElement','localStorage','navigator']) Object.defineProperty(globalThis, name, { value: dom.window[name], configurable: true });
@@ -31,6 +33,7 @@ try {
     if (name === 'managed_vault_list') return { items: [{ localVaultId: 'a', name: 'Vault A', migrationState: 'ready',transferState,transferTargetVaultId:transferState?'b':undefined }, { localVaultId: 'b', name: 'Vault B', migrationState: 'ready', binding: {instanceId:'desktop',remoteVaultId:'remote-b'} }], selectedVaultId };
     if (name === 'managed_vault_migration_status') return { state, localVaultId: 'a', noteCount: 2, warnings: [] };
     if (name === 'managed_vault_note_list') { if(paged && args.query.localVaultId==='a') return {items:[{...note('a','Page '+args.query.page),noteId:'page-'+args.query.page}],total:2,hasMore:args.query.page<2}; if (args.query.localVaultId === 'b' && deferredB) return deferredB.promise; return { items: [note(args.query.localVaultId, args.query.localVaultId === 'a' ? 'Alpha' : 'Beta', args.query.localVaultId === 'b' ? 'missing' : 'ready')], total: 1, hasMore: false }; }
+    if (name === 'managed_vault_link_catalog') return {items:[note(args.localVaultId,args.localVaultId==='a'?'Alpha':'Beta',args.localVaultId==='b'?'missing':'ready')]};
     if (name === 'managed_vault_folders') return { paths: [...folders] };
     if (name === 'managed_vault_folder_create') { folders.push(args.name); return {path:args.name}; }
     if (name === 'managed_vault_note_create') return {...note(args.localVaultId,args.title),noteId:'new-id'};
@@ -60,11 +63,26 @@ try {
   await act(async()=>{window.dispatchEvent(new CustomEvent('luckyray:managed-vault-change',{detail:{localVaultId:'a'}}));await new Promise(resolve=>setTimeout(resolve,5));});
   assert.match(document.body.textContent,/Page 2/,'same-vault refresh preserves the loaded page extent');
   paged=false;
-  await click('图谱'); const graphCount = calls.length;
+  const graphStart = calls.length;
+  await click('图谱');
   assert.equal(document.querySelectorAll('.st-note-row,.st-collection-top,.st-sheet').length, 0);
+  assert.equal(snapshotManagedImportTarget(), null, 'Graph never inherits NotesAuthority import ownership');
+  const allowedGraphReads = new Set(['managed_vault_list','managed_vault_migration_status','managed_vault_link_catalog','managed_vault_note_list']);
+  const assertGraphReads = start => {
+    const graphCalls = calls.slice(start);
+    assert.ok(graphCalls.length > 0, 'Graph independently reads its local source');
+    assert.ok(graphCalls.every(([name])=>allowedGraphReads.has(name)), 'Graph permits only exact local catalog/body reads: no Notes folder hydration, writes, migrations, transfers or remote commands');
+    const bodyReads = graphCalls.filter(([name])=>name==='managed_vault_note_list');
+    assert.ok(bodyReads.length > 0, 'Graph loads actual local Markdown rather than a blank stub');
+    for (const [,args] of bodyReads) assert.deepEqual(args.query,{localVaultId:'a',page:1,limit:200,sort:'name'}, 'Graph uses its own full-vault pagination, not NotesAuthority browse filters');
+    assert.equal(snapshotManagedImportTarget(),null,'Graph refresh/remount never acquires Notes import authority');
+    assert.equal(globalThis.__graphSeed?.nodes.length,1,'actual local graph data reaches the isolated renderer seam');
+  };
   await act(async () => { window.dispatchEvent(new Event('luckyray:managed-vault-change')); await new Promise(resolve => setTimeout(resolve, 20)); });
-  assert.equal(calls.length, graphCount, 'Graph does not load notes or react to Notes refresh');
-  await act(async () => root.unmount()); root = createRoot(document.getElementById('root')); await render(); assert.equal(calls.length, graphCount, 'retained Graph mounts without any native call');
+  assertGraphReads(graphStart);
+  await act(async () => root.unmount()); root = createRoot(document.getElementById('root'));
+  const remountStart = calls.length; await render(); assertGraphReads(remountStart);
+  assert.equal(document.querySelectorAll('.st-note-row,.st-collection-top,.st-sheet').length,0,'retained Graph still excludes NotesAuthority UI');
   await click('笔记'); assert.match(document.body.textContent, /Alpha/);
   await click('目录与库'); await click('库');
   deferredB = {}; deferredB.promise = new Promise(resolve => deferredB.resolve = resolve);
