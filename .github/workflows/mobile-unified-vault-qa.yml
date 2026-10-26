@@ -1,7 +1,7 @@
 name: Unified vault isolated Android QA
 on:
   push:
-    branches: [ray/mobile-unified-vault-qa-20261026]
+    branches: [ray/mobile-unified-vault-qa-20261026, ray/mobile-unified-vault-host-20261026]
   workflow_dispatch:
     inputs:
       synthetic_only_ack:
@@ -91,7 +91,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   host-browser:
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026')) || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026') && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:

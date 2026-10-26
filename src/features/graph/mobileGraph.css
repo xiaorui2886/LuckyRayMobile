@@ -146,6 +146,8 @@
 @keyframes mg-drawer-in { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
 /* A short landscape/IME viewport cannot fit a useful drawer inside the small
    graph stage below the source rows. Use the available viewport instead. */
-@media(max-height:480px) { .mg-settings { position:fixed; left:auto; right:8px; top:calc(var(--st-safe-top,0px) + 4px); bottom:calc(var(--st-safe-bottom,0px) + 92px); height:auto; max-height:none; border-radius:16px; } .st-app[data-text-entry=true] .mg-settings { bottom:calc(var(--st-safe-bottom,0px) + 4px); } .mg-settings-actions { padding-top:2px; padding-bottom:2px; } }
+/* The fixed short drawer extends above its isolated stage: lift that context
+   above source tabs (z1), but below the bottom dock (z10). No :has for WebView83. */
+@media(max-height:480px) { .mg-stage.is-settings-open { z-index:2; } .mg-settings { position:fixed; left:auto; right:8px; top:calc(var(--st-safe-top,0px) + 4px); bottom:calc(var(--st-safe-bottom,0px) + 92px); height:auto; max-height:none; border-radius:16px; } .st-app[data-text-entry=true] .mg-settings { bottom:calc(var(--st-safe-bottom,0px) + 4px); } .mg-settings-actions { padding-top:2px; padding-bottom:2px; } }
 @media(prefers-reduced-motion:reduce) { .mg-view *,.mg-view *:before,.mg-view *:after { scroll-behavior:auto!important; transition:none!important; animation:none!important; } }
 .st-app[data-reduced=true] .mg-view *,.st-app[data-reduced=true] .mg-view *:before,.st-app[data-reduced=true] .mg-view *:after { scroll-behavior:auto!important; transition:none!important; animation:none!important; }
