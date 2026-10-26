@@ -50,6 +50,8 @@ jobs:
           tests/managedNoteResources.test.ts
           tests/managedSyncSchedule.test.ts
           tests/managedVaultMutations.test.ts
+          tests/knowledgeVaultCatalog.test.ts
+          tests/feedbackCancellation.test.ts
           tests/managedWikiIdentity.test.ts
           tests/scopedKnowledgeSnapshots.test.ts
           tests/scopedServiceLifecycle.test.ts

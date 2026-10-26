@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {buildMobileGraphSnapshot,parseMobileGraphBody} from '../src/services/mobileGraphIndex.ts';
 import {loadMobileGraphSnapshot,listMobileGraphSources, type MobileGraphNote, type MobileGraphSource} from '../src/services/mobileGraph.ts';
 import {managedVault} from '../src/services/managedVault.ts';
+import {noteSourceSelection} from '../src/services/noteSourceSelection.ts';
 import {api} from '../src/services/client.ts';
 import {linkMobileGraphNodes,unlinkMobileGraphNodes,setMobileGraphNoteTags} from '../src/services/mobileGraphMutations.ts';
 const source:MobileGraphSource={id:'local',name:'Local',kind:'managed',readOnly:false,binding:null};
@@ -44,10 +45,11 @@ test('changed pagination fails instead of publishing partial ready graph',async(
  managedVault.linkCatalog=async()=>({items:[row]});managedVault.notes=async()=>({items:[row],total:2,hasMore:false});
  try{await assert.rejects(()=>loadMobileGraphSnapshot(source),/尚未完整/);}finally{Object.assign(managedVault,original);}
 });
-test('legacy source available without committing migration',async()=>{
+test('legacy recovery stays explicitly accessible without committing migration',async()=>{
+ noteSourceSelection.select({kind:'legacy'});
  const originals={list:managedVault.list,migrationStatus:managedVault.migrationStatus};
  managedVault.list=async()=>({items:[],selectedVaultId:null});managedVault.migrationStatus=async()=>({state:'not-migrated',localVaultId:'local',noteCount:2,warnings:[]});
- try{const result=await listMobileGraphSources();assert.equal(result.sources[0].kind,'legacy');assert.equal(result.sources[0].readOnly,true);}finally{Object.assign(managedVault,originals);}
+ try{const result=await listMobileGraphSources();assert.equal(result.sources[0].kind,'legacy');assert.equal(result.sources[0].readOnly,true);}finally{Object.assign(managedVault,originals);noteSourceSelection.select(null);}
 });
 test('CAS graph link persists stable identity; unlink touches only parsed prose',async()=>{
  const a=note('a','A','`[[@id/b]]`'),b=note('b','B','');const snapshot=await buildMobileGraphSnapshot(source,[a,b]);
@@ -77,7 +79,7 @@ test('ordinary Markdown files and reference images are parsed; remote URLs never
  const s=await buildMobileGraphSnapshot(source,[note('a','A','![x](https://example.com/a.png)')]);assert.equal(s.seed.nodes.length,1);
 });
 test('unverified resources are not fabricated as real material nodes',async()=>{
- const s=await buildMobileGraphSnapshot(source,[note('a','A','![[missing.png]]')]);assert.equal(s.seed.nodes.length,1);assert(s.warnings.some(w=>w.includes('附件尚未')));
+ const s=await buildMobileGraphSnapshot(source,[note('a','A','![[missing.png]]')]);assert.equal(s.seed.nodes.length,1);assert(s.warnings.some(w=>w.includes('附件引用暂未显示')));
 });
 test('legacy alias metadata is joined from catalog, not absent list row historicalNames',async()=>{
  const old={localNoteList:api.localNoteList,localNoteLinkCatalog:api.localNoteLinkCatalog};
@@ -145,4 +147,38 @@ test('catalog change before CAS denies relationship writes even when source revi
  const a=note('a','A','[[B]]'),b=note('b','B',''),snapshot=await buildMobileGraphSnapshot(source,[a,b]),old={list:managedVault.list,get:managedVault.get,save:managedVault.save,linkCatalog:managedVault.linkCatalog};let writes=0;
  managedVault.list=async()=>({items:[{localVaultId:'local',name:'Local',binding:null,migrationState:'ready',noteCount:2}],selectedVaultId:'local'});managedVault.get=async(_v,id)=>id==='a'?a.managed!:b.managed!;managedVault.linkCatalog=async()=>({items:[a.managed!,b.managed!,note('c','B','').managed!]});managedVault.save=async()=>{writes++;return a.managed!;};
  try{await assert.rejects(()=>unlinkMobileGraphNodes(snapshot,snapshot.seed.nodes[0].key,snapshot.seed.nodes[1].key),/目录已变化/);assert.equal(writes,0);}finally{Object.assign(managedVault,old);}
+});
+
+test('attachment warnings count reference occurrences, distinguish known checks, never claim lost files',async()=>{
+ const n=note('a','A','![[same.png]]\n![[same.png]]\n![[pending.png]]\n![](luckyray-local-asset:local1)');
+ n.managed!.remote={replica:{resources:[{resourceId:'r',target:'pending.png',status:'verified',localStatus:'missing'}]}};
+ const s=await buildMobileGraphSnapshot(source,[n],{resolveLocalAsset:async()=>null});
+ assert.equal(s.seed.nodes.length,1);
+ const warning=s.warnings.find(w=>w.includes('附件引用'))!;
+ assert.match(warning,/4 处附件引用/);assert.match(warning,/2 处未找到附件索引/);assert.match(warning,/2 处附件尚未通过本机可用性检查/);
+ assert.match(warning,/不代表丢失的文件数/);assert.doesNotMatch(warning,/未假定|4 个文件|4 个附件/);
+});
+test('managed graph retries one settling metadata edit, never loops while notes keep changing',async()=>{
+ const originals={notes:managedVault.notes,linkCatalog:managedVault.linkCatalog};
+ const a=note('a','A','').managed!;let reads=0;
+ managedVault.linkCatalog=async()=>({items:[a]});
+ managedVault.notes=async()=>({items:[{...a,revision:++reads===1?'old':a.revision}],total:1,hasMore:false});
+ try{
+  assert.equal((await loadMobileGraphSnapshot(source)).notesByKey.size,1);assert.equal(reads,2);
+  reads=0;managedVault.notes=async()=>{reads++;return {items:[{...a,revision:'always-changing'}],total:1,hasMore:false};};
+  await assert.rejects(()=>loadMobileGraphSnapshot(source),/元数据已变化/);assert.equal(reads,2);
+ }finally{Object.assign(managedVault,originals);}
+});
+test('managed graph rejects late response after selection A to B to A',async()=>{
+ const originals={notes:managedVault.notes,linkCatalog:managedVault.linkCatalog};
+ const a=note('a','A','').managed!;let release!:(value:any)=>void;
+ managedVault.linkCatalog=()=>new Promise(resolve=>{release=resolve;});
+ managedVault.notes=async()=>({items:[a],total:1,hasMore:false});
+ noteSourceSelection.select({kind:'managed',localVaultId:'local'});
+ try{
+  const pending=loadMobileGraphSnapshot(source);
+  noteSourceSelection.select({kind:'managed',localVaultId:'other'});
+  noteSourceSelection.select({kind:'managed',localVaultId:'local'});
+  release({items:[a]});await assert.rejects(()=>pending,{name:'AbortError'});
+ }finally{Object.assign(managedVault,originals);noteSourceSelection.select(null);}
 });

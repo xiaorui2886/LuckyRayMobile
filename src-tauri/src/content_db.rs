@@ -3830,18 +3830,23 @@ impl Db {
 impl Db {
     pub(crate) fn managed_recover(&self)->Result<(),String>{crate::managed_vault_sync::recover(&self.conn)}
     /// Caller holds the file gate after the application's DB mutex.
+    pub(crate) fn managed_enroll_scope(&self, store: &crate::managed_vault::Store, instance: &str, vault: &str) -> Result<Value, String> {
+        let name: String = self.conn.query_row("SELECT name FROM content_vault_cache WHERE desktop_instance_id=?1 AND vault_id=?2", params![instance,vault], |r| r.get(0)).map_err(fail)?;
+        let id = crate::managed_vault_sync::enroll_scope(&self.conn, store, instance, vault, &name)?;
+        store.vault_summary(&id)
+    }
     pub(crate) fn managed_migrate_replicas(&self)->Result<Value,String>{crate::managed_vault_sync::migrate_replicas(&self.conn)}
     pub(crate) fn managed_save_bound(&self,store:&crate::managed_vault::Store,local_vault:&str,id:&str,expected:&str,title:&str,content:&str,tags:Vec<String>)->Result<crate::managed_vault::Note,String>{
         self.managed_recover()?;
         let binding={let _gate=crate::managed_vault::lock()?;let note=store.get(local_vault,id)?;
             if note.revision!=expected{return Err("VAULT_REVISION_CONFLICT".into());}
             if note.body_state!="ready"{return Err("VAULT_BODY_NOT_EDITABLE".into());}
-            store.manifest(local_vault)?.binding.ok_or("VAULT_BINDING_REQUIRED")?};
+            store.writable_manifest(local_vault)?.binding.ok_or("VAULT_BINDING_REQUIRED")?};
         let observed=self.content_begin_edit(&binding.instance_id,&binding.remote_vault_id,id)?;
         self.content_edit_observed(&binding.instance_id,&binding.remote_vault_id,id,title,content,
             observed["editorEpoch"].as_i64().ok_or("CONTENT_EDITOR_INVALID")?,1,observed["revision"].as_str())?;
         let _gate=crate::managed_vault::lock()?;
-        let mut m=store.manifest(local_vault)?;
+        let mut m=store.writable_manifest(local_vault)?;
         if let Some(n)=m.notes.get_mut(id){if n.tags!=tags{n.revision=uuid::Uuid::new_v4().simple().to_string();}n.tags=tags;}
         // Tags are local presentation metadata, not a second body/outbox write.
         store.commit(m,std::collections::BTreeMap::new())?;
@@ -3856,14 +3861,14 @@ impl Db {
     }
     pub(crate) fn managed_create_bound(&self,store:&crate::managed_vault::Store,local_vault:&str,title:&str,content:&str,tags:Vec<String>,folder:&str)->Result<crate::managed_vault::Note,String>{
         self.managed_recover()?;
-        let binding={let _gate=crate::managed_vault::lock()?;let m=store.manifest(local_vault)?;
+        let binding={let _gate=crate::managed_vault::lock()?;let m=store.writable_manifest(local_vault)?;
             // Bound folders are populated only from verified remote paths or
             // directory observations, never from arbitrary local mkdir.
             if !folder.is_empty()&&!m.folders.iter().any(|p|p==folder){return Err("VAULT_FOLDER_NOT_FOUND".into());}
             m.binding.ok_or("VAULT_BINDING_REQUIRED")?};
         let id=format!("kn-{}",uuid::Uuid::new_v4().simple());
         self.content_create_in(&binding.instance_id,&binding.remote_vault_id,&id,title,content,folder)?;
-        let _gate=crate::managed_vault::lock()?;let mut m=store.manifest(local_vault)?;
+        let _gate=crate::managed_vault::lock()?;let mut m=store.writable_manifest(local_vault)?;
         if let Some(n)=m.notes.get_mut(&id){n.tags=tags;}
         store.commit(m,std::collections::BTreeMap::new())?;store.get(local_vault,&id)
     }
@@ -3876,7 +3881,7 @@ impl Db {
         if !is_clean_vault_relative(folder)||folder.contains('\\'){return Err("CONTENT_PATH_INVALID".into());}
         let binding={let _gate=crate::managed_vault::lock()?;let n=store.get(local_vault,id)?;
             if n.body_state=="conflict" {return Err("VAULT_BODY_NOT_EDITABLE".into());}
-            let m=store.manifest(local_vault)?;
+            let m=store.writable_manifest(local_vault)?;
             if !folder.is_empty() && !m.folders.iter().any(|p|p==folder) {return Err("VAULT_FOLDER_NOT_FOUND".into());}
             m.binding.ok_or("VAULT_BINDING_REQUIRED")?};
         let key=managed_move_key(&binding.instance_id,&binding.remote_vault_id,id);
@@ -3956,7 +3961,7 @@ impl Db {
         self.managed_recover()?;
         if legacy_id.is_empty()||source_fingerprint.is_empty(){return Err("VAULT_IMPORT_SOURCE_INVALID".into());}
         let unresolved_resources=super::local_note_upload_db::blocked_resource(content).is_some();
-        let binding={let _gate=crate::managed_vault::lock()?;let m=store.manifest(local_vault)?;
+        let binding={let _gate=crate::managed_vault::lock()?;let m=store.writable_manifest(local_vault)?;
             if !folder.is_empty()&&!m.folders.iter().any(|p|p==folder){return Err("VAULT_FOLDER_NOT_FOUND".into());}
             m.binding.ok_or("VAULT_BINDING_REQUIRED")?};
         let key=format!("managed.import.v1:{}",json!([binding.instance_id,binding.remote_vault_id,legacy_id]));
@@ -3988,7 +3993,7 @@ impl Db {
 impl Db {
     pub(crate) fn managed_folder_create(&self,store:&crate::managed_vault::Store,local_vault:&str,name:&str,parent:&str)->Result<Value,String>{
         self.managed_recover()?;
-        let (binding,folders)={let _g=crate::managed_vault::lock()?;let m=store.manifest(local_vault)?;(m.binding.ok_or("VAULT_BINDING_REQUIRED")?,m.folders)};
+        let (binding,folders)={let _g=crate::managed_vault::lock()?;let m=store.writable_manifest(local_vault)?;(m.binding.ok_or("VAULT_BINDING_REQUIRED")?,m.folders)};
         let tx=rusqlite::Transaction::new_unchecked(&self.conn,rusqlite::TransactionBehavior::Immediate).map_err(fail)?;
         let result=crate::managed_vault_folder_sync::enqueue(&tx,&binding.instance_id,&binding.remote_vault_id,parent,name,&folders)?;
         crate::managed_vault_sync::commit(tx,&binding.instance_id,&binding.remote_vault_id)?;

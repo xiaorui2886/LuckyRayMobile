@@ -30,7 +30,8 @@ try {
   const note = (id, title, bodyState='ready') => ({ localVaultId: id, noteId: 'same', title, bodyState, content: 'body', relativePath: 'a.md', folder: '', revision: 'r1', tags: [], pinned: false, favorite: false, archived: false, syncState: 'local' });
   globalThis.__invoke = async (name, args) => {
     calls.push([name, args]);
-    if (name === 'managed_vault_list') return { items: [{ localVaultId: 'a', name: 'Vault A', migrationState: 'ready',transferState,transferTargetVaultId:transferState?'b':undefined }, { localVaultId: 'b', name: 'Vault B', migrationState: 'ready', binding: {instanceId:'desktop',remoteVaultId:'remote-b'} }], selectedVaultId };
+    if (name === 'managed_vault_list') return { items: [{ localVaultId: 'a', name: 'Vault A', migrationState: 'ready',noteCount:1,transferState,transferTargetVaultId:transferState?'b':undefined }, { localVaultId: 'b', name: 'Vault B', migrationState: 'ready',noteCount:1, binding: {instanceId:'desktop',remoteVaultId:'remote-b'} }], selectedVaultId };
+    if (name === 'content_offline_libraries') return [];
     if (name === 'managed_vault_migration_status') return { state, localVaultId: 'a', noteCount: 2, warnings: [] };
     if (name === 'managed_vault_note_list') { if(paged && args.query.localVaultId==='a') return {items:[{...note('a','Page '+args.query.page),noteId:'page-'+args.query.page}],total:2,hasMore:args.query.page<2}; if (args.query.localVaultId === 'b' && deferredB) return deferredB.promise; return { items: [note(args.query.localVaultId, args.query.localVaultId === 'a' ? 'Alpha' : 'Beta', args.query.localVaultId === 'b' ? 'missing' : 'ready')], total: 1, hasMore: false }; }
     if (name === 'managed_vault_link_catalog') return {items:[note(args.localVaultId,args.localVaultId==='a'?'Alpha':'Beta',args.localVaultId==='b'?'missing':'ready')]};
@@ -86,10 +87,11 @@ try {
   await click('笔记'); assert.match(document.body.textContent, /Alpha/);
   await click('目录与库'); await click('库');
   deferredB = {}; deferredB.promise = new Promise(resolve => deferredB.resolve = resolve);
-  await click('Vault B本地文件 · 保留来源关联');
+  await click('Vault B已关联电脑同步 · 1 篇笔记');
   assert.doesNotMatch(document.querySelector('.st-scroll').textContent, /Alpha/, 'A cannot render under B while B awaits');
   await act(async () => deferredB.resolve({ items: [note('b','Beta','missing')], total: 1, hasMore: false }));
   assert.match(document.body.textContent, /Beta/);
+  assert.match(document.body.textContent, /等待确认同步状态/, 'registration alone never claims download or sync completion');
   const row = document.querySelector('.st-note-row'); await act(async () => row.dispatchEvent(new MouseEvent('click', { bubbles: true })));
   assert.equal(globalThis.__opens.at(-1)[1], 'vault:b:same'); assert.equal(globalThis.__opens.at(-1)[2].edit, false, 'missing body never opens editable empty document');
   assert.equal(button('导入笔记文件').disabled, false, 'bound vault import is available offline');
@@ -103,8 +105,8 @@ try {
   assert.deepEqual(calls.find(([name])=>name==='managed_vault_folder_create')[1], {localVaultId:'b',name:'Offline Folder',parent:''});
   await click('笔记操作：Beta'); await click('移动到目录'); await click('Offline Folder');
   assert.deepEqual(calls.find(([name])=>name==='managed_vault_note_move')[1], {localVaultId:'b',noteId:'same',expectedRevision:'r1',folder:'Offline Folder'});
-  assert.ok(calls.every(([name]) => name.startsWith('managed_vault_')), 'offline Notes view has zero desktop content/network command');
-  await click('目录与库'); await click('库'); await click('Vault A本地文件');
+  assert.ok(calls.every(([name]) => name.startsWith('managed_vault_') || name === 'content_offline_libraries'), 'offline Notes view has zero desktop content/network command');
+  await click('目录与库'); await click('库'); await click('Vault A未开启同步 · 1 篇笔记');
   await click('目录与库'); await click('加入同步库将此本地库的笔记加入一个已关联的库，原始内容保留。');
   assert.equal(calls.filter(([name])=>name==='managed_vault_transfer_preview').length,0,'opening chooser must not select a sync target or prepare transfer');
   const transferSelect = document.querySelector('select[aria-label="加入的同步库"]'); assert.equal(transferSelect.value,'');
@@ -119,13 +121,13 @@ try {
   failTransfer=false; await click('确认加入所选同步库');
   assert.deepEqual(calls.find(([name])=>name==='managed_vault_transfer_commit')[1],{sourceVaultId:'a',targetVaultId:'b',snapshotHash:'fixed-plan',wikiProofs:[{sourceNoteId:'note-a',sourceSha256:'a'.repeat(64),spans:[{startByte:11,endByte:32,token:'[[@id/note-b|别名]]'}],resourceIssues:[]}]});
   assert.equal(selectedVaultId,'b','only completed transfer selects the explicit destination');
-  await click('目录与库'); await click('库'); assert.equal(button('Vault A本地文件'),undefined,'completed source is not offered as a second editable vault');
+  await click('目录与库'); await click('库'); assert.equal(button('Vault A未开启同步 · 1 篇笔记'),undefined,'completed source is not offered as a second editable vault');
   await act(async () => root.unmount()); root = createRoot(document.getElementById('root')); state = 'not-migrated'; await render();
-  assert.match(document.body.textContent, /Original notes preserved/);
-  await click('整理为本地笔记库'); assert.equal(calls.filter(([name]) => name === 'managed_vault_migration_prepare').length, 0, 'opening panel never prepares or commits implicitly');
-  await click('预览整理计划'); assert.match(document.body.textContent, /部分正文尚未下载/); assert.equal(calls.filter(([name]) => name === 'managed_vault_migration_commit').length, 0);
-  await click('重新检查计划'); assert.equal(calls.filter(([name]) => name === 'managed_vault_migration_prepare').length, 2, 'changed source can be re-previewed explicitly');
-  failCommit = true; await click('确认复制，保留原始数据'); assert.match(document.body.textContent, /操作没有完成，请重试/); assert.match(document.body.textContent, /Original notes preserved/);
+  assert.doesNotMatch(document.body.textContent, /Original notes preserved/, 'existing managed library does not fall back to old modes');
+  await click('目录与库'); await click('库'); await click('知识库管理'); await click('升级已有笔记先预览，确认后复制；原始数据保留'); assert.equal(calls.filter(([name]) => name === 'managed_vault_migration_prepare').length, 0, 'opening panel never prepares or commits implicitly');
+  await click('预览升级计划'); assert.match(document.body.textContent, /部分正文尚未下载/); assert.equal(calls.filter(([name]) => name === 'managed_vault_migration_commit').length, 0);
+  await click('重新预览'); assert.equal(calls.filter(([name]) => name === 'managed_vault_migration_prepare').length, 2, 'changed source can be re-previewed explicitly');
+  failCommit = true; await click('确认升级，保留原始数据'); assert.match(document.body.textContent, /操作没有完成，请重试/); assert.doesNotMatch(document.body.textContent, /Original notes preserved/);
   await act(async () => root.unmount()); root = createRoot(document.getElementById('root'));
   await act(async () => root.render(React.createElement(SourceSwitch, { value: 'local', onChange() {} })));
   assert.equal(document.body.textContent, '本机电脑', 'shared material source switch unchanged');

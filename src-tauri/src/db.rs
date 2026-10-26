@@ -432,6 +432,8 @@ pub struct Db {
 
 #[path = "content_db.rs"]
 pub(crate) mod content_db;
+#[path = "content_graph_db.rs"]
+pub(crate) mod content_graph_db;
 #[path = "local_note_upload_db.rs"]
 mod local_note_upload_db;
 
@@ -659,6 +661,20 @@ impl Db {
         .map_err(|e| format!("upsert paired: {e}"))?;
         tx.commit().map_err(|e| format!("paired commit: {e}"))?;
         Ok(())
+    }
+
+    /// Address recovery is not a new pairing. No other table/column changes.
+    pub(crate) fn update_paired_endpoint(&mut self, instance:&str, fingerprint:&str,
+        old_base:&str, paired_at:&str, new_base:&str) -> Result<(),String> {
+        let tx=self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_|"ENDPOINT_SAVE_UNCONFIRMED")?;
+        let changed=tx.execute("UPDATE paired_desktop SET base_url=?5 WHERE desktop_instance_id=?1 AND certificate_fingerprint=?2 AND base_url=?3 AND paired_at=?4",
+            params![instance,fingerprint,old_base,paired_at,new_base]).map_err(|_|"ENDPOINT_SAVE_UNCONFIRMED")?;
+        if changed!=1 { return Err("ENDPOINT_SOURCE_CHANGED".into()); }
+        let actual:String=tx.query_row("SELECT base_url FROM paired_desktop WHERE desktop_instance_id=?1",[instance],|row|row.get(0))
+            .map_err(|_|"ENDPOINT_SAVE_UNCONFIRMED")?;
+        if actual!=new_base { return Err("ENDPOINT_SAVE_UNCONFIRMED".into()); }
+        tx.commit().map_err(|_|"ENDPOINT_SAVE_UNCONFIRMED".into())
     }
 
     /// Legacy M2.x rows may still contain a credential. Callers must first
@@ -3908,6 +3924,41 @@ mod tests {
         let columns = query.column_count();
         let rows = query.query_map([],|row| Ok((0..columns).map(|i| format!("{:?}",row.get_ref(i).unwrap())).collect::<Vec<_>>())).unwrap();
         format!("{:?}",rows.collect::<Result<Vec<_>,_>>().unwrap())
+    }
+
+    fn endpoint_fixture() -> Db {
+        let db=Db::open(Path::new(":memory:")).unwrap();
+        db.conn.execute("INSERT INTO paired_desktop VALUES('endpoint-synthetic','PC','windows','1',1,'pin','https://192.168.1.20:7303','untouched-legacy-test-value','original-time')",[]).unwrap();
+        db.conn.execute("INSERT INTO note_cache(desktop_instance_id,vault_id,note_id,title,content,revision,dirty) VALUES('endpoint-synthetic','A','test-note','Synthetic note','draft body','r1',1)",[]).unwrap();
+        db.conn.execute("INSERT INTO app_meta VALUES('endpoint.test.authorization','unchanged')",[]).unwrap();
+        db
+    }
+
+    #[test]
+    fn endpoint_recovery_updates_one_column_without_repairing_or_discarding_data() {
+        let mut db=endpoint_fixture();
+        let before=db.paired().unwrap().unwrap();
+        let tables:Vec<String>=db.conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'paired_desktop' ORDER BY name").unwrap()
+            .query_map([],|r|r.get(0)).unwrap().collect::<Result<_,_>>().unwrap();
+        let snapshots:Vec<_>=tables.iter().map(|t|(t.clone(),dump_table(&db.conn,t))).collect();
+        let changes:i64=db.conn.query_row("SELECT total_changes()",[],|r|r.get(0)).unwrap();
+        db.update_paired_endpoint(&before.instance_id,&before.fingerprint,&before.base_url,&before.paired_at,"https://192.168.1.20:12345").unwrap();
+        let after=db.paired().unwrap().unwrap();
+        assert_eq!(after.base_url,"https://192.168.1.20:12345");
+        assert_eq!(after.instance_id,before.instance_id);assert_eq!(after.fingerprint,before.fingerprint);assert_eq!(after.paired_at,before.paired_at);
+        assert_eq!(after.legacy_credential,before.legacy_credential);assert_eq!(after.display_name,before.display_name);assert_eq!(after.platform,before.platform);assert_eq!(after.app_version,before.app_version);assert_eq!(after.protocol_version,before.protocol_version);
+        assert_eq!(db.conn.query_row("SELECT total_changes()",[],|r|r.get::<_,i64>(0)).unwrap(),changes+1);
+        for (table,rows) in snapshots {assert_eq!(dump_table(&db.conn,&table),rows,"{table} must be preserved");}
+    }
+
+    #[test]
+    fn endpoint_recovery_cas_and_failed_write_leave_original_pairing_intact() {
+        let mut db=endpoint_fixture();let before=dump_table(&db.conn,"paired_desktop");
+        for (instance,pin,url,time) in [("other","pin","https://192.168.1.20:7303","original-time"),("endpoint-synthetic","wrong","https://192.168.1.20:7303","original-time"),("endpoint-synthetic","pin","https://192.168.1.20:99","original-time"),("endpoint-synthetic","pin","https://192.168.1.20:7303","repaired-time")] {
+            assert_eq!(db.update_paired_endpoint(instance,pin,url,time,"https://192.168.1.20:12345").unwrap_err(),"ENDPOINT_SOURCE_CHANGED");assert_eq!(dump_table(&db.conn,"paired_desktop"),before);
+        }
+        db.conn.execute_batch("CREATE TRIGGER endpoint_test_fail BEFORE UPDATE OF base_url ON paired_desktop BEGIN SELECT RAISE(ABORT,'synthetic write failure'); END;").unwrap();
+        assert_eq!(db.update_paired_endpoint("endpoint-synthetic","pin","https://192.168.1.20:7303","original-time","https://192.168.1.20:12345").unwrap_err(),"ENDPOINT_SAVE_UNCONFIRMED");assert_eq!(dump_table(&db.conn,"paired_desktop"),before);
     }
 
     #[test]

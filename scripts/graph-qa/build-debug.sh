@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 export CARGO_TARGET_DIR="$(node scripts/configure-android-build.mjs --cargo-target-dir "$RUNNER_TEMP/graph-cargo")"
-node --test scripts/graph-qa/seed-expressions.test.mjs
+node --test scripts/graph-qa/unified-expressions.test.mjs scripts/graph-qa/boot-contract.test.mjs scripts/graph-qa/safe-diagnostics.test.mjs
 cli=node_modules/@tauri-apps/cli/tauri.js
 cargo fetch --manifest-path src-tauri/Cargo.toml --locked --target x86_64-linux-android
 node "$cli" android init --ci --skip-targets-install

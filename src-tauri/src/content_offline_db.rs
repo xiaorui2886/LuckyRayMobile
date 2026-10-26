@@ -666,6 +666,22 @@ mod tests {
     }
 
     #[test]
+    fn explicit_resume_requeues_exhausted_body_attempts_without_promoting_body() {
+        let mut db = fixture();
+        db.offline_select("A", "v", true).unwrap();
+        db.content_apply_batch("A", "v", &[doc("bulk", "b1", None)], 1, None).unwrap();
+        for attempt in 0..3 {
+            let now = 1000 + attempt * 30;
+            let job = db.offline_job_at("A", "v", now).unwrap().unwrap();
+            db.offline_finish_at("A", "v", &job, Err("CONTENT_OFFLINE".into()), now).unwrap();
+        }
+        assert!(db.offline_job_at("A", "v", 5000).unwrap().is_none());
+        db.offline_pause("A", "v", false).unwrap();
+        let retried = db.offline_job_at("A", "v", 5000).unwrap().unwrap();
+        assert_eq!(retried.id, "bulk");
+        assert_eq!(db.offline_libraries("A").unwrap()[0]["ready"], 0);
+    }
+    #[test]
     fn offline_a1_r1_live_backoff_is_bounded_while_bulk_keeps_manual_retry_limit() {
         let mut db = fixture();
         db.offline_select("A", "v", true).unwrap();

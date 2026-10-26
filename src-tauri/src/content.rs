@@ -8,6 +8,12 @@ use tauri::Manager;
 use tokio::io::AsyncWriteExt;
 pub(crate) mod materials;
 pub(crate) mod notes;
+/// Graph-only SQLite projection. No Source capture or gateway read is needed:
+/// current pairing and explicit local-save authority are checked in the DB.
+#[tauri::command]
+pub(crate) fn content_graph_cache(state: State<'_, SharedState>, instance: String, vault: Option<String>, page: u32) -> Result<Value, String> {
+    with_db(&state, |db| db.content_graph_cache(&instance, vault.as_deref(), page))
+}
 mod media;
 mod scope_probe;
 

@@ -1,3 +1,4 @@
+import { noteSourceSelection } from "../services/noteSourceSelection";
 import { UnifiedNotesRoot } from "./kit/UnifiedNotesView";
 import type { ReactNode } from "react";
 import { DirectoryLibrarySheet, useDesktopLibraries } from "./kit/DesktopLibraryPicker";
@@ -124,12 +125,15 @@ const desktopScrollByScope = new Map<string, number>();
 type LocalNoteRow = NoteItem & { favorite?: boolean; raw: any };
 
 export function StillKnowledge({ conn, active = true }: { conn: ConnState | null; active?: boolean }) {
-  return <UnifiedNotesRoot active={active} legacy={(modeSwitch, management) => <LegacyStillKnowledge conn={conn} active={active} modeSwitch={modeSwitch} management={management} />} />;
+  return <UnifiedNotesRoot active={active} conn={conn} legacy={(modeSwitch, management) => <LegacyStillKnowledge conn={conn} active={active} modeSwitch={modeSwitch} management={management} />} />;
 }
 
 function LegacyStillKnowledge({ conn, active = true, modeSwitch, management }: { conn: ConnState | null; active?: boolean; modeSwitch: ReactNode; management: ReactNode }) {
   const { open, registerOverlay } = useStillNav();
-  const [source, setSource] = useState<"local" | "desktop">(rememberedSource);
+  const [source, setSourceState] = useState<"local" | "desktop">(() => {
+    const choice = noteSourceSelection.snapshot().selection;
+    return choice?.kind === 'desktop' ? 'desktop' : choice?.kind === 'legacy' ? 'local' : rememberedSource;
+  });
   // R4.1/R4.2: ONE session object owns the retention layer (Local pager +
   // Desktop controller + preview retainer + gates + currentness/UI memory).
   const session = sessionKnowledge();
@@ -157,7 +161,40 @@ function LegacyStillKnowledge({ conn, active = true, modeSwitch, management }: {
   const connected = wsState === "connected";
   const libraries = useDesktopLibraries(instanceId, connected);
   const selectedVault = libraries.catalog?.scopeSelectionVersion === 1 ? libraries.vault : undefined;
-  useEffect(() => { desktopCtrl.selectVault(selectedVault || "", selectedLibraryReadable(libraries,"knowledge"), libraries.knowledgeEpoch); }, [desktopCtrl, instanceId, selectedVault, libraries.knowledgeEpoch, libraries.phase]);
+  const sharedSourceChoice = useSyncExternalStore(noteSourceSelection.subscribe, noteSourceSelection.snapshot);
+  const graphRequestedScope = useRef(noteSourceSelection.snapshot().selection);
+  useEffect(() => {
+    const requested = graphRequestedScope.current;
+    if (source !== 'desktop' || requested?.kind !== 'desktop' || !requested.vaultId || requested.instanceId === instanceId && requested.vaultId === selectedVault) { graphRequestedScope.current = null; return; }
+    if (requested.instanceId !== instanceId) return;
+    if (libraries.phase !== 'ready') return;
+    let current = true;
+    const version = noteSourceSelection.snapshot().version;
+    const live = () => current && noteSourceSelection.snapshot().version === version && currentInstanceRef.current === instanceId;
+    void desktopLibraries.switchTo(instanceId, 'knowledge', requested.vaultId, live).then(ok => {
+      if (ok && live()) graphRequestedScope.current = null;
+    }).catch(() => { /* Keep the requested source in the graph; never silently relabel another vault. */ });
+    return () => { current = false; };
+  }, [source, instanceId, selectedVault, libraries.phase, sharedSourceChoice.version]);
+  const setSource = (next: "local" | "desktop") => {
+    graphRequestedScope.current = null;
+    setSourceState(next); rememberedSource = next;
+    noteSourceSelection.select(next === 'local' ? { kind: 'legacy' } : { kind: 'desktop', instanceId, vaultId: selectedVault || '' });
+  };
+  // Publish the exact confirmed library as the existing notes authority resolves it.
+  useEffect(() => {
+    if (!active) return;
+    const choice = noteSourceSelection.snapshot().selection;
+    if (source === 'local') {
+      if (choice?.kind !== 'managed') noteSourceSelection.select({ kind: 'legacy' });
+    } else if (selectedVault && !graphRequestedScope.current) noteSourceSelection.select({ kind: 'desktop', instanceId, vaultId: selectedVault });
+  }, [source, instanceId, selectedVault, active]);
+  const requestedScope = graphRequestedScope.current;
+  const pendingGraphScope = source === 'desktop' && requestedScope?.kind === 'desktop' && !!requestedScope.vaultId
+    && (requestedScope.instanceId !== instanceId || requestedScope.vaultId !== selectedVault);
+  const gatedVault = pendingGraphScope && requestedScope?.kind === 'desktop' ? requestedScope.vaultId : selectedVault;
+  const graphScopeReadable = !pendingGraphScope && selectedLibraryReadable(libraries, 'knowledge');
+  useEffect(() => { desktopCtrl.selectVault(gatedVault || "", graphScopeReadable, libraries.knowledgeEpoch); }, [desktopCtrl, instanceId, gatedVault, graphScopeReadable, libraries.knowledgeEpoch, libraries.phase]);
   // The Desktop-domain store signal, declared BEFORE the gated store (its
   // value is part of the gate's synchronous input).
   const desktopVersion = useSyncExternalStore(
@@ -170,7 +207,7 @@ function LegacyStillKnowledge({ conn, active = true, modeSwitch, management }: {
     // R4.2: the gate also sees the CURRENT connection truth and the
     // currentness signal — offline/old-vault snapshots never render as live
     // current truth on the first frame.
-    () => session.desktopViewFor({ paired, connected, instanceId, vaultId:selectedVault, readable: selectedLibraryReadable(libraries, "knowledge") })
+    () => session.desktopViewFor({ paired, connected, instanceId, vaultId:gatedVault, readable: graphScopeReadable })
   );
   useEffect(() => {
     // Even a zero-document pass can persist a current-vault/permission change.
@@ -187,9 +224,9 @@ function LegacyStillKnowledge({ conn, active = true, modeSwitch, management }: {
   const folderSnapshot = useSyncExternalStore(folderCatalog.subscribe,
     () => folderCatalog.snapshot({ instance: instanceId, vault: desktop.vaultId }));
   useEffect(() => {
-    if (source !== "desktop") { folderCatalog.suspend(); return; }
+    if (source !== "desktop" || pendingGraphScope) { folderCatalog.suspend(); return; }
     void folderCatalog.activate({ instance: instanceId, vault: desktop.vaultId }, connected);
-  }, [folderCatalog, source, instanceId, desktop.vaultId, connected]);
+  }, [folderCatalog, source, instanceId, desktop.vaultId, connected, pendingGraphScope]);
   const setDesktopDirectory = (d: string) => {
     session.retainDirectory(instanceId, desktop ? desktop.vaultId : "", d);
     setDirectoryRev((n) => n + 1);
@@ -1389,7 +1426,10 @@ function LegacyStillKnowledge({ conn, active = true, modeSwitch, management }: {
           <DirectoryLibrarySheet instance={instanceId} kind="knowledge" fallback={desktop.vaultName}
             registerOverlay={registerOverlay} onClose={() => setSheet("")}
             onSelect={async (id, isCurrent) => {
+              const sourceVersion = noteSourceSelection.snapshot().version;
               if (!await desktopLibraries.switchTo(instanceId, "knowledge", id, () => isCurrent() && currentInstanceRef.current === instanceId)) return false;
+              graphRequestedScope.current = null;
+              noteSourceSelection.select({ kind: 'desktop', instanceId, vaultId: id }, sourceVersion);
               setSelectedIds([]); setSelecting(false);
               return true;
             }}

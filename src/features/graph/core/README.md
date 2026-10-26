@@ -1,6 +1,6 @@
 # Shared desktop graph core
 
-Source: LuckyRay desktop at commit `200433932c465ea26b16e8e4fa272507ce692388`.
+Source: LuckyRay desktop `xiaorui2886/luckyray-app` at commit `200433932c465ea26b16e8e4fa272507ce692388`.
 
 Byte-identical ports: graphCamera.ts, graphPhysics.ts, graphPhysics.worker.ts, graphPresentation.ts, graphSpatial.ts, graphPlayback.ts, wikiTargets.ts. graphPlaybackSession.ts changes only host imports to portable local imports.
 

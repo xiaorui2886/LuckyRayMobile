@@ -1,7 +1,7 @@
-name: Mobile graph isolated Android QA
+name: Unified vault isolated Android QA
 on:
   push:
-    branches: [ray/mobile-graph-check-20261026]
+    branches: [ray/mobile-unified-vault-qa-20261026]
   workflow_dispatch:
     inputs:
       synthetic_only_ack:
@@ -11,17 +11,17 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: graph-qa-${{ github.ref }}-${{ github.sha }}
+  group: unified-vault-qa-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 jobs:
   installed-app:
     name: ${{ matrix.runner == 'ubuntu-24.04' && 'Linux installed app functional-only' || 'Mac Intel installed app' }} API ${{ matrix.api }}
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/ray/mobile-graph-check-20261026') || (github.event_name == 'workflow_dispatch' && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
     strategy:
       fail-fast: false
       matrix:
-        api: [30, 35]
-        runner: [ubuntu-24.04, macos-15-intel]
+        api: [35]
+        runner: [macos-15-intel]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -58,12 +58,13 @@ jobs:
       - name: Install locked dependencies and Android Rust target
         run: |
           pnpm install --frozen-lockfile
+          npm ci --ignore-scripts --no-audit --no-fund --prefix scripts/graph-qa/tools
           rustup toolchain install 1.95.0 --profile minimal
           rustup default 1.95.0
           rustup target add x86_64-linux-android
       - name: Build real Rust Kotlin debug APK (no production keys)
         run: bash scripts/graph-qa/build-debug.sh
-      - name: Installed offline app checks
+      - name: Installed unified native and synthetic-peer checks
         run: |
           export GRAPH_TEST_DRIVER="$GITHUB_WORKSPACE/scripts/graph-qa/run-installed.sh"
           bash scripts/graph-qa/boot-avd.sh
@@ -75,11 +76,11 @@ jobs:
           path: |
             ${{ runner.temp }}/graph-qa/evidence/*.json
             ${{ runner.temp }}/graph-qa/evidence/*.png
-            ${{ runner.temp }}/graph-qa/evidence/*.txt
+            ${{ runner.temp }}/graph-qa/evidence/*.mp4
           if-no-files-found: warn
           retention-days: 7
   host-browser:
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/ray/mobile-graph-check-20261026') || (github.event_name == 'workflow_dispatch' && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -96,14 +97,18 @@ jobs:
           node-version: 24
           cache: pnpm
       - name: Locked frontend dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          pnpm install --frozen-lockfile
+          npm ci --ignore-scripts --no-audit --no-fund --prefix scripts/graph-qa/tools
       - name: Deterministic graph data Desktop parity and gestures
         run: |
           node scripts/run-ci-lite-local.mjs
           node --experimental-strip-types --test tests/mobileGraphData.test.ts tests/mobileGraphDesktopParity.test.ts tests/graph-core/*.test.ts tests/graphCanvas/mobileGraphGestures.test.mjs tests/graphCanvas/mobileGraphLifecycle.test.mjs tests/graphCanvas/mobileGraphCameraMotion.test.mjs
           pnpm build
       - name: Validate synthetic native command payloads and Markdown
-        run: node --test scripts/graph-qa/seed-expressions.test.mjs
+        run: |
+          node --test scripts/graph-qa/unified-expressions.test.mjs scripts/graph-qa/boot-contract.test.mjs scripts/graph-qa/safe-diagnostics.test.mjs
+          UNIFIED_PEER_WS_MODULE="$PWD/scripts/graph-qa/tools/node_modules/ws/index.js" node --test scripts/unified-vault-qa/synthetic-peer.test.mjs
       - name: Native production PNG module tests
         run: |
           rustup toolchain install 1.95.0 --profile minimal
@@ -118,6 +123,6 @@ jobs:
           path: |
             ${{ runner.temp }}/graph-host-evidence/*.json
             ${{ runner.temp }}/graph-host-evidence/*.png
-            ${{ runner.temp }}/graph-host-evidence/*.txt
+            ${{ runner.temp }}/graph-host-evidence/*.webm
           if-no-files-found: warn
           retention-days: 7

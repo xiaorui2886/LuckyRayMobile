@@ -1,0 +1,1 @@
+{"name":"luckyray-synthetic-peer-qa-tools","version":"1.0.0","private":true,"description":"Isolated synthetic peer tooling, never included in production app dependencies","dependencies":{"ws":"8.18.3"}}

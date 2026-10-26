@@ -7,6 +7,7 @@ mod graph_export;
 mod db;
 mod device;
 mod eventstream;
+mod endpoint_recovery;
 mod gateway;
 mod content;
 mod lsh_carrier;
@@ -111,6 +112,7 @@ impl ConnIntentMirror {
 struct ConnectionLifecycle {
     gate: Arc<tokio::sync::Mutex<()>>,
     epoch: Arc<AtomicU64>,
+    recovery: Arc<endpoint_recovery::RecoveryBook>,
 }
 
 impl ConnectionLifecycle {
@@ -118,6 +120,7 @@ impl ConnectionLifecycle {
         Self {
             gate: Arc::new(tokio::sync::Mutex::new(())),
             epoch: Arc::new(AtomicU64::new(0)),
+            recovery: Arc::new(endpoint_recovery::RecoveryBook::default()),
         }
     }
 
@@ -2882,6 +2885,7 @@ pub fn run() {
             content::content_cached_resource,
             content::content_open_resource,
             content::notes::content_sync,
+            content::content_graph_cache,
             content::notes::content_vaults,
             content::notes::offline::content_offline_libraries,
             content::notes::offline::content_offline_notes,
@@ -2940,6 +2944,8 @@ pub fn run() {
             managed_vault_resource_commands::managed_vault_resource_open,
             managed_vault_import::managed_vault_import_legacy_receipt,
             managed_vault_commands::managed_vault_list,
+            managed_vault_commands::managed_vault_create,
+            managed_vault_commands::managed_vault_sync_to_phone,
             managed_vault_commands::managed_vault_transfer_preview,
             managed_vault_commands::managed_vault_transfer_commit,
             managed_vault_commands::managed_vault_sync_targets,
@@ -3016,6 +3022,9 @@ pub fn run() {
             move_task_to_back,
             set_system_bar_appearance,
             qr_scan,
+            endpoint_recovery::conn_endpoint_prepare,
+            endpoint_recovery::conn_endpoint_update,
+            endpoint_recovery::conn_endpoint_cancel,
             qr_cancel,
             db_health,
             db_export_diagnostics,

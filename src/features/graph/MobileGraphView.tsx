@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { managedVault } from "../../services/managedVault";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { localAssetRoute } from '../../still/kit/materialOrganization';
 import { useStillNav } from '../../still/StillShell';
 import { Sheet } from '../../still/kit/Sheet';
 import { listMobileGraphSources, loadMobileGraphSnapshot, subscribeMobileGraphChanges, createMobileGraphNote, linkMobileGraphNodes, unlinkMobileGraphNodes, setMobileGraphNoteTags, type MobileGraphSnapshot, type MobileGraphSource } from '../../services/mobileGraph';
 import { mobileGraphRelationDisabledReason } from '../../services/mobileGraphMutations';
-import { api } from '../../services/client';
+import { api, type ConnState } from '../../services/client';
+import { noteSourceSelection, noteSourceKey, type NoteSourceSelection } from '../../services/noteSourceSelection';
+import { desktopLibraries } from '../../services/desktopLibraries';
 import { toast } from '../../services/toast';
 import { copyTextExact } from '../../services/clipboardText';
 import { exportGraphPng } from '../../services/mobileGraphExport';
@@ -21,11 +24,16 @@ const EMPTY_SEED: GraphSeed = { nodes: [], edges: [], source: 'empty' };
 const errorText = (e: unknown) => { const text = e instanceof Error ? e.message : typeof e === 'string' ? e : ''; return /[\u3400-\u9fff]/.test(text) ? text.slice(0, 200) : '暂时无法读取或更新本地图谱，请重试。'; };
 type EditAction = 'create' | 'link' | 'unlink' | 'tags' | null;
 
-export default function MobileGraphView({ modeSwitch, active = true }: { modeSwitch: ReactNode; active?: boolean }) {
+export default function MobileGraphView({ modeSwitch, active = true, conn = null, onManageVaults }: { modeSwitch: ReactNode; active?: boolean; conn?: ConnState | null; onManageVaults?: () => void }) {
   const { open, registerOverlay, mode, reduced } = useStillNav();
-  const [sources, setSources] = useState<MobileGraphSource[]>([]), [sourceId, setSourceId] = useState('');
+  const sourceChoice = useSyncExternalStore(noteSourceSelection.subscribe, noteSourceSelection.snapshot);
+  const ownerId = conn?.paired ? conn.identity?.instanceId || '' : '';
+  const desktopCatalog = useSyncExternalStore(desktopLibraries.subscribe, () => desktopLibraries.snapshot(ownerId));
+  const selectionWrites = useRef(Promise.resolve());
+  const [sources, setSources] = useState<MobileGraphSource[]>([]), [storedSourceId, setSourceId] = useState('');
+  const sourceId = sourceChoice.selection ? noteSourceKey(sourceChoice.selection) : storedSourceId;
   const [snapshot, setSnapshot] = useState<MobileGraphSnapshot | null>(null), [loading, setLoading] = useState(true), [error, setError] = useState('');
-  const [session, setSession] = useState<MobileGraphSession>(() => readMobileGraphSession(''));
+  const [session, setSession] = useState<MobileGraphSession>(() => readMobileGraphSession(sourceId));
   const [settingsOpen, setSettingsOpen] = useState(false), [listOpen, setListOpen] = useState(false), [nodeQuery, setNodeQuery] = useState('');
   const [persistenceWarning, setPersistenceWarning] = useState(false);
   const selectionElement = useRef<HTMLDivElement>(null), [selectionHeight, setSelectionHeight] = useState(0);
@@ -39,14 +47,28 @@ export default function MobileGraphView({ modeSwitch, active = true }: { modeSwi
   const [covered, setCovered] = useState(false);
   const canvas = useRef<MobileGraphCanvasHandle>(null), sourceEpoch = useRef(0), currentSource = useRef(sourceId);
   currentSource.current = sourceId;
+  const sessionLedger = useRef(new Map<string, MobileGraphSession>());
   const retainedSession = useRef({ sourceId, session });
-  if (retainedSession.current.sourceId === sourceId) retainedSession.current.session = session;
+  if (retainedSession.current.sourceId === sourceId) { retainedSession.current.session = session; sessionLedger.current.set(sourceId, session); }
   useEffect(() => () => { const saved = retainedSession.current; if (saved.sourceId) saveMobileGraphSession(saved.sourceId, saved.session); }, []);
   const source = sources.find(s => s.id === sourceId), tab = session.tabs.find(t => t.id === session.activeId) || session.tabs[0];
   useEffect(() => setCopyStatus(''), [tab.selectedKey]);
   const bindingIdentity = JSON.stringify(source?.binding ?? null);
-  const settings = tab.settings, seed = snapshot?.source.id === sourceId && JSON.stringify(snapshot.source.binding ?? null) === bindingIdentity ? snapshot.seed : EMPTY_SEED;
+  const desktopGrant = source?.kind === 'desktop' && desktopCatalog.catalog?.scopeSelectionVersion === 1
+    ? desktopCatalog.catalog.knowledge.some(row => row.vaultId === source.desktop?.vaultId && row.available && row.readGranted) : true;
+  const sourceUsable = !!source && (source.kind !== 'desktop' || (ownerId === source.desktop?.instanceId && source.availability === 'ready' && desktopGrant));
+  const settings = tab.settings, seed = sourceUsable && snapshot?.source.id === sourceId && JSON.stringify(snapshot.source.binding ?? null) === bindingIdentity ? snapshot.seed : EMPTY_SEED;
   const patchTab = useCallback((changes: Partial<MobileGraphTab>) => setSession(s => ({ ...s, tabs: s.tabs.map(t => t.id === s.activeId ? { ...t, ...changes } : t) })), []);
+  const patchCanvasTab = useCallback((owner: string, tabId: string, changes: Partial<MobileGraphTab>, persist = true) => {
+    const stored = sessionLedger.current.get(owner);
+    if (!stored || !stored.tabs.some(t => t.id === tabId)) return;
+    const next = { ...stored, tabs: stored.tabs.map(t => t.id === tabId ? { ...t, ...changes } : t) };
+    sessionLedger.current.set(owner, next);
+    // Final callbacks belong to the departing source/tab, never its replacement.
+    if (retainedSession.current.sourceId === owner) retainedSession.current.session = next;
+    if (persist) saveMobileGraphSession(owner, next);
+    if (currentSource.current === owner) setSession(s => s.tabs.some(t => t.id === tabId) ? { ...s, tabs: s.tabs.map(t => t.id === tabId ? { ...t, ...changes } : t) } : s);
+  }, []);
   useEffect(() => {
     const owner = rootElement.current?.closest('.st-root-stage');
     if (!owner || typeof MutationObserver === 'undefined') return;
@@ -59,18 +81,21 @@ export default function MobileGraphView({ modeSwitch, active = true }: { modeSwi
 
   useEffect(() => {
     let alive = true, request = 0;
-    const catalog = () => { const token = ++request; return listMobileGraphSources().then(result => {
+    const catalog = () => { const token = ++request; return listMobileGraphSources({ conn }).then(result => {
       if (!alive || token !== request) return; setSources(result.sources);
-      setSourceId(previous => result.sources.some(s => s.id === previous) ? previous : result.selectedSourceId);
+      const requested = noteSourceSelection.snapshot().selection;
+      // Never silently show the phone graph while the user has selected a computer library.
+      setSourceId(requested ? noteSourceKey(requested) : result.selectedSourceId);
+      if (requested && !result.sources.some(s => s.id === noteSourceKey(requested))) setLoading(false);
       if (!result.sources.length) setLoading(false);
     }).catch(e => { if (alive && token === request) { setError(errorText(e)); setLoading(false); } }); };
     void catalog(); window.addEventListener('luckyray:managed-vault-change', catalog);
     return () => { alive = false; window.removeEventListener('luckyray:managed-vault-change', catalog); };
-  }, [refreshKey]);
+  }, [refreshKey, ownerId, conn?.paired, desktopCatalog.knowledgeEpoch, sourceChoice.version]);
   useEffect(() => {
     const previous = retainedSession.current;
     const departingSaved = !previous.sourceId || previous.sourceId === sourceId || saveMobileGraphSession(previous.sourceId, previous.session);
-    const next = readMobileGraphSession(sourceId); retainedSession.current = { sourceId, session: next };
+    const next = sessionLedger.current.get(sourceId) || readMobileGraphSession(sourceId); retainedSession.current = { sourceId, session: next }; sessionLedger.current.set(sourceId, next);
     setSession(next); setPersistenceWarning(!departingSaved); setSnapshot(null); setPlaying(false); setSettingsOpen(false); setListOpen(false); setEditAction(null); setExportOpen(false); setMoreOpen(false); setExportStatus(''); setError('');
   }, [sourceId]);
   useEffect(() => {
@@ -83,8 +108,9 @@ export default function MobileGraphView({ modeSwitch, active = true }: { modeSwi
       setSession(s => ({ ...s, tabs: s.tabs.map(t => t.selectedKey && !next.seed.nodes.some(n => n.key === t.selectedKey) ? { ...t, selectedKey: null } : t) }));
     }).catch(e => { if (!controller.signal.aborted && token === sourceEpoch.current) { setLoading(false); setError(errorText(e)); } });
     return () => { controller.abort(); sourceEpoch.current++; };
-  }, [sourceId, source?.kind, source?.readOnly, bindingIdentity, active, refreshKey]);
-  useEffect(() => source && active ? subscribeMobileGraphChanges(source, refresh) : undefined, [sourceId, active, refresh]);
+  }, [sourceId, source?.kind, source?.readOnly, bindingIdentity, source?.availability, sourceUsable, ownerId, active, refreshKey]);
+  useEffect(() => source && active ? subscribeMobileGraphChanges(source, refresh) : undefined, [sourceId, source?.kind, bindingIdentity, active, refresh]);
+  useEffect(() => { const flush = () => { const current = retainedSession.current; if (current.sourceId) saveMobileGraphSession(current.sourceId, current.session); }; const hidden = () => { if (document.hidden) flush(); }; window.addEventListener('pagehide', flush); document.addEventListener('visibilitychange', hidden); return () => { flush(); window.removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', hidden); }; }, []);
   useEffect(() => { if (!sourceId) return; const timer = setTimeout(() => { if (!saveMobileGraphSession(sourceId, session)) setPersistenceWarning(true); }, 200); return () => clearTimeout(timer); }, [sourceId, session]);
   useEffect(() => { if (!active || covered) setPlaying(false); const stop = () => { if (document.hidden) setPlaying(false); else if (active) refresh(); }; document.addEventListener('visibilitychange', stop); return () => document.removeEventListener('visibilitychange', stop); }, [active, covered]);
   useEffect(() => settings.nearbyFilter && !settingsOpen && !listOpen && !editAction ? registerOverlay(() => patchTab({ settings: { ...settings, nearbyFilter: false } })) : undefined, [settings, settingsOpen, listOpen, editAction, registerOverlay, patchTab]);
@@ -103,6 +129,23 @@ export default function MobileGraphView({ modeSwitch, active = true }: { modeSwi
     }
     return keys;
   }, [seed, tab.scopeKey, settings.folder, settings.createdOnly]);
+  const changeSource = (id: string) => {
+    const next = sources.find(item => item.id === id); if (!next) return;
+    const selection: NoteSourceSelection = next.kind === 'managed' ? { kind: 'managed', localVaultId: next.id } : next.kind === 'desktop' && next.desktop ? { kind: 'desktop', ...next.desktop } : { kind: 'legacy' };
+    noteSourceSelection.select(selection); setSourceId(id);
+    if (selection.kind === 'managed') {
+      const version = noteSourceSelection.snapshot().version;
+      const write = selectionWrites.current.then(async () => {
+        if (noteSourceSelection.snapshot().version !== version) return;
+        await managedVault.select(selection.localVaultId);
+        if (noteSourceSelection.snapshot().version !== version) {
+          const latest = noteSourceSelection.snapshot().selection;
+          if (latest?.kind === 'managed') await managedVault.select(latest.localVaultId);
+        }
+      });
+      selectionWrites.current = write.catch(() => { if (noteSourceSelection.snapshot().version === version) setError('知识库选择尚未保存，请重新选择。当前图谱仍属于所选库。'); });
+    }
+  };
   const selected = seed.nodes.find(n => n.key === tab.selectedKey);
   const scene = useMemo(() => filteredGraph(seed, normalizeGraphView(settings), { scopeKeys, selectedId: selected?.id }), [seed, settings, scopeKeys, selected?.id]);
   const selectable = scene.renderedNodes.filter(n => n.label.toLocaleLowerCase().includes(nodeQuery.toLocaleLowerCase()));
@@ -170,15 +213,15 @@ export default function MobileGraphView({ modeSwitch, active = true }: { modeSwi
 
   return <div ref={rootElement} className="st-view st-knowledge-view mg-view" aria-label="本地图谱">
     <div className="st-collection-head">{modeSwitch}</div>
-    <div className="mg-source-row"><select aria-label="图谱知识库" value={sourceId} onChange={e => setSourceId(e.target.value)}>{sources.map(s => <option key={s.id} value={s.id}>{s.kind === 'legacy' ? '本机笔记' : s.name}</option>)}</select><button type="button" aria-label="刷新图谱" onClick={refresh}><MobileGraphIcon name="refresh" /></button></div>
+    <div className="mg-source-row"><select aria-label="图谱知识库" value={sourceId} onChange={e => changeSource(e.target.value)}>{!source && <option value={sourceId}>{'选择知识库'}</option>}{sources.map(s => <option key={s.id} value={s.id}>{s.kind === 'legacy' ? '旧数据（恢复）' : s.name}</option>)}</select><button type="button" aria-label="刷新图谱" onClick={refresh}><MobileGraphIcon name="refresh" /></button></div>
     {session.tabs.length > 1 && <div className="mg-view-tabs" aria-label="图谱视图">{session.tabs.map(t => <div key={t.id} aria-current={t.id === session.activeId}><button type="button" onClick={() => { setSession(s => ({ ...s, activeId: t.id })); setPlaying(false); }}>{t.name}</button>{session.tabs.length > 1 && <button type="button" className="mg-tab-close" aria-label={`关闭${t.name}`} onClick={() => closeView(t.id)}>×</button>}</div>)}<button type="button" aria-label="新建图谱视图" disabled={session.tabs.length >= 12} onClick={addView}>＋</button></div>}
     {persistenceWarning && <div className="mg-notice" role="status">图谱视图暂未保存，重新打开可能恢复默认设置。笔记不受影响。</div>}
     {error && <div className="mg-notice" role="alert">{error}<button type="button" onClick={refresh}>重试</button></div>}
-    {snapshot?.warnings.length ? <div className="mg-notice">{snapshot.warnings[0]}</div> : null}
+    {sourceUsable && snapshot?.source.id === sourceId && snapshot.warnings.length ? <div className="mg-notice" role="status">{snapshot.warnings[0]}</div> : null}
     <div className="mg-stage" data-no-swipe="true">
-      <MobileGraphCanvas key={`${sourceId}:${tab.id}`} ref={canvas} seed={seed} settings={settings} selectedKey={tab.selectedKey} scopeKeys={scopeKeys} camera={tab.camera} paused={!active || covered} reducedMotion={reduced} onSelect={key => patchTab({ selectedKey: key })} onOpen={openNode} onCameraChange={camera => patchTab({ camera })} playback={{ playing, progress: seek }} onPlaybackProgress={playbackProgress} />
+      <MobileGraphCanvas key={`${sourceId}:${tab.id}`} ref={canvas} seed={seed} settings={settings} selectedKey={tab.selectedKey} scopeKeys={scopeKeys} camera={tab.camera} positions={tab.positions} onPositionsChange={positions => patchCanvasTab(sourceId, tab.id, { positions })} paused={!active || covered} reducedMotion={reduced} onSelect={key => patchCanvasTab(sourceId, tab.id, { selectedKey: key })} onOpen={openNode} onCameraChange={(camera, settled = true) => patchCanvasTab(sourceId, tab.id, { camera }, settled)} playback={{ playing, progress: seek }} onPlaybackProgress={playbackProgress} />
       <div className="mg-tools"><button type="button" aria-label="打开图谱设置" aria-pressed={settingsOpen} onClick={() => setSettingsOpen(s => !s)}><MobileGraphIcon name="settings" /></button><button type="button" aria-label={playing ? '停止图谱动画' : '播放图谱动画'} onClick={playing ? () => setPlaying(false) : startPlay}><MobileGraphIcon name={playing ? 'stop' : 'play'} /></button><button type="button" aria-label="适应画布" onClick={() => canvas.current?.fit()}><MobileGraphIcon name="fit" /></button><button type="button" aria-label="更多图谱操作" onClick={() => setMoreOpen(true)}>···</button></div>
-      {loading && !seed.nodes.length ? <div className="mg-status" role="status">正在读取本地图谱{progress ? ` · ${progress}` : '…'}</div> : !seed.nodes.length ? <div className="mg-status"><strong>图谱从笔记开始</strong><span>本地笔记中的双链、标签和附件会在这里连接。</span></div> : !scene.renderedNodes.length ? <div className="mg-status"><strong>没有匹配的节点</strong><button type="button" onClick={() => patchTab({ settings: defaultMobileGraphSettings(), scopeKey: null })}>清除筛选</button></div> : null}
+      {!source && !loading ? <div className="mg-status"><strong>请选择知识库</strong><span>笔记和图谱使用同一个库。先添加或选择知识库，再查看关联。</span>{onManageVaults && <button type="button" onClick={onManageVaults}>选择或添加知识库</button>}<button type="button" onClick={refresh}>重新检查</button></div> : error && !seed.nodes.length ? <div className="mg-status"><strong>暂时无法显示此图谱</strong><span>没有切换到其他库，你的笔记未被修改。</span></div> : loading && !seed.nodes.length ? <div className="mg-status" role="status">正在读取本地图谱{progress ? ` · ${progress}` : '…'}</div> : !seed.nodes.length ? <div className="mg-status"><strong>图谱从笔记开始</strong><span>本地笔记中的双链、标签和附件会在这里连接。</span></div> : !scene.renderedNodes.length ? <div className="mg-status"><strong>没有匹配的节点</strong><button type="button" onClick={() => patchTab({ settings: defaultMobileGraphSettings(), scopeKey: null })}>清除筛选</button></div> : null}
       {tab.scopeKey && !settingsOpen && <button type="button" className="mg-scope-chip" onClick={() => patchTab({ scopeKey: null, settings: { ...settings, query: '' } })}>清除搜索范围 ×</button>}
       {selected && !settingsOpen && <div className="mg-selection" ref={selectionElement}><div className="mg-selection-head"><strong>{selected.label}</strong><button type="button" aria-label="取消节点选择" onClick={() => patchTab({ selectedKey: null })}>×</button></div><div className="mg-selection-actions"><button type="button" onClick={() => { void copyTextExact(selected.label).then(result => setCopyStatus(result === 'copied' ? '节点名称已复制。' : '复制失败，可长按上方名称手动复制。')); }}>复制名称</button><button type="button" onClick={() => void askAboutNode()}>复制提问并打开 LSH</button>{!note && snapshot?.resourcesByKey.get(selected.key)?.available && (source?.kind === 'managed' || /^luckyray-local-asset:[A-Za-z0-9_-]{1,160}$/.test(snapshot.resourcesByKey.get(selected.key)?.target || '')) && <button type="button" onClick={() => void openLocalResource()}>打开本机附件</button>}{(note || snapshot?.resourcesByKey.has(selected.key)) && <button type="button" onClick={() => openNode(selected.key)}>{note ? '打开笔记' : '打开来源笔记'}</button>}<button type="button" onClick={() => patchTab({ settings: { ...settings, nearbyFilter: !settings.nearbyFilter } })}>{settings.nearbyFilter ? '返回全局' : '局部图谱'}</button>{!source?.readOnly && (note ? <><button type="button" onClick={() => beginEdit('link')}>添加关联</button><button type="button" onClick={() => beginEdit('unlink')}>移除关联</button><button type="button" onClick={() => beginEdit('tags')}>编辑标签</button></> : selected.status === 'missing' ? <button type="button" onClick={() => beginEdit('create')}>创建笔记</button> : null)}</div>{copyStatus && <p role="status" className="mg-hint">{copyStatus}</p>}</div>}
       {playing && <div className="mg-progress" style={{ bottom: selected ? selectionHeight + 24 : 12 }}><button type="button" aria-label="停止图谱动画" onClick={() => setPlaying(false)}>Ⅱ</button><input aria-label="图谱播放进度" type="range" min={0} max={1} step={.01} value={playProgress} onChange={e => { const n = Number(e.target.value); setSeek(n); setPlayProgress(n); }} /><span>{Math.round(playProgress * 100)}%</span></div>}

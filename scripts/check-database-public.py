@@ -40,7 +40,7 @@ def main():
         (work / "src").mkdir(parents=True)
         shutil.copytree(ROOT / "shared/companion-content-v1", Path(temp) / "shared/companion-content-v1")
         shutil.copyfile(source, work / "src/db.rs")
-        for module in ("content_db.rs", "content_offline_db.rs", "local_note_upload_db.rs"):
+        for module in ("content_db.rs", "content_graph_db.rs", "content_offline_db.rs", "local_note_upload_db.rs"):
             shutil.copyfile(ROOT / "src-tauri/src" / module, work / "src" / module)
         managed_modules = (
             "managed_vault", "managed_vault_sync", "managed_vault_folder_sync",

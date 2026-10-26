@@ -116,7 +116,20 @@ cat > app/src/main/res/xml/export_file_paths.xml <<'XML'
 </paths>
 XML
 # register the narrow provider (authority ${applicationId}.exportprovider)
-grep -q "exportprovider" "$MANIFEST" || sed -i 's|</application>|    <provider\n      android:name="androidx.core.content.FileProvider"\n      android:authorities="${applicationId}.exportprovider"\n      android:exported="false"\n      android:grantUriPermissions="true">\n      <meta-data\n        android:name="android.support.FILE_PROVIDER_PATHS"\n        android:resource="@xml/export_file_paths" />\n    </provider>\n  </application>|' "$MANIFEST"
+grep -q "exportprovider" "$MANIFEST" || sed -i 's|</application>|    <provider\n      android:name=".ExportFileProvider"\n      android:authorities="${applicationId}.exportprovider"\n      android:exported="false"\n      android:grantUriPermissions="true">\n      <meta-data\n        android:name="android.support.FILE_PROVIDER_PATHS"\n        android:resource="@xml/export_file_paths" />\n    </provider>\n  </application>|' "$MANIFEST"
+# Existing generated projects must also stop sharing the capture component.
+# Authority, non-exported status, URI grants and narrow paths stay unchanged.
+python - "$MANIFEST" <<'PYINNER'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text(encoding="utf-8")
+def export_component(match):
+    block = match.group(0)
+    if 'android:authorities="${applicationId}.exportprovider"' in block:
+        return re.sub(r'android:name="[^"]+"', 'android:name=".ExportFileProvider"', block, count=1)
+    return block
+p.write_text(re.sub(r'<provider\b[^>]*>', export_component, s), encoding="utf-8")
+PYINNER
 # M2.13 FIX-V2: the exported NarrowFileProvider (FIX-V1 experiment) must
 # NEVER be present — open/share go through the non-exported exportprovider.
 grep -q "NarrowFileProvider" "$MANIFEST" && python - "$MANIFEST" <<'PYINNER'
@@ -195,6 +208,7 @@ cp "$SRC_KOTLIN/ShareBridge.kt" "$DEST_KOTLIN/ShareBridge.kt"
 cp "$SRC_KOTLIN/NoteImportBridge.kt" "$DEST_KOTLIN/NoteImportBridge.kt"
 cp "$SRC_KOTLIN/ThumbnailBridge.kt" "$DEST_KOTLIN/ThumbnailBridge.kt"
 cp "$SRC_KOTLIN/ExportBridge.kt" "$DEST_KOTLIN/ExportBridge.kt"
+cp "$SRC_KOTLIN/ExportFileProvider.kt" "$DEST_KOTLIN/ExportFileProvider.kt"
 cp "$SRC_KOTLIN/LshEmbeddedSurface.kt" "$DEST_KOTLIN/LshEmbeddedSurface.kt"
 cp "$SRC_KOTLIN/LshSurfaceBridge.kt" "$DEST_KOTLIN/LshSurfaceBridge.kt"
 cp "$SRC_KOTLIN/LshSurfaceActivity.kt" "$DEST_KOTLIN/LshSurfaceActivity.kt"

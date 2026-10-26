@@ -25,14 +25,31 @@ export type ConnTransitionResult = {
   warning?: string | null;
 };
 
+/** A native-validated address hint. It contains no pairing secret or bearer. */
+export type EndpointRecoveryPreview = {
+  prepareId: string;
+  currentBaseUrl: string;
+  candidateBaseUrl: string;
+  displayName: string;
+  fingerprintSummary: string;
+  verification: "not_yet_verified";
+};
+export type EndpointRecoveryCancel = { status: "cancelled" | "not_found" | "already_updated" | "commit_in_progress" };
+export type EndpointRecoveryResult = { status: "updated"; baseUrl: string; requiresReconnect: true };
+
 export type NativeVideoReceipt = {reason: string; positionMs: number; durationMs: number; errorCode?: string; firstFrameMs?: number; remoteBytesBeforeFirstFrame?: number; remoteBytes: number; sizeBytes: number; transport: string; completeOffline: boolean; rangeRequests?: number; cacheBytes?: number; format?: {videoMime?: string; audioMime?: string; containerMime?: string; codecs?: string; videoDecoder?: string; audioDecoder?: string; width?: number; height?: number; frameRate?: number; lumaBitdepth?: number; chromaBitdepth?: number; channels?: number; sampleRate?: number; audioAdvancing?: boolean; rangeRetries?: number; playerErrorCode?: number}};
 
 export const api = {
+  /** Pure SQLite read: exact paired owner and explicitly saved scope, no recovery or network. */
+  contentGraphCache: (instance: string, vault?: string, page = 1) => invoke<import('./desktopGraphCache.ts').DesktopGraphCache>('content_graph_cache', { instance, vault: vault ?? null, page }),
   managedVaultResourceOpen: (localVaultId: string, noteId: string, target: string, expectedRevision: string) => invoke<{ status: string }>("managed_vault_resource_open", { localVaultId, noteId, target, expectedRevision }),
   managedVaultResourceGet: (localVaultId: string, noteId: string, target: string, expectedRevision: string) => invoke<{ path: string; mime: string; sha256: string; sizeBytes: number }>("managed_vault_resource_get", { localVaultId, noteId, target, expectedRevision }),
   contentLibraryCatalog: (instance: string) => invoke<import("./desktopLibraries").DesktopLibraryCatalog>("content_library_catalog", {instance}),
   contentScopeChanged: (instance: string, kind: "materials" | "knowledge") => invoke<void>("content_scope_changed", {instance, kind}),
   connState: () => invoke<ConnState>("conn_state"),
+  connEndpointPrepare: (payload: string) => invoke<EndpointRecoveryPreview>("conn_endpoint_prepare", { payload }),
+  connEndpointUpdate: (prepareId: string) => invoke<EndpointRecoveryResult>("conn_endpoint_update", { prepareId }),
+  connEndpointCancel: (prepareId: string) => invoke<EndpointRecoveryCancel>("conn_endpoint_cancel", { prepareId }),
   connPair: (payload: string) => invoke<unknown>("conn_pair", { payload }),
   connPairFile: (fileName: string) => invoke<unknown>("conn_pair_file", { fileName }),
   pairPickFile: () => invoke<unknown>("pair_pick_file"),

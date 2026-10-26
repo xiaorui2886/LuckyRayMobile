@@ -45,20 +45,35 @@ image="system-images;android-${GRAPH_API};google_apis;x86_64"
 [[ -d "$ANDROID_HOME/system-images/android-${GRAPH_API}/google_apis/x86_64" ]] || { echo "Preinstalled/licensed image required: $image" >&2; exit 3; }
 phase="${GRAPH_QA_PHASE:-installed}"
 [[ "$phase" == preflight || "$phase" == installed ]] || exit 2
-name="lr_graph_qa_${GRAPH_API}_${GITHUB_RUN_ID:?}_${GITHUB_RUN_ATTEMPT:?}_${phase}"
+name="lr_unified_qa_${GRAPH_API}_${GITHUB_RUN_ID:?}_${GITHUB_RUN_ATTEMPT:?}"
+marker="$RUNNER_TEMP/graph-qa/evidence/empty-avd-preflight.json"
 [[ "$name" =~ ^[a-zA-Z0-9_]+$ ]] || exit 2
 # Android tools can disagree on legacy/default homes. Give both one explicit CI-only home.
 export ANDROID_USER_HOME="$RUNNER_TEMP/graph-android-user"
 export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
 export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
 mkdir -p "$ANDROID_AVD_HOME"
-echo GRAPH_QA_PHASE_START_avd_create
-printf 'no\n' | python3 "$(dirname "$0")/deadline.py" 120 "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --name "$name" --package "$image" --device pixel_2 --path "$ANDROID_AVD_HOME/$name.avd"
-echo GRAPH_QA_PHASE_PASS_avd_create
+if [[ "$phase" == preflight ]]; then
+  [[ ! -e "$marker" && ! -e "$ANDROID_AVD_HOME/$name.ini" ]] || { echo 'Refusing duplicate preflight or existing AVD'; exit 3; }
+  echo GRAPH_QA_PHASE_START_avd_create
+  printf 'no\n' | python3 "$(dirname "$0")/deadline.py" 120 "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --name "$name" --package "$image" --device pixel_2 --path "$ANDROID_AVD_HOME/$name.avd"
+  echo GRAPH_QA_PHASE_PASS_avd_create
+else
+  # Only the same run/attempt's successfully observed, app-empty profile is eligible.
+  python3 - "$marker" "$name" "$GRAPH_API" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$ANDROID_AVD_HOME/$name.avd/config.ini" <<'PY_REUSE'
+import json,sys,pathlib,hashlib
+p,name,api,run,attempt,config=sys.argv[1:]
+m=json.loads(pathlib.Path(p).read_text())
+expected={'avd':name,'api':api,'runId':run,'attempt':attempt,'noApp':True,'preflightPassed':True,'normalShutdown':True,'configSha256':hashlib.sha256(pathlib.Path(config).read_bytes()).hexdigest()}
+assert m==expected,'AVD preflight provenance mismatch; no fallback creation or wipe'
+print('GRAPH_QA_SAME_EMPTY_AVD_REOPEN '+json.dumps(m))
+PY_REUSE
+fi
 [[ -f "$ANDROID_AVD_HOME/$name.ini" && -f "$ANDROID_AVD_HOME/$name.avd/config.ini" ]] || { echo 'AVD creation did not publish expected isolated descriptor/config; refusing launch' >&2; exit 3; }
 python3 "$(dirname "$0")/deadline.py" 30 "$ANDROID_HOME/emulator/emulator" -list-avds > "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt"
 cat "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt"
 grep -Fxq "$name" "$RUNNER_TEMP/graph-qa/evidence/avd-discovery.txt" || { echo 'Emulator cannot discover freshly-created isolated AVD; refusing launch' >&2; exit 3; }
+if [[ "$phase" == preflight ]]; then
 python3 - "$ANDROID_AVD_HOME/$name.avd/config.ini" "$RUNNER_TEMP/graph-qa/evidence/avd-resources.json" <<'PY_RESOURCES'
 import pathlib,json,sys
 allowed={'hw.ramSize','hw.cpu.ncore','disk.dataPartition.size','hw.lcd.width','hw.lcd.height','hw.lcd.density'}; values={}
@@ -76,8 +91,11 @@ values['commandLinePartitionMiB']=4096
 pathlib.Path(sys.argv[2]).write_text(json.dumps(values,indent=2))
 print('GRAPH_QA_AVD_RESOURCES '+json.dumps(values))
 PY_RESOURCES
+fi
 echo GRAPH_QA_PHASE_START_emulator_boot
-"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot -wipe-data -gpu software -memory 3072 -partition-size 4096 -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
+wipe_args=()
+[[ "$phase" != preflight ]] || wipe_args=(-wipe-data)
+"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot "${wipe_args[@]}" -gpu software -memory 3072 -partition-size 4096 -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
 pid=$!
 report_boot_failure() {
   # Only pre-install synthetic emulator startup diagnostics, no app logcat/environment.
@@ -137,4 +155,27 @@ echo GRAPH_QA_ACTUAL_DISPLAY_CPU_END
 # Caller supplies a reviewed in-repository driver; no remote command strings.
 : "${GRAPH_TEST_DRIVER:?Path to reviewed executable local driver}"
 [[ -f "$GRAPH_TEST_DRIVER" && -x "$GRAPH_TEST_DRIVER" ]] || exit 2
+# Both boots must remain app-empty until the installation driver runs.
+[[ "$(python3 "$(dirname "$0")/deadline.py" 15 adb shell getprop ro.build.version.sdk | tr -d '\r')" == "$GRAPH_API" ]] || exit 3
+[[ "$(python3 "$(dirname "$0")/deadline.py" 15 adb shell getprop ro.product.cpu.abi | tr -d '\r')" == x86_64 ]] || exit 3
+packages=$(python3 "$(dirname "$0")/deadline.py" 15 adb shell pm list packages com.luckyray.mobile | tr -d '\r') || exit 3
+[[ -z "$packages" ]] || { echo 'Expected app-empty synthetic AVD'; exit 3; }
 "$GRAPH_TEST_DRIVER"
+# Successful normal shutdown preserves initialized system state; no snapshot and
+# no second -wipe-data. A failure anywhere above never publishes reuse provenance.
+python3 "$(dirname "$0")/deadline.py" 15 adb shell sync
+python3 "$(dirname "$0")/deadline.py" 15 adb emu kill
+shutdown_start=$SECONDS
+while kill -0 "$pid" 2>/dev/null && (( SECONDS-shutdown_start < 45 )); do sleep 1; done
+if kill -0 "$pid" 2>/dev/null; then echo 'Normal emulator shutdown timeout; reuse forbidden'; exit 3; fi
+wait "$pid"
+trap - EXIT
+if [[ "$phase" == preflight ]]; then
+  python3 - "$marker" "$name" "$GRAPH_API" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$ANDROID_AVD_HOME/$name.avd/config.ini" <<'PY_MARKER'
+import json,sys,pathlib,hashlib
+p,name,api,run,attempt,config=sys.argv[1:]
+m={'avd':name,'api':api,'runId':run,'attempt':attempt,'noApp':True,'preflightPassed':True,'normalShutdown':True,'configSha256':hashlib.sha256(pathlib.Path(config).read_bytes()).hexdigest()}
+pathlib.Path(p).write_text(json.dumps(m,indent=2)+'\n')
+print('GRAPH_QA_EMPTY_AVD_READY '+json.dumps(m))
+PY_MARKER
+fi

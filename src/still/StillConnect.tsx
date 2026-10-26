@@ -14,6 +14,7 @@ import {
   type ShellSnapshot,
 } from "../services/connectionShell";
 import { useStillNav } from "./StillShell";
+import { EndpointRecovery } from "./EndpointRecovery";
 
 export function StillConnect() {
   const { conn, back, registerOverlay } = useStillNav();
@@ -169,6 +170,8 @@ export function StillConnect() {
               <p className="st-sheet-copy" style={{ marginTop: 28 }}>配对和内容同步是不同状态；此页面不代表素材或任务已同步。</p>
             </>
           ) : null}
+          {conn?.paired && conn.identity ? <EndpointRecovery key={conn.identity.instanceId}
+            registerOverlay={registerOverlay} onUpdated={() => { void shell.refresh(); }} /> : null}
         </div>
       </div>
       {forgetOpen ? (

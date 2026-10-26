@@ -19,17 +19,17 @@ function snapshot(source) { const nodes = source.id === 'a' ? [node(1,'a1','Synt
 globalThis.__graphSources = {sources:[sourceA,sourceB],selectedSourceId:'a'};
 globalThis.__load = async source => snapshot(source);
 try {
- await build({entryPoints:[path.join(repo,'src/features/graph/MobileGraphView.tsx')],outfile:path.join(dir,'host.mjs'),bundle:true,format:'esm',platform:'node',jsx:'automatic',loader:{'.css':'empty'},plugins:[{name:'local-seams',setup(b){
+ await build({stdin:{contents:`export { default } from './src/features/graph/MobileGraphView.tsx';export { noteSourceSelection } from './src/services/noteSourceSelection.ts';export { normalizeMobileGraphPositions } from './src/features/graph/mobileGraphSessions.ts';`,resolveDir:repo,loader:'tsx'},outfile:path.join(dir,'host.mjs'),bundle:true,format:'esm',platform:'node',jsx:'automatic',loader:{'.css':'empty'},plugins:[{name:'local-seams',setup(b){
  b.onResolve({filter:/^(react|react\/jsx-runtime)$/},a=>({path:pathToFileURL(require.resolve(a.path)).href,external:true}));
  b.onResolve({filter:/still\/StillShell$/},()=>({path:'nav',namespace:'seam'}));
  b.onResolve({filter:/services\/mobileGraph$/},()=>({path:'data',namespace:'seam'}));
  b.onResolve({filter:/services\/mobileGraphMutations$/},()=>({path:'mutations',namespace:'seam'}));
  b.onResolve({filter:/MobileGraphCanvas$/},()=>({path:'canvas',namespace:'seam'}));
  b.onResolve({filter:/kit\/Sheet$/},()=>({path:'sheet',namespace:'seam'}));
- b.onLoad({filter:/.*/,namespace:'seam'},a=>({loader:'tsx',contents:a.path==='nav'?`const nav={open:(...args)=>globalThis.__graphCalls.push(['open',...args]),registerOverlay:f=>{globalThis.__overlay.push(f);return ()=>{globalThis.__overlay=globalThis.__overlay.filter(x=>x!==f)}},mode:'light',reduced:false};export const useStillNav=()=>nav;`:a.path==='data'?`export const listMobileGraphSources=async()=>globalThis.__graphSources;export const loadMobileGraphSnapshot=(s)=>globalThis.__load(s);export const subscribeMobileGraphChanges=()=>()=>{};export const createMobileGraphNote=async(...a)=>globalThis.__graphCalls.push(['create',...a]);export const linkMobileGraphNodes=async(...a)=>globalThis.__graphCalls.push(['link',...a]);export const unlinkMobileGraphNodes=async(...a)=>globalThis.__graphCalls.push(['unlink',...a]);export const setMobileGraphNoteTags=async(...a)=>globalThis.__graphCalls.push(['tags',...a]);`:a.path==='mutations'?`export const mobileGraphRelationDisabledReason=()=>null;`:a.path==='sheet'?`export function Sheet({title,children,onClose}){return <section aria-label={title}><button onClick={onClose}>关闭弹层</button>{children}</section>}`:`import {forwardRef,useImperativeHandle} from 'react';export const MobileGraphCanvas=forwardRef((p,r)=>{globalThis.__canvasProps=p;useImperativeHandle(r,()=>({fit:()=>{},zoomBy:()=>{},capture:async()=>new Blob()}));return <canvas aria-label="本地图谱画布"/>});` }));
+ b.onLoad({filter:/.*/,namespace:'seam'},a=>({loader:'tsx',contents:a.path==='nav'?`const nav={open:(...args)=>globalThis.__graphCalls.push(['open',...args]),registerOverlay:f=>{globalThis.__overlay.push(f);return ()=>{globalThis.__overlay=globalThis.__overlay.filter(x=>x!==f)}},mode:'light',reduced:false};export const useStillNav=()=>globalThis.__freshOverlay?{...nav,registerOverlay:d=>nav.registerOverlay(d)}:nav;`:a.path==='data'?`export const listMobileGraphSources=async()=>globalThis.__graphSources;export const loadMobileGraphSnapshot=(s)=>globalThis.__load(s);export const subscribeMobileGraphChanges=(s,fn)=>{globalThis.__graphRefresh=fn;return ()=>{if(globalThis.__graphRefresh===fn)globalThis.__graphRefresh=null;};};export const createMobileGraphNote=async(...a)=>globalThis.__graphCalls.push(['create',...a]);export const linkMobileGraphNodes=async(...a)=>globalThis.__graphCalls.push(['link',...a]);export const unlinkMobileGraphNodes=async(...a)=>globalThis.__graphCalls.push(['unlink',...a]);export const setMobileGraphNoteTags=async(...a)=>globalThis.__graphCalls.push(['tags',...a]);`:a.path==='mutations'?`export const mobileGraphRelationDisabledReason=()=>null;`:a.path==='sheet'?`export function Sheet({title,children,onClose}){return <section aria-label={title}><button onClick={onClose}>关闭弹层</button>{children}</section>}`:`import {forwardRef,useImperativeHandle} from 'react';export const MobileGraphCanvas=forwardRef((p,r)=>{globalThis.__canvasProps=p;useImperativeHandle(r,()=>({fit:()=>{},zoomBy:()=>{},capture:async()=>new Blob()}));return <canvas aria-label="本地图谱画布"/>});` }));
  }}]});
  const React = await import('react'), {act} = React, {createRoot} = await import('react-dom/client');
- const {default:Graph} = await import(pathToFileURL(path.join(dir,'host.mjs')).href), root = createRoot(document.getElementById('root'));
+ const {default:Graph,noteSourceSelection,normalizeMobileGraphPositions} = await import(pathToFileURL(path.join(dir,'host.mjs')).href), root = createRoot(document.getElementById('root'));
  const click = async el => { assert.ok(el,'target exists'); await act(async()=>el.dispatchEvent(new MouseEvent('click',{bubbles:true}))); };
  const label = name => document.querySelector(`[aria-label="${name}"]`);
  const textButton = text => [...document.querySelectorAll('button')].find(b=>b.textContent.trim()===text);
@@ -39,6 +39,9 @@ try {
  for(const [name,value] of [['节点大小','6'],['连线粗细','1'],['文字显示阈值','0.45']]){const field=[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith(name));assert.equal(field.querySelector('input').value,value);}
  const arrows=[...document.querySelectorAll('label')].find(l=>l.textContent==='箭头').querySelector('input'); await click(arrows); assert.equal(globalThis.__canvasProps.settings.showArrows,true);
  await click(label('重置图谱设置')); assert.equal(globalThis.__canvasProps.settings.showArrows,false);
+ const focusedSearch=document.querySelector('.mg-settings input[type=search]');focusedSearch.focus();assert.ok(document.activeElement===focusedSearch,'settings field initially accepts focus');globalThis.__freshOverlay=true;
+ await act(async()=>root.render(React.createElement(Graph,{modeSwitch:React.createElement('span',null,'图谱'),active:true})));
+ assert.ok(document.activeElement===focusedSearch,'parent context refresh must not steal settings text/candidate focus');assert.equal(globalThis.__overlay.length,1,'one dismiss handler while settings stay mounted');globalThis.__freshOverlay=false;
  await click(label('关闭图谱设置')); await click(label('更多图谱操作')); await click(label('新建图谱视图')); assert.equal(document.querySelectorAll('.mg-view-tabs>div').length,2);
  await click(label('更多图谱操作')); await click(label('查找图谱节点')); await click([...document.querySelectorAll('.mg-node-list button')][0]); assert.equal(globalThis.__canvasProps.selectedKey,'a1');
  await click(textButton('局部图谱')); assert.equal(globalThis.__canvasProps.settings.nearbyFilter,true);
@@ -57,7 +60,11 @@ try {
  await click(textButton('添加关联'));await setInput(label('搜索关联目标'),'Gamma');await click(textButton('取消'));assert.equal(globalThis.__graphCalls.filter(c=>c[0]==='link').length,1,'search then cancel never writes');
  await click(label('打开图谱设置')); const arrowAgain=[...document.querySelectorAll('label')].find(l=>l.textContent==='箭头').querySelector('input'); await click(arrowAgain); await click(label('关闭图谱设置'));
  await click(textButton('添加关联'));await setInput(label('搜索关联目标'),'Beta');const staleTarget=label('选择关联目标');await act(async()=>{staleTarget.value='a2';staleTarget.dispatchEvent(new Event('change',{bubbles:true}));});
+ const obsoleteCanvas=globalThis.__canvasProps;
  const picker=label('图谱知识库'); await act(async()=>{picker.value='b';picker.dispatchEvent(new Event('change',{bubbles:true}));});
+ const currentCamera=globalThis.__canvasProps.camera;
+ await act(async()=>obsoleteCanvas.onCameraChange({scale:5,panX:500,panY:600}));
+ assert.deepEqual(globalThis.__canvasProps.camera,currentCamera,'an obsolete source canvas cannot overwrite the current source camera');
  assert.equal(label('选择关联目标'),null,'switching vault closes stale relation editor');assert.equal(globalThis.__graphCalls.filter(c=>c[0]==='link').length,1,'vault change cannot submit stale choice');
  const persistedA=JSON.parse(localStorage.getItem('luckyray.mobile.graph.v1:a'));assert.equal(persistedA.tabs.find(t=>t.id===persistedA.activeId).settings.showArrows,true,'immediate vault switch flushes last setting');
  assert.equal(globalThis.__canvasProps.seed.nodes[0].key,'b1');assert.equal(globalThis.__canvasProps.selectedKey,null,'vault state isolated');
@@ -76,6 +83,36 @@ try {
  assert.equal(label('选择关联目标').options.length,1003,'all 1002 eligible targets plus placeholder are represented, no silent truncation');
  await setInput(label('搜索关联目标'),'Bulk 0999');assert.equal(label('选择关联目标').options.length,2,'1000-node picker narrows to exact explicit target');assert.equal(label('选择关联目标').value,'');assert.ok(document.body.textContent.includes('匹配 1 / 1002'));
  await click(textButton('取消'));assert.equal(globalThis.__graphCalls.filter(c=>c[0]==='link').length,1);
+ // External Notes source changes must take precedence over the retained graph source.
+ globalThis.__load=async s=>snapshot(s);
+ await act(async()=>noteSourceSelection.select({kind:'managed',localVaultId:'b'}));
+ assert.equal(globalThis.__canvasProps.seed.nodes[0].key,'b1','Notes source switch updates graph without touching graph picker');
+ await act(async()=>noteSourceSelection.select({kind:'desktop',instanceId:'paired-A',vaultId:'missing-cache'}));
+ assert.equal(globalThis.__canvasProps.seed.nodes.length,0,'unavailable desktop source never paints the phone graph');
+ assert.ok(document.body.textContent.includes('请选择知识库'));
+ await act(async()=>noteSourceSelection.select({kind:'managed',localVaultId:'a'}));
+ assert.equal(globalThis.__canvasProps.seed.nodes[0].key,'a1');
+ const savedLayout=[{key:'a1',x:24,y:-18,vx:0,vy:0}];
+ await act(async()=>globalThis.__canvasProps.onPositionsChange(savedLayout));
+ await act(async()=>globalThis.__canvasProps.onCameraChange({scale:1.2,panX:34,panY:56}));
+ assert.deepEqual(JSON.parse(localStorage.getItem('luckyray.mobile.graph.v1:a')).tabs.find(t=>t.id===JSON.parse(localStorage.getItem('luckyray.mobile.graph.v1:a')).activeId).positions,savedLayout,'settled layout is flushed without the debounce');
+ await act(async()=>noteSourceSelection.select({kind:'managed',localVaultId:'b'}));
+ await act(async()=>noteSourceSelection.select({kind:'managed',localVaultId:'a'}));
+ assert.deepEqual(globalThis.__canvasProps.positions,savedLayout,'returning to a source restores its node layout');
+ assert.deepEqual(globalThis.__canvasProps.camera,{scale:1.2,panX:34,panY:56});
+ assert.deepEqual(normalizeMobileGraphPositions([...savedLayout,{key:'a1',x:1,y:1,vx:0,vy:0},{key:'bad',x:Infinity,y:0,vx:0,vy:0}]),savedLayout,'layout storage rejects duplicates and invalid coordinates');
  await act(async()=>root.unmount());assert.equal(globalThis.__overlay.length,0);
+ const reopened = createRoot(document.getElementById('root'));
+ await act(async()=>reopened.render(React.createElement(Graph,{modeSwitch:React.createElement('span',null,'图谱')})));
+ assert.deepEqual(globalThis.__canvasProps.positions,savedLayout,'full Graph unmount/remount with a selected source must read that source session, not blank session');
+ assert.equal(typeof globalThis.__graphRefresh,'function','preselected source subscribes after async catalog becomes available');
+ let mutationLoads=0;const previousLoad=globalThis.__load;globalThis.__load=async s=>{mutationLoads++;return snapshot(s);};
+ await act(async()=>globalThis.__graphRefresh());assert.ok(mutationLoads>0,'source data changes refresh the active graph');globalThis.__load=previousLoad;
+ assert.deepEqual(globalThis.__canvasProps.camera,{scale:1.2,panX:34,panY:56});
+ globalThis.__graphSources={sources:[sourceB],selectedSourceId:'b'};
+ await click(label('刷新图谱'));
+ assert.equal(globalThis.__canvasProps.seed.nodes.length,0,'removing the selected source must hide its previously loaded snapshot');
+ await act(async()=>reopened.unmount());
+
  console.log('PASS graph UI: settings defaults/reset, tabs, local scope, accessible node open, confirmed mutations, vault isolation and stale-result cancellation');
 } finally { await rm(dir,{recursive:true,force:true}); dom.window.close(); }

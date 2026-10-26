@@ -100,7 +100,7 @@ pub(crate) async fn content_offline_control(
     let vaults = source.gateway.content_get("/v1/vaults").await?;
     let current = vaults["items"]
         .as_array()
-        .and_then(|v| v.first())
+        .and_then(|v| v.iter().find(|row| row["vaultId"] == vault))
         .ok_or("CONTENT_VAULT_UNAVAILABLE")?;
     if current["vaultId"] != vault {
         return Err("CONTENT_VAULT_UNAVAILABLE".into());

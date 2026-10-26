@@ -7,6 +7,12 @@
 // the error directly rather than through this helper.
 
 const RULES: { test: RegExp; copy: string }[] = [
+  { test: /MANAGED_SYNC_BINDING_AMBIGUOUS/i, copy: "这个知识库的同步关联重复，暂时只能阅读。请在知识库管理中核对来源，修改尚未写入。" },
+  { test: /VAULT_BINDING_INVALID/i, copy: "这个知识库的同步关联不完整，暂时只能阅读。请在知识库管理中检查关联，修改尚未写入。" },
+  { test: /MANAGED_VAULT_UNAVAILABLE/i, copy: "所选知识库暂时不可用，请返回知识库列表检查。" },
+  { test: /VAULT_REQUEST_CHANGED/i, copy: "上次创建笔记库的结果尚未确认，请先用原名称重试，避免重复创建。" },
+  { test: /VAULT_REQUEST_INVALID/i, copy: "创建笔记库的请求无效，请重试。" },
+  { test: /VAULT_NAME_INVALID/i, copy: "笔记库名称需为 1–120 个字符，不能包含换行或控制字符。" },
   { test: /LINKED_IMPORT_(?:CAPABILITY|CONNECTION)|IMPORT_PLAN_UNSUPPORTED/i, copy: "链接迁移需要连接支持此功能的电脑。原库仍可编辑，请连接或更新电脑端后重新检查。" },
   { test: /LINKED_IMPORT_LEGACY_PARTIAL/i, copy: "已有部分旧版加入记录，原始内容已保留，请先核对两份内容，不会自动重新复制。" },
   { test: /LINKED_IMPORT_(?:SOURCE|PROOFS|PLAN|MAPPING)_CHANGED/i, copy: "笔记或链接计划已变化，原始内容保留，请重新检查计划。" },
@@ -30,7 +36,7 @@ const RULES: { test: RegExp; copy: string }[] = [
   { test: /CURSOR_TOO_OLD|RESYNC_REQUIRED|410/i, copy: "连接状态已重置，正在重新同步。" },
   { test: /PAIRING_REQUIRED|REVOKED|401/i, copy: "电脑授权已失效，请重新连接。" },
   { test: /DISCONNECTED|ECONNREFUSED|fetch failed|network|Network/i, copy: "连不上电脑，请检查电脑与局域网。" },
-  { test: /SOURCE_CHANGED|CANCELLED/i, copy: "连接已改变，请重新打开。" },
+  { test: /SOURCE_CHANGED/i, copy: "当前笔记库来源已变化，请重新选择笔记库。" },
   { test: /UPGRADE|404/i, copy: "电脑版本暂不支持这项内容，请更新电脑端。" },
   { test: /RESOURCE_UNAVAILABLE|PREVIEW_UNAVAILABLE/i, copy: "文件暂时不可用，请在电脑上检查原文件。" },
   { test: /TOO_LARGE|64\s?MiB|64MB/i, copy: "附件太大，单个不能超过 64 MB。" },
@@ -40,7 +46,8 @@ const RULES: { test: RegExp; copy: string }[] = [
 
 /** Map an unknown failure to a short user-facing sentence. */
 export function failureCopy(error: unknown, fallback = "操作没有完成，请重试。"): string {
-  const raw = typeof error === "string" ? error : String((error as any)?.message ?? error ?? "");
+  if (isExpectedRequestCancellation(error)) return "操作已取消。";
+  const raw = typeof error === "string" ? error : `${(error as any)?.code ?? ""} ${String((error as any)?.message ?? error ?? "")}`;
   for (const rule of RULES) {
     if (rule.test.test(raw)) return rule.copy;
   }
@@ -49,6 +56,16 @@ export function failureCopy(error: unknown, fallback = "操作没有完成，请
 
 /** True when a failure is worth offering a retry for. */
 export function failureIsRetryable(error: unknown): boolean {
-  const raw = typeof error === "string" ? error : String((error as any)?.message ?? error ?? "");
+  const raw = typeof error === "string" ? error : `${(error as any)?.code ?? ""} ${String((error as any)?.message ?? error ?? "")}`;
   return /DISCONNECTED|ECONNREFUSED|fetch failed|network|timeout|timed?\s?out|REVISION_CONFLICT/i.test(raw);
+}
+
+/** For request owners only: suppress an obsolete request, not a real source failure.
+ * A caller must also ensure the request belongs to an aborted/stale view lifecycle.
+ */
+export function isExpectedRequestCancellation(error: unknown): boolean {
+  const value = error as { name?: unknown; code?: unknown; message?: unknown } | null;
+  const raw = typeof error === "string" ? error : `${value?.code ?? ""} ${value?.message ?? ""}`;
+  if (/SOURCE_CHANGED/i.test(raw)) return false;
+  return value?.name === "AbortError" || /(?:^|[^A-Z0-9_])(?:[A-Z0-9]+_)*CANCELLED(?:$|[^A-Z0-9_])/i.test(raw);
 }

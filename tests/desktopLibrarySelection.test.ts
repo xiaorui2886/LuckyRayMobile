@@ -122,7 +122,10 @@ test('UI source contracts bind each domain only to its own retirement epoch',asy
  const knowledge=await readFile(new URL('../src/still/StillCollection.tsx',import.meta.url),'utf8');
  assert.match(material,/\[desktopAuthority, conn\?\.paired, desktopOwner, library, libraries\.materialsEpoch\]/);
  assert.doesNotMatch(material,/libraries\.(?:epoch|knowledgeEpoch)/);
- assert.match(knowledge,/desktopCtrl\.selectVault\(selectedVault \|\| "", selectedLibraryReadable\(libraries,"knowledge"\), libraries\.knowledgeEpoch\)/);
+ // Graph handoff adds an exact-source gate, but must retain the Knowledge-only retirement epoch.
+ assert.match(knowledge,/desktopCtrl\.selectVault\(gatedVault \|\| "", graphScopeReadable, libraries\.knowledgeEpoch\)/);
+ assert.match(knowledge,/graphScopeReadable = !pendingGraphScope && selectedLibraryReadable\(libraries, 'knowledge'\)/);
+ assert.match(knowledge,/gatedVault = pendingGraphScope.*requestedScope\.vaultId : selectedVault/);
  assert.doesNotMatch(knowledge,/libraries\.(?:epoch|materialsEpoch)/);
 });
 

@@ -1,4 +1,5 @@
 {
+  "repository": "xiaorui2886/luckyray-app",
   "commit": "200433932c465ea26b16e8e4fa272507ce692388",
   "byteIdentical": [
     {
@@ -49,6 +50,5 @@
     "graphSemantics.ts",
     "graphRenderer.ts",
     "graphPlaybackSession.ts"
-  ],
-  "source": "LuckyRay desktop graph source snapshot"
+  ]
 }

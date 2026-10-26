@@ -189,8 +189,8 @@ test("R44-5 — the page no longer wires dataStore into any vault-currentness pa
   // The coarse signal's ONLY use is preview freshness.
   assert.ok(src.includes("session.observeNoteCacheVersion(desktopVersion)"),
     "dataStore feeds note-cache freshness for previews only");
-  // The gate input is owner + connection only.
-  assert.ok(src.includes("session.desktopViewFor({ paired, connected, instanceId, vaultId:selectedVault, readable: selectedLibraryReadable(libraries, \"knowledge\") })"),
+  // Graph handoff adds exact vault/readability fencing, never a coarse data-store version.
+  assert.ok(src.includes("session.desktopViewFor({ paired, connected, instanceId, vaultId:gatedVault, readable: graphScopeReadable })"),
     "the synchronous gate no longer receives a version");
 });
 

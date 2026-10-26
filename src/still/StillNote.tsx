@@ -1,3 +1,4 @@
+import { buildKnowledgeVaultCatalog } from "../services/knowledgeVaultCatalog";
 import { managedNoteResources } from "../services/managedNoteResources";
 import DesktopNotePreview from "../components/DesktopNotePreview";
 import { SafeNoteMarkdown } from "../components/SafeNoteMarkdown";
@@ -257,12 +258,13 @@ function LocalStillNote({ id, managed, onManagedRedirect, startInEdit, current, 
           }
           const vaults = await managedVault.list();
           if (!alive) return;
+          const entry = buildKnowledgeVaultCatalog(vaults).items.find(item => item.id === managed.localVaultId);
           const vaultInfo = vaults.items.find(vault => vault.localVaultId === managed.localVaultId);
           if (!vaultInfo) throw Error("MANAGED_VAULT_UNAVAILABLE");
           setManagedInfo(vaultInfo);
           managedRecord.current = n as ManagedNote;
-          if (transfer?.transferPending || vaultInfo.transferState) {
-            setTitle(n.title || "笔记"); setContent(typeof n.content === "string" ? n.content : ""); setBodyProblem("正在加入同步库，原始笔记暂为只读。请回到笔记库继续完成。"); setMode("read"); setLoaded(true); return;
+          if (entry?.readOnly || !entry || transfer?.transferPending || vaultInfo.transferState) {
+            setTitle(n.title || "笔记"); setContent(typeof n.content === "string" ? n.content : ""); setBodyProblem(entry?.ambiguousBinding ? "此知识库的同步关联重复，暂为只读。请在知识库管理中核对来源。" : transfer?.transferPending || vaultInfo.transferState ? "正在加入同步库，原始笔记暂为只读。请回到笔记库继续完成。" : "此知识库暂为只读，请在知识库管理中处理后继续编辑。"); setMode("read"); setLoaded(true); return;
           }
           if (n.bodyState !== "ready" || typeof n.content !== "string") {
             setTitle(n.title || "笔记"); setContent(typeof n.content === "string" ? n.content : ""); setBodyProblem(n.bodyState === "conflict" ? "笔记存在冲突，原有版本已保留。请先处理冲突，不能覆盖编辑。" : "正文尚未保存在此设备，不能作为空白笔记编辑。"); setMode("read"); setLoaded(true); return;
@@ -285,6 +287,7 @@ function LocalStillNote({ id, managed, onManagedRedirect, startInEdit, current, 
               if (managed) {
                 const previous = managedRecord.current;
                 if (!previous || previous.bodyState !== "ready") throw Error("MANAGED_BODY_UNAVAILABLE");
+                await assertManagedVaultWritable(managed.localVaultId);
                 managedRecord.current = await managedVault.save(managed.localVaultId, managed.noteId, previous.revision, s.title, s.content, s.tags);
                 publishManaged();
               } else {
@@ -377,6 +380,7 @@ function LocalStillNote({ id, managed, onManagedRedirect, startInEdit, current, 
         if (!(await guardEdit()) || mutationBusy.current) return;
         mutationBusy.current = true;
         const previous = managedRecord.current!;
+        await assertManagedVaultWritable(managed.localVaultId);
         managedRecord.current = await managedVault.setFlags(managed.localVaultId, managed.noteId, previous.revision, { [flag]: !current });
         publishManaged();
       } else await publishAfter("note", api.localNoteSetFlags(id, { [flag]: !current }));
@@ -395,6 +399,7 @@ function LocalStillNote({ id, managed, onManagedRedirect, startInEdit, current, 
       if (managed) {
         if (!(await guardEdit()) || mutationBusy.current) return;
         mutationBusy.current = true;
+        await assertManagedVaultWritable(managed.localVaultId);
         await managedVault.trash(managed.localVaultId, managed.noteId, managedRecord.current!.revision);
         publishManaged();
         if (managedInfo?.binding) toast.success("删除已提交；电脑端确认前保持待同步。");
@@ -424,6 +429,7 @@ function LocalStillNote({ id, managed, onManagedRedirect, startInEdit, current, 
     mutationBusy.current = true;
     const generation = currentGeneration.current;
     try {
+      await assertManagedVaultWritable(managed.localVaultId);
       const note = await managedVault.create(managed.localVaultId, "新笔记", "", [], managedRecord.current?.folder || "");
       publishManaged();
       if (currentRef.current && generation === currentGeneration.current) { setSheet(""); open("note", routeFor(note.noteId), { edit: true }); }
@@ -434,6 +440,7 @@ function LocalStillNote({ id, managed, onManagedRedirect, startInEdit, current, 
     if (!managed || !(await guardEdit())) return;
     mutationBusy.current = true;
     try {
+      await assertManagedVaultWritable(managed.localVaultId);
       managedRecord.current = await managedVault.move(managed.localVaultId, managed.noteId, managedRecord.current!.revision, folder);
       publishManaged(); setSheet("");
     } catch (error) { setSaveMsg(failureCopy(error, "移动笔记失败")); }
@@ -1527,4 +1534,12 @@ export function StillNewNote() {
       ) : null}
     </>
   );
+}
+
+async function assertManagedVaultWritable(localVaultId: string) {
+  const catalog = buildKnowledgeVaultCatalog(await managedVault.list());
+  const entry = catalog.items.find(item => item.id === localVaultId);
+  if (!entry) throw new Error("MANAGED_VAULT_UNAVAILABLE");
+  if (entry.ambiguousBinding) throw new Error("MANAGED_SYNC_BINDING_AMBIGUOUS");
+  if (entry.readOnly) throw new Error(entry.vault.transferState ? "VAULT_TRANSFER_PENDING" : "VAULT_BINDING_INVALID");
 }

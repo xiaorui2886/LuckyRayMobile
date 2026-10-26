@@ -1,4 +1,5 @@
 import { mobileGraphFrontmatterTags } from './mobileGraphFrontmatter.ts';
+import { desktopGraphPath, resolveDesktopGraphReference } from './desktopGraphCache.ts';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
@@ -46,6 +47,7 @@ function catalogFor(notes: MobileGraphNote[], managed: boolean) {
   return entry;
 }
 export function mobileGraphResolve(source: MobileGraphSource, notes: MobileGraphNote[], from: MobileGraphNote, reference: WikiReference): { id: string | null; ambiguous: boolean } {
+  if (source.kind === 'desktop') return resolveDesktopGraphReference(notes, from, reference);
   if (source.binding && from.managed) {
     try {
       const matches = managedBoundWikiMatches(reference, catalogFor(notes,true).managed, from.noteId, { localVaultId: source.id, binding: source.binding }).notes;
@@ -110,7 +112,7 @@ export async function buildMobileGraphSnapshot(source: MobileGraphSource, notes:
     snapshot.notesByKey.set(key,{...note,tags});
     addNode({ key, entityId: note.noteId, label: note.title || '未命名笔记', type: 'note', timelineAt: Number.isFinite(time) ? time : undefined, relativePath: graphPath(source,note), tags });
   }
-  let missingBody = 0, conflictBody = 0, ambiguous = 0, missingResources = 0, unverifiedPaths = 0;
+  let missingBody = 0, conflictBody = 0, ambiguous = 0, unindexedResources = 0, unavailableResources = 0, unverifiedPaths = 0;
   for (let i = 0; i < notes.length; i++) {
     if (i % 20 === 0) await graphYield(options.signal);
     assertMobileGraphActive(options.signal);
@@ -125,6 +127,10 @@ export async function buildMobileGraphSnapshot(source: MobileGraphSource, notes:
     if (typeof note.content !== 'string' || note.bodyState === 'missing') { missingBody++; continue; }
     if (note.bodyState === 'conflict') conflictBody++;
     const parsed = parseMobileGraphBody(note.content);
+    if (source.kind === 'desktop' && !desktopGraphPath(note.relativePath)) {
+      if (parsed.references.length || parsed.embeds.length) unverifiedPaths++;
+      continue;
+    }
     if (source.binding && note.managed && !verifiedManagedWikiPath(note.managed,{localVaultId:source.id,binding:source.binding})) {
       if (parsed.references.length || parsed.embeds.length) unverifiedPaths++;
       continue;
@@ -135,7 +141,7 @@ export async function buildMobileGraphSnapshot(source: MobileGraphSource, notes:
       if (resolution.ambiguous) { ambiguous++; continue; }
       // A stable ID is identity, not a filename that may be created under a guessed title.
       if (!safeWikiTarget(reference.target) || reference.target.startsWith('@id/')) continue;
-      const missing = realVaultMissingDocumentLocation(reference.target, source.binding ? graphPath(source,note) : '', { defaultParent: 'root' });
+      const missing = realVaultMissingDocumentLocation(reference.target, source.binding || source.kind === 'desktop' ? graphPath(source,note) : '', { defaultParent: 'root' });
       if (!missing) continue;
       const missingKey = `note:missing-mobile:${encodeURIComponent(source.id)}:${encodeURIComponent(graphPath(source,note).toLocaleLowerCase())}:${encodeURIComponent(missing.relativePath.toLocaleLowerCase())}`;
       addEdge(id, addNode({ key: missingKey, entityId: null, type: 'note', label: missing.title, status: 'missing', timelineAt,
@@ -146,7 +152,10 @@ export async function buildMobileGraphSnapshot(source: MobileGraphSource, notes:
       const localAsset = /^luckyray-local-asset:([A-Za-z0-9_-]{1,160})$/.exec(embed.target);
       if (localAsset) {
         const asset = await options.resolveLocalAsset?.(localAsset[1]); assertMobileGraphActive(options.signal);
-        if (!asset) { missingResources++; continue; }
+        if (!asset) {
+          if (options.resolveLocalAsset) unavailableResources++; else unindexedResources++;
+          continue;
+        }
         const resourceKey=`material:mobile:${encodeURIComponent(source.id)}:local-asset:${asset.id}`;
         addResource(resourceKey,{noteKey:key,noteId:note.noteId,target:embed.target,available:true,openRoute:note.openRoute});
         addEdge(id,addNode({key:resourceKey,entityId:asset.id,type:'material',label:asset.name,timelineAt}),'embed-asset');
@@ -160,7 +169,10 @@ export async function buildMobileGraphSnapshot(source: MobileGraphSource, notes:
       const descriptor = descriptors.find(r => r.target === embed.target);
       // Resource IDs are per-note scoped, not globally trusted asset identifiers.
       const available = descriptor?.status === 'resolved';
-      if (!available) { missingResources++; continue; }
+      if (!available) {
+        if (descriptor) unavailableResources++; else unindexedResources++;
+        continue;
+      }
       const confirmedSource = source.binding && note.managed ? verifiedManagedWikiPath(note.managed,{localVaultId:source.id,binding:source.binding}) : null;
       const canonical = confirmedSource ? localAssetPath(target, confirmedSource) : null;
       const resourceKey = canonical ? `material:mobile:${encodeURIComponent(source.id)}:path:${encodeURIComponent(canonical)}` : `material:mobile:${encodeURIComponent(source.id)}:${encodeURIComponent(note.noteId)}:${encodeURIComponent(target)}`;
@@ -168,10 +180,17 @@ export async function buildMobileGraphSnapshot(source: MobileGraphSource, notes:
       addEdge(id,addNode({ key: resourceKey, entityId: descriptor?.resourceId || target, type: 'material', label: target.split('/').pop() || target, timelineAt, relativePath: target }),'embed-vault-asset');
     }
   }
-  if (unverifiedPaths) snapshot.warnings.push(`${unverifiedPaths} 篇同步笔记的跨端路径尚未确认，未猜测出链目标。`);
-  if (missingBody) snapshot.warnings.push(`${missingBody} 篇笔记正文未保存在本机，已显示节点但无法计算其出链；没有联网补取。`);
+  if (unverifiedPaths) snapshot.warnings.push(`${unverifiedPaths} 篇笔记的链接路径尚未确认，相关连线暂未显示。`);
+  if (missingBody) snapshot.warnings.push(`${missingBody} 篇笔记正文未保存在手机，暂时只显示笔记节点，无法显示完整连线。`);
   if (conflictBody) snapshot.warnings.push(`${conflictBody} 篇笔记有本地冲突，图谱仅依据当前本机正文。`);
-  if (ambiguous) snapshot.warnings.push(`${ambiguous} 处链接名称不唯一，未猜测连接目标。`);
-  if (missingResources) snapshot.warnings.push(`${missingResources} 处附件尚未在本机验证完整，未假定为可用节点；可打开来源笔记查看。`);
+  if (ambiguous) snapshot.warnings.push(`${ambiguous} 处链接名称不唯一，相关连线暂未显示；请在来源笔记中明确目标。`);
+  const unresolvedResources = unindexedResources + unavailableResources;
+  if (unresolvedResources) {
+    const reasons = [
+      unindexedResources ? `${unindexedResources} 处未找到附件索引` : '',
+      unavailableResources ? `${unavailableResources} 处附件尚未通过本机可用性检查` : '',
+    ].filter(Boolean).join('，');
+    snapshot.warnings.push(`${unresolvedResources} 处附件引用暂未显示在图谱中：${reasons}。这是引用次数，不代表丢失的文件数；请打开来源笔记检查附件。`);
+  }
   return snapshot;
 }

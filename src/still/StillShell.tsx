@@ -361,7 +361,7 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
     <StillNavContext.Provider value={nav}>
       <RootSwipeContext.Provider value={{ canNavigate: canSwipeRoot, navigate: navigateRootSwipe, navigateLsh: navigateLshSwipe }}>
       <div ref={appRef} className="st-app" data-mode={mode} data-text-entry={editingText || (rootTab === "ai" && lshIme) ? "true" : undefined} data-reduced={reduced ? "true" : undefined}>
-        <LocalNoteImportBridge />
+        <LocalNoteImportBridge showEntry={!top} />
         <div
           data-swipe-owner="root" {...rootSwipe} style={{touchAction:"pan-y"}}
           className={"st-root-stage" + (top && !(leaving && pages.length === 1) ? " is-under" : "") + (leaving && pages.length === 1 ? " is-revealing" : "") + (maskUnderlay ? " is-masked" : "")}

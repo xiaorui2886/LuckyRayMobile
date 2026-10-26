@@ -687,6 +687,66 @@ pub(crate) fn migration_snapshot(db: &Connection) -> Result<Value, String> {
     Ok(json!({"version":1,"noteCount":note_count,"scopes":snapshots}))
 }
 
+/// Caller owns the DB mutex then file gate. Registration is an explicit,
+/// single-scope operation: never imports unrelated caches or legacy notes.
+pub(crate) fn enroll_scope(db: &Connection, store: &Store, instance: &str, vault: &str, name: &str) -> Result<String, String> {
+    if instance.is_empty() || vault.is_empty() { return Err("CONTENT_INPUT_INVALID".into()); }
+    recover_unlocked(db, store)?;
+    let scope = Scope { instance_id: instance.into(), vault_id: vault.into() };
+    if let Some(manifest) = bound(store, &scope)? { return Ok(manifest.local_vault_id); }
+    let id = format!(
+        "replica-{}",
+        managed_vault::hash(
+            serde_json::to_string(&scope)
+                .map_err(|e| e.to_string())?
+                .as_bytes()
+        )
+    );
+    let tx = Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
+        .map_err(fail)?;
+    let checkpoint = ScopeCheckpoint::capture(&tx, scope.clone())?;
+    let binding = Binding {
+        instance_id: scope.instance_id,
+        remote_vault_id: scope.vault_id,
+    };
+    // A crash can publish a verified replica before registry publication.
+    // Resume its exact generation/identities instead of synthesizing a
+    // fresh generation-zero manifest and losing the registration retry.
+    let manifest = if store.vault_root(&id)?.join("manifest.json").exists() {
+        let existing = store.manifest(&id)?;
+        if existing.binding.as_ref() != Some(&binding) {
+            return Err("MANAGED_SYNC_MIGRATION_BINDING_CHANGED".into());
+        }
+        for note in existing
+            .notes
+            .values()
+            .filter(|n| !n.trashed && n.body_state == "ready")
+        {
+            if store.get(&id, &note.note_id)?.body_state != "ready" {
+                return Err("VAULT_FILE_CHANGED".into());
+            }
+        }
+        existing
+    } else {
+        Manifest {
+            version: 1,
+            local_vault_id: id.clone(),
+            name: name.to_owned(),
+            binding: Some(binding),
+            checkpoint: Value::Null,
+            generation: 0,
+            notes: BTreeMap::new(),
+            folders: Vec::new(),
+        }
+    };
+    let (manifest, writes, retire) = checkpoint.materialize(&store, manifest)?;
+    // Read-only export: original SQLite rows/operations remain untouched.
+    store.commit_retire(manifest, writes, retire)?;
+    store.register(&id)?;
+    tx.commit().map_err(fail)?;
+    Ok(id)
+}
+
 pub(crate) fn migrate_replicas(db: &Connection) -> Result<Value, String> {
     let Some(store) = store(db)? else {
         return Ok(json!({"items":[]}));
@@ -715,56 +775,7 @@ pub(crate) fn migrate_replicas(db: &Connection) -> Result<Value, String> {
         if bound(&store, &scope)?.is_some() {
             continue;
         }
-        let id = format!(
-            "replica-{}",
-            managed_vault::hash(
-                serde_json::to_string(&scope)
-                    .map_err(|e| e.to_string())?
-                    .as_bytes()
-            )
-        );
-        let tx = Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
-            .map_err(fail)?;
-        let checkpoint = ScopeCheckpoint::capture(&tx, scope.clone())?;
-        let binding = Binding {
-            instance_id: scope.instance_id,
-            remote_vault_id: scope.vault_id,
-        };
-        // A crash can publish a verified replica before registry publication.
-        // Resume its exact generation/identities instead of synthesizing a
-        // fresh generation-zero manifest and losing the registration retry.
-        let manifest = if store.vault_root(&id)?.join("manifest.json").exists() {
-            let existing = store.manifest(&id)?;
-            if existing.binding.as_ref() != Some(&binding) {
-                return Err("MANAGED_SYNC_MIGRATION_BINDING_CHANGED".into());
-            }
-            for note in existing
-                .notes
-                .values()
-                .filter(|n| !n.trashed && n.body_state == "ready")
-            {
-                if store.get(&id, &note.note_id)?.body_state != "ready" {
-                    return Err("VAULT_FILE_CHANGED".into());
-                }
-            }
-            existing
-        } else {
-            Manifest {
-                version: 1,
-                local_vault_id: id.clone(),
-                name,
-                binding: Some(binding),
-                checkpoint: Value::Null,
-                generation: 0,
-                notes: BTreeMap::new(),
-                folders: Vec::new(),
-            }
-        };
-        let (manifest, writes, retire) = checkpoint.materialize(&store, manifest)?;
-        // Read-only export: original SQLite rows/operations remain untouched.
-        store.commit_retire(manifest, writes, retire)?;
-        store.register(&id)?;
-        tx.commit().map_err(fail)?;
+        let id = enroll_scope(db, &store, &scope.instance_id, &scope.vault_id, &name)?;
         items.push(id);
         failpoint(4)?;
     }
@@ -905,6 +916,36 @@ mod tests {
     }
     fn doc(rev: &str, body: &str) -> Value {
         json!({"noteId":"n","vaultId":"vault-a","title":"N","content":body,"relativePath":"N.md","revision":rev,"resources":[],"updatedAt":"2026-10-25","deleted":false})
+    }
+    #[test]
+    fn explicit_scope_enrollment_is_exact_idempotent_and_keeps_missing_bodies() {
+        let root = std::env::temp_dir().join(format!("managed-enrollment-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let mut db = crate::db::Db::open(&root.join("luckyray-mobile.db")).unwrap();
+        for instance in ["desktop-a", "desktop-b"] {
+            db.content_vault_remember(instance, "vault-a", "Same name").unwrap();
+            db.content_apply_batch(instance, "vault-a", &[json!({"noteId":"missing","vaultId":"vault-a","title":"Missing","revision":"r1"})], 1, None).unwrap();
+        }
+        let store = Store::new(&root).unwrap();
+        let id = {
+            let _g = managed_vault::lock().unwrap();
+            let row = db.managed_enroll_scope(&store, "desktop-a", "vault-a").unwrap();
+            let repeated = db.managed_enroll_scope(&store, "desktop-a", "vault-a").unwrap();
+            assert_eq!(row, repeated);
+            assert_eq!(store.list().unwrap()["items"].as_array().unwrap().len(), 1);
+            row["localVaultId"].as_str().unwrap().to_owned()
+        };
+        let note = store.get(&id, "missing").unwrap();
+        assert_eq!(note.body_state, "missing");
+        assert!(note.content.is_none());
+        assert_eq!(note.remote["resourcesComplete"], false);
+        assert_eq!(store.migration_status().unwrap()["state"], "not-migrated");
+        // Explicit registration of another same-named scope remains distinct.
+        let second = { let _g = managed_vault::lock().unwrap(); db.managed_enroll_scope(&store, "desktop-b", "vault-a").unwrap() };
+        assert_ne!(second["localVaultId"], id);
+        assert_eq!(store.list().unwrap()["items"].as_array().unwrap().len(), 2);
+        drop(db);
+        let _ = fs::remove_dir_all(root);
     }
     #[test]
     fn stage_without_sql_commit_never_publishes_speculative_body() {

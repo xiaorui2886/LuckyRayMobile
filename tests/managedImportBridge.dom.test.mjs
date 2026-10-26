@@ -11,11 +11,14 @@ const dir=await mkdtemp(path.join(repo,'tests/.managed-import-'));
 try {
  const source=await readFile(path.join(repo,'src/still/kit/LocalNoteImportBridge.tsx'),'utf8');
  const body=source.slice(source.indexOf('let picking:'));
- const code=`import {useEffect,useRef,useState,useSyncExternalStore} from 'react';
+ const code=`import {noteSourceSelection} from ${JSON.stringify(path.join(repo,'src/services/noteSourceSelection.ts'))};
+ import {buildKnowledgeVaultCatalog} from ${JSON.stringify(path.join(repo,'src/services/knowledgeVaultCatalog.ts'))};
+ import {useEffect,useRef,useState,useSyncExternalStore} from 'react';
  import {systemBarScrim} from ${JSON.stringify(path.join(repo,'src/services/systemBarAppearance.ts'))};
  import {ManagedImportIntents,snapshotManagedImportTarget,currentManagedImportTarget,setManagedImportTarget,invalidateManagedImportTarget} from ${JSON.stringify(path.join(repo,'src/services/managedImportIntents.ts'))};
  const api=globalThis.__import.api,managedVault=globalThis.__import.managedVault;
- const useStillNav=()=>({open:(...args)=>{globalThis.__import.opens.push(args);globalThis.__import.onOpen?.();}});
+ const Sheet=({children})=><div role="dialog">{children}</div>;
+ const useStillNav=()=>({registerOverlay:()=>()=>{},open:(...args)=>{globalThis.__import.opens.push(args);globalThis.__import.onOpen?.();}});
  const listen=async()=>()=>{}; const toast={error:()=>{},success:()=>{}};const noteImportFailure=()=>'';const localDataStore={publish:()=>{}};
  const managedNoteRoute=(v,n)=>'vault:'+v+':'+n;
  ${body}
@@ -39,9 +42,15 @@ try {
  const staleLaunch=bridge.pickLocalNoteFile();bridge.invalidateManagedImportTarget();bridge.setManagedImportTarget('B');
  receipts=[receipt(2)];await act(async()=>{release({status:'launched',requestId:id(2)});await staleLaunch;await new Promise(ok=>setTimeout(ok,0));});
  assert.equal(adopted.length,1,'source switch must retire automatic grant');assert.equal(acks.length,1,'unadopted receipt must survive');
+ await act(async()=>root.render(React.createElement(bridge.LocalNoteImportBridge,{showEntry:false})));
+ assert.equal(document.querySelector('.st-import-inbox-trigger'),null,'detail pages hide the inbox entry instead of covering editor controls');
+ assert.equal(acks.length,1,'hidden entry retains unresolved receipt');
+ await act(async()=>root.render(React.createElement(bridge.LocalNoteImportBridge,{showEntry:true})));
+ assert(document.querySelector('.st-import-inbox-trigger'),'returning to root restores pending import access');
+ await act(async()=>document.querySelector(".st-import-inbox-trigger").click());
  assert(document.querySelector('select[aria-label="导入目标笔记库"]'));assert.equal(document.querySelector('select').value,'','recovery must never guess selected vault');
  let releaseModal;await act(async()=>{releaseModal=bridge.systemBarScrim.acquire();});
- assert.equal(document.querySelector('.st-import-notice'),null,'pending import must not cover a migration or editor sheet');
+ assert.equal(document.querySelector('.st-import-inbox-trigger'),null,'pending import must not cover a migration or editor sheet');
  assert.equal(acks.length,1,'hiding the notice must retain the unadopted receipt');
  await act(async()=>releaseModal());
  assert.equal(document.querySelector('select').value,'','closing a modal restores the explicit unselected target');
@@ -52,7 +61,7 @@ try {
  assert.deepEqual(adopted[1],['B',receipt(2).noteId,'']);assert.equal(acks.length,2);
  receipts=[{...receipt(3),source:'view'}];await flush();assert.equal(adopted.length,2,'ACTION_VIEW never inherits selected vault');
  aliases.set(receipt(3).noteId,{localVaultId:'A',noteId:'existing'});
- await flush();assert.equal(adopted.length,2,'exact replay resolves alias without new adoption');assert.equal(acks.length,3);assert.equal(opens.at(-1)[1],'vault:A:existing');
+ await flush();assert.equal(adopted.length,2,'exact replay resolves alias without new adoption');assert.equal(acks.length,3);assert.notEqual(opens.at(-1)[1],'vault:A:existing','background alias replay must not navigate to a different vault');
  const cancelled=bridge.pickLocalNoteFile();receipts=[{requestId:id(4),source:'picker',status:'cancelled'}];
  await act(async()=>{release({status:'launched',requestId:id(4)});await cancelled;await new Promise(ok=>setTimeout(ok,0));});
  assert(acks.includes(id(4)));assert.equal(adopted.length,2,'cancel never adopts');

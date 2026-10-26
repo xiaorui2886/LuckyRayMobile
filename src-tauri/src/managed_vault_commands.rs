@@ -21,6 +21,47 @@ fn source(db: &crate::db::Db) -> Result<Value, String> {
     Ok(json!({"version":1,"notes":notes,"folders":db.note_folders()?,"history":history,"replicas":db.managed_migration_snapshot()?}))
 }
 #[tauri::command]
+pub(crate) fn managed_vault_create(app: tauri::AppHandle, state: State<'_, SharedState>, name: Option<String>, request_id: String) -> Result<Value, String> {
+    with_db(&state, |db| {
+        db.managed_recover()?;
+        let _g = managed_vault::lock()?;
+        store(&app)?.create_vault(name.as_deref().unwrap_or("笔记"), &request_id)
+    })
+}
+
+/// User-confirmed enrollment. Reuse the existing current-pair, scope-protocol,
+/// read-permission and offline preparation admission; a binding grants no ACL.
+#[tauri::command]
+pub(crate) async fn managed_vault_sync_to_phone(app: tauri::AppHandle, state: State<'_, SharedState>, instance: String, vault: String) -> Result<Value, String> {
+    // An already registered local copy needs no second network admission.
+    // This also makes retry-after-response-loss work offline, without resetting
+    // preparation generations, resuming pauses, or granting fresh write access.
+    let existing = with_db(&state, |db| {
+        if db.paired()?.is_none_or(|p| p.instance_id != instance) { return Err("CONTENT_SOURCE_CHANGED".into()); }
+        db.managed_recover()?;
+        // Historical cache migration could register a binding without the
+        // user's download confirmation. Such a scope still needs admission.
+        if !db.offline_selected(&instance, &vault)? { return Ok(None); }
+        let _g = managed_vault::lock()?;
+        let list = store(&app)?.list()?;
+        let matches: Vec<Value> = list["items"].as_array().ok_or("VAULT_REGISTRY_INVALID")?.iter()
+            .filter(|row| row["binding"]["instanceId"] == instance && row["binding"]["remoteVaultId"] == vault)
+            .cloned().collect();
+        if matches.len() > 1 { return Err("MANAGED_SYNC_BINDING_AMBIGUOUS".into()); }
+        Ok(matches.into_iter().next())
+    })?;
+    if let Some(existing) = existing { return Ok(existing); }
+    crate::content::notes::offline::content_offline_control(state.clone(), instance.clone(), vault.clone(), "start".into()).await?;
+    with_db(&state, |db| {
+        if db.paired()?.is_none_or(|p| p.instance_id != instance) { return Err("CONTENT_SOURCE_CHANGED".into()); }
+        if !db.offline_selected(&instance, &vault)? { return Err("CONTENT_OFFLINE_NOT_SELECTED".into()); }
+        db.managed_recover()?;
+        let _g = managed_vault::lock()?;
+        db.managed_enroll_scope(&store(&app)?, &instance, &vault)
+    })
+}
+
+#[tauri::command]
 pub(crate) fn managed_vault_list(
     app: tauri::AppHandle,
     state: State<'_, SharedState>,
@@ -232,7 +273,7 @@ pub(crate) async fn managed_vault_note_trash(
             if note.revision != expected_revision {
                 return Err("VAULT_REVISION_CONFLICT".into());
             }
-            let binding = store.manifest(&local_vault_id)?.binding;
+            let binding = store.writable_manifest(&local_vault_id)?.binding;
             if binding.is_none() {
                 store.trash(&local_vault_id, &note_id, &expected_revision)?;
             }

@@ -256,6 +256,35 @@ impl Store {
         }
         read_json(&self.root, "registry.json")
     }
+    /// Explicit new library, deliberately separate from the legacy "local"
+    /// migration identity. Creating one never adopts or hides old data.
+    pub(crate) fn create_vault(&self, name: &str, request_id: &str) -> Result<Value, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 120 || name.chars().any(char::is_control) {
+            return Err("VAULT_NAME_INVALID".into());
+        }
+        if request_id.is_empty() || request_id.len() > 160 || !request_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err("VAULT_REQUEST_INVALID".into());
+        }
+        let id = format!("vault-{}", hash(request_id.as_bytes()));
+        // Recover an interrupted publication before inspecting the intent.
+        self.recover(&id)?;
+        if self.vault_root(&id)?.join("manifest.json").exists() {
+            let existing = self.manifest(&id)?;
+            if existing.name != name || existing.binding.is_some() { return Err("VAULT_REQUEST_CHANGED".into()); }
+            self.register(&id)?;
+            return self.vault_summary(&id);
+        }
+        self.commit(Manifest { version: 1, local_vault_id: id.clone(), name: name.into(),
+            binding: None, checkpoint: Value::Null, generation: 0,
+            notes: BTreeMap::new(), folders: Vec::new() }, BTreeMap::new())?;
+        self.register(&id)?;
+        self.vault_summary(&id)
+    }
+    pub(crate) fn vault_summary(&self, id: &str) -> Result<Value, String> {
+        self.list()?["items"].as_array().and_then(|rows| rows.iter().find(|row| row["localVaultId"] == id))
+            .cloned().ok_or_else(|| "VAULT_NOT_FOUND".into())
+    }
     pub(crate) fn register(&self, id: &str) -> Result<(), String> {
         let mut r = self.registry()?;
         if !r.vault_ids.iter().any(|v| v == id) {
@@ -541,7 +570,7 @@ impl Store {
         Ok(n)
     }
     fn checked(&self, id: &str, note_id: &str, rev: &str) -> Result<(Manifest, Note), String> {
-        Self::check_writable(&self.manifest(id)?)?;
+        self.check_writable(&self.manifest(id)?)?;
         let n = self.get(id, note_id)?;
         if n.remote["transferredTo"].is_object() { return Err("VAULT_NOTE_TRANSFERRED".into()); }
         if n.remote["transferPending"].is_object() { return Err("VAULT_NOTE_TRANSFER_PENDING".into()); }
@@ -553,9 +582,26 @@ impl Store {
         }
         Ok((self.manifest(id)?, n))
     }
-    fn check_writable(m: &Manifest) -> Result<(), String> {
+    pub(crate) fn writable_manifest(&self, id: &str) -> Result<Manifest, String> {
+        let manifest = self.manifest(id)?;
+        self.check_writable(&manifest)?;
+        Ok(manifest)
+    }
+    fn check_writable(&self, m: &Manifest) -> Result<(), String> {
         if m.checkpoint["transfer"]["state"] == "completed" { return Err("VAULT_TRANSFERRED".into()); }
         if m.checkpoint["transfer"]["state"] == "pending" { return Err("VAULT_TRANSFER_PENDING".into()); }
+        if let Some(binding) = &m.binding {
+            if binding.instance_id.trim().is_empty() || binding.remote_vault_id.trim().is_empty()
+                || binding.instance_id.chars().any(char::is_control) || binding.remote_vault_id.chars().any(char::is_control) {
+                return Err("VAULT_BINDING_INVALID".into());
+            }
+            let mut matching = 0;
+            for id in self.registry()?.vault_ids {
+                let other = self.manifest(&id)?;
+                if other.binding.as_ref() == Some(binding) { matching += 1; }
+            }
+            if matching != 1 { return Err("MANAGED_SYNC_BINDING_AMBIGUOUS".into()); }
+        }
         Ok(())
     }
     pub(crate) fn path(folder: &str, title: &str, note_id: &str) -> Result<String, String> {
@@ -603,7 +649,7 @@ impl Store {
         folder: &str,
     ) -> Result<Note, String> {
         let mut m = self.manifest(id)?;
-        Self::check_writable(&m)?;
+        self.check_writable(&m)?;
         if m.binding.is_some() {
             return Err("VAULT_REMOTE_SAVE_REQUIRES_BRIDGE".into());
         }
@@ -767,7 +813,7 @@ impl Store {
             return Err("VAULT_PATH_INVALID".into());
         }
         let mut m = self.manifest(id)?;
-        Self::check_writable(&m)?;
+        self.check_writable(&m)?;
         if !parent.is_empty() && !m.folders.iter().any(|v| v == parent) {
             return Err("VAULT_FOLDER_NOT_FOUND".into());
         }
@@ -1159,6 +1205,57 @@ mod tests {
             .unwrap();
     }
     #[test]
+    fn invalid_or_ambiguous_binding_is_readable_but_never_writable() {
+        let (root, store, source) = fixture();
+        migrate(&store, &source);
+        let independent = store.create_vault("独立库", "independent-request").unwrap();
+        let independent_id = independent["localVaultId"].as_str().unwrap();
+        let mut m = store.manifest("local").unwrap();
+        m.binding = Some(Binding { instance_id: "".into(), remote_vault_id: "v".into() });
+        store.commit(m, BTreeMap::new()).unwrap();
+        assert_eq!(store.writable_manifest("local").err().unwrap(), "VAULT_BINDING_INVALID");
+        let note = store.get("local", "note-one").unwrap();
+        assert!(note.content.is_some());
+        assert!(store.flags("local", "note-one", &note.revision, &json!({"pinned":false})).is_err());
+        assert!(store.create(independent_id, "safe", "body", vec![], "").is_ok());
+        let binding = Binding { instance_id: "A".into(), remote_vault_id: "v".into() };
+        let mut m = store.manifest("local").unwrap(); m.binding = Some(binding.clone());
+        store.commit(m, BTreeMap::new()).unwrap();
+        let other = store.create_vault("副本", "duplicate-request").unwrap();
+        let mut duplicate = store.manifest(other["localVaultId"].as_str().unwrap()).unwrap(); duplicate.binding = Some(binding);
+        store.commit(duplicate, BTreeMap::new()).unwrap();
+        assert_eq!(store.writable_manifest("local").err().unwrap(), "MANAGED_SYNC_BINDING_AMBIGUOUS");
+        assert!(store.get("local", "note-one").unwrap().content.is_some());
+        assert!(store.writable_manifest(independent_id).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn create_normal_library_never_adopts_legacy_migration_identity() {
+        let (root, store, source) = fixture();
+        let row = store.create_vault(" 我的笔记 ", "request-a").unwrap();
+        assert_eq!(row["name"], "我的笔记");
+        assert_eq!(row["noteCount"], 0);
+        assert_eq!(store.create_vault("我的笔记", "request-a").unwrap(), row);
+        assert!(store.create_vault("另一个名字", "request-a").is_err());
+        assert!(store.create_vault("我的笔记", "../bad").is_err());
+        let other = store.create_vault("我的笔记", "request-b").unwrap();
+        assert_ne!(other["localVaultId"], row["localVaultId"]);
+        // Simulated crash after manifest publication, before registration.
+        let mut registry = store.registry().unwrap();
+        registry.vault_ids.retain(|id| id != row["localVaultId"].as_str().unwrap());
+        write_atomic(&store.root, "registry.json", &json_bytes(&registry).unwrap()).unwrap();
+        assert_eq!(store.create_vault("我的笔记", "request-a").unwrap(), row);
+        assert!(row["binding"].is_null());
+        assert_ne!(row["localVaultId"], "local");
+        assert_eq!(store.migration_status().unwrap()["state"], "not-migrated");
+        assert!(store.create_vault(" ", "request-b").is_err());
+        assert!(store.create_vault("bad\nname", "request-b").is_err());
+        migrate(&store, &source);
+        assert_eq!(store.list().unwrap()["items"].as_array().unwrap().len(), 3);
+        assert!(store.get("local", "note-one").unwrap().content.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn migration_preserves_ids_duplicates_empty_body_metadata_and_source() {
         let (root, s, source) = fixture();
         migrate(&s, &source);
@@ -1351,7 +1448,7 @@ impl Store {
             return Err("VAULT_IMPORT_TARGET_CHANGED".into());
         }
         let mut m = self.manifest(id)?;
-        Self::check_writable(&m)?;
+        self.check_writable(&m)?;
         if m.binding.is_some() {
             return Err("VAULT_IMPORT_BOUND_TARGET_NOT_READY".into());
         }

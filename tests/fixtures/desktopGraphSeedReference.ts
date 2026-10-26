@@ -169,4 +169,3 @@ export function buildRealVaultGraphSeed(index: BridgeNotesVaultMarkdownIndex, em
 
   return { source: "real", sourceKind: "real-vault", nodes, edges, edgeKinds, edgeDirections };
 }
-

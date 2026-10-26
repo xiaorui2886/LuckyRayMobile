@@ -1,0 +1,93 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+const require = createRequire(import.meta.url);
+const tools = createRequire(path.join(process.env.LR_TEST_TOOLS || (process.env.LR_DOM_TEST_TOOLS ? path.resolve(process.env.LR_DOM_TEST_TOOLS, '..') : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.test-tools')), '__test.cjs'));
+const { JSDOM } = tools('jsdom');
+const { build } = createRequire(require.resolve('vite/package.json'))('esbuild');
+const repo = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const temporary = await mkdtemp(path.join(repo, 'tests/.unified-notes-'));
+try {
+  await build({ stdin: { contents: `export { UnifiedNotesRoot } from './src/still/kit/UnifiedNotesView'; export {SourceSwitch} from './src/presentation/still01/Still'; export {snapshotManagedImportTarget} from './src/services/managedImportIntents'; export {noteSourceSelection} from './src/services/noteSourceSelection';`, resolveDir: repo, loader: 'tsx' }, outfile: path.join(temporary, 'test.mjs'), bundle: true, format: 'esm', platform: 'node', jsx: 'automatic', loader: { '.css': 'empty' }, plugins: [{ name: 'test-host-seams', setup(b) {
+    b.onResolve({ filter: /^(react|react\/jsx-runtime|react-dom|react-dom\/client)$/ }, a => ({ path: pathToFileURL(require.resolve(a.path)).href, external: true }));
+    // Canvas has its own real-render/gesture suite; this suite tests authority wiring, not jsdom graphics.
+    b.onResolve({ filter: /MobileGraphCanvas$/ }, () => ({ path: 'canvas', namespace: 'fake' }));
+    b.onResolve({ filter: /StillShell$/ }, () => ({ path: 'nav', namespace: 'fake' }));
+    b.onResolve({ filter: /^@tauri-apps\/api\/core$/ }, () => ({ path: 'native', namespace: 'fake' }));
+    b.onLoad({ filter: /.*/, namespace: 'fake' }, a => ({ contents: a.path === 'canvas' ? 'import {forwardRef,useImperativeHandle} from "react"; export const MobileGraphCanvas=forwardRef((props,ref)=>{globalThis.__graphSeed=props.seed;globalThis.__graphProps=props;useImperativeHandle(ref,()=>({fit(){},reset(){},zoomBy(){},capture(){return Promise.reject(new Error("not exercised"))}}));return null;});' : a.path === 'nav' ? 'export const useStillNav=()=>({open:(...args)=>globalThis.__opens.push(args),registerOverlay:()=>()=>{}})' : 'export const invoke=(...args)=>globalThis.__invoke(...args);export const convertFileSrc=(v)=>v; export const isTauri=()=>false;', loader: 'js' }));
+  } }] });
+  const dom = new JSDOM('<!doctype html><div class="st-app" data-reduced="true"><div id="root"></div></div>', { url: 'https://test.invalid' });
+  for (const name of ['window','document','HTMLElement','Event','MouseEvent','CustomEvent','KeyboardEvent','HTMLInputElement','HTMLTextAreaElement','localStorage','navigator']) Object.defineProperty(globalThis, name, { value: dom.window[name], configurable: true });
+  globalThis.requestAnimationFrame = callback => setTimeout(callback, 0); globalThis.cancelAnimationFrame = clearTimeout;
+  window.matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListener() {} });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.__opens = [];
+  const React = await import('react'); const { act } = React; const { createRoot } = await import('react-dom/client');
+  const { UnifiedNotesRoot, SourceSwitch, snapshotManagedImportTarget, noteSourceSelection } = await import(pathToFileURL(path.join(temporary, 'test.mjs')).href);
+  const calls=[]; let items=[], selectedVaultId=null, slowA=null;
+  const vault=(id,binding=null)=>({localVaultId:id,name:'Same name',migrationState:'ready',noteCount:1,binding});
+  const note=id=>({localVaultId:id,noteId:'shared-id',title:'Body '+id,bodyState:'ready',content:'Local '+id,relativePath:'note.md',folder:'',revision:'r1',tags:[],pinned:false,favorite:false,archived:false,syncState:'local'});
+  globalThis.__invoke=async(name,args)=>{
+    calls.push([name,args]);
+    if(name==='managed_vault_list') return {items,selectedVaultId};
+    if(name==='managed_vault_migration_status') return {state:'not-migrated',noteCount:3,warnings:[]};
+    if(name==='managed_vault_note_list') {if(args.query.localVaultId==='a'&&slowA)return slowA;return {items:[note(args.query.localVaultId)],total:1,hasMore:false};}
+    if(name==='managed_vault_link_catalog')return {items:[note(args.localVaultId)]};
+    if(name==='managed_vault_folders')return {paths:[]};
+    if(name==='managed_vault_create'){const created={...vault('created'),name:args.name};items=[created];selectedVaultId='created';return created;}
+    if(name==='managed_vault_select'){selectedVaultId=args.localVaultId;return;}
+    throw Error('Unexpected native command '+name);
+  };
+  const legacy=()=>React.createElement('div',{'data-legacy':true},'LEGACY READER');
+  let root=createRoot(document.getElementById('root'));
+  const settle=()=>new Promise(r=>setTimeout(r,30));
+  const render=()=>act(async()=>{root.render(React.createElement(UnifiedNotesRoot,{legacy}));await settle();});
+  const button=text=>[...document.querySelectorAll('button')].findLast(x=>x.textContent.trim()===text||x.getAttribute('aria-label')===text);
+  const click=async text=>{assert.ok(button(text),'button '+text);await act(async()=>{button(text).dispatchEvent(new MouseEvent('click',{bubbles:true}));await settle();});};
+  await render();
+  assert.match(document.body.textContent,/选择你的知识库/);
+  assert.equal(document.querySelector('[data-legacy]'),null,'existing legacy data is not a third default mode');
+  assert.ok(calls.every(([n])=>['managed_vault_list','managed_vault_migration_status'].includes(n)),'empty initial entry never migrates/registers/downloads');
+  await click('添加知识库');
+  assert.match(document.body.textContent,/新建空库不会搬移或覆盖已有笔记/);
+  assert.ok(!calls.some(([n])=>/prepare|commit|create|sync/.test(n)),'opening setup has no writes');
+  await click('创建知识库');
+  assert.match(document.body.textContent,/Body created/,'explicit create selects newly created library despite old migration status');
+  assert.equal(calls.filter(([n])=>n==='managed_vault_create').length,1);
+  assert.ok(!calls.some(([n])=>/migration_(prepare|commit)/.test(n)),'creating a new vault does not implicitly upgrade old data');
+  await act(async()=>root.unmount()); root=createRoot(document.getElementById('root'));
+  items=[vault('a',{instanceId:'desktop-one',remoteVaultId:'remote'}),vault('b',{instanceId:'desktop-two',remoteVaultId:'remote'})];selectedVaultId='a';
+  noteSourceSelection.select({kind:'desktop',instanceId:'desktop-two',vaultId:'remote'});
+  await render();
+  assert.match(document.body.textContent,/Body b/);assert.doesNotMatch(document.body.textContent,/Body a/);
+  assert.deepEqual(noteSourceSelection.snapshot().selection,{kind:'managed',localVaultId:'b'},'desktop identity resolves only its exact managed replica');
+  assert.equal(snapshotManagedImportTarget()?.localVaultId,'b');
+  await click('图谱'); await act(settle);
+  assert.equal(snapshotManagedImportTarget(),null);
+  assert.deepEqual(globalThis.__graphSeed.nodes.map(n=>({key:n.key,label:n.label})),[{key:'note:mobile:b:shared-id',label:'Body b'}],'actual graph adapter schema identifies only managed B');
+  await act(async()=>globalThis.__graphProps.onOpen('note:mobile:b:shared-id'));
+  assert.equal(globalThis.__opens.at(-1)[1],'vault:b:shared-id','actual graph lookup produces exact local editor route');
+  assert.ok(!calls.some(([n])=>n==='content_graph_cache'),'no second desktop-cache catalog is read');
+  await click('笔记');assert.match(document.body.textContent,/Body b/);
+  let finishA;slowA=new Promise(r=>finishA=r);
+  await act(async()=>{noteSourceSelection.select({kind:'managed',localVaultId:'a'});await settle();});
+  assert.doesNotMatch(document.body.textContent,/Body b/,'no old body under new current vault');
+  await act(async()=>{noteSourceSelection.select({kind:'managed',localVaultId:'b'});await settle();});
+  await act(async()=>{finishA({items:[note('a')],total:1,hasMore:false});await settle();});
+  assert.match(document.body.textContent,/Body b/);assert.doesNotMatch(document.body.textContent,/Body a/,'late A response cannot replace B');
+  items=[...items,vault('duplicate-b',{instanceId:'desktop-two',remoteVaultId:'remote'})];
+  await act(async()=>{window.dispatchEvent(new Event('luckyray:managed-vault-change'));await settle();});
+  assert.equal(button('新建笔记').disabled,true,'ambiguous binding cannot create');
+  assert.equal(snapshotManagedImportTarget(),null,'ambiguous read-only binding cannot own asynchronous file imports');
+  await click('图谱');await act(settle);
+  await act(async()=>globalThis.__graphProps.onSelect('note:mobile:b:shared-id'));
+  assert.equal(button('编辑标签'),undefined,'ambiguous read-only graph cannot offer mutations');
+  assert.equal(button('添加关联'),undefined);
+  await click('笔记');
+  await act(async()=>{noteSourceSelection.select({kind:'managed',localVaultId:'deleted'});await settle();});
+  assert.match(document.body.textContent,/所选知识库不可用/);assert.doesNotMatch(document.body.textContent,/Body [ab]/,'missing current never silently falls back');
+  await act(async()=>root.unmount());dom.window.close();
+  console.log('PASS unified-vault real ReactDOM: empty no writes/auto migration, exact binding -> Notes -> Graph -> Notes same local body, stale request fence, missing current no fallback. Native IPC and Canvas mocked; Android/device NOT_RUN.');
+} finally {await rm(temporary,{recursive:true,force:true});}

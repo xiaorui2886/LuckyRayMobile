@@ -1,5 +1,6 @@
 import type { ManagedWikiParseInput, ManagedWikiProof } from "../still/kit/managedWikiProof";
 import { invoke } from "@tauri-apps/api/core";
+import { secureUuidV4 } from "./secureUuid.ts";
 
 /** Managed local files are authoritative. Binding grants no new network authority. */
 export interface VaultBinding { instanceId: string; remoteVaultId: string }
@@ -96,6 +97,12 @@ function committed<T>(kind: ManagedVaultMutation["kind"], localVaultId: string, 
   });
 }
 export const managedVault = {
+  createVault: (name = "笔记", requestId: string = secureUuidV4()) => invoke<ManagedVault>("managed_vault_create", { name, requestId }),
+  syncToPhone: async (instance: string, vault: string): Promise<ManagedVault> => {
+    const result = await invoke<ManagedVault>("managed_vault_sync_to_phone", { instance, vault });
+    if (result.binding) bindings.set(result.localVaultId, result.binding);
+    return result;
+  },
   list: () => invoke<{ items: ManagedVault[]; selectedVaultId: string | null }>("managed_vault_list").then(result => { bindings.clear(); for (const vault of result.items) { if (vault.binding) bindings.set(vault.localVaultId, vault.binding); } return result; }),
   syncTargets: (instance: string) => invoke<{ items: Array<{ instanceId: string; vaultId: string; localVaultId: string; pendingCount: number }> }>("managed_vault_sync_targets", { instance }),
   transferPreview: (sourceVaultId: string, targetVaultId: string) => invoke<ManagedTransferPreview>("managed_vault_transfer_preview", { sourceVaultId, targetVaultId }),

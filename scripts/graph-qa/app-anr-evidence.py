@@ -2,7 +2,7 @@
 import json,os,pathlib,re,subprocess,sys
 PACKAGE='com.luckyray.mobile'
 def redact(lines,limit=100):
-    return ['[credential-related line redacted]' if re.search(r'token|secret|password|authorization|credential|jwt|cookie',s,re.I) else s[:1000] for s in lines[:limit]]
+    return ['[credential-related line redacted]' if re.search(r'token|secret|password|authorization|credential|jwt|cookie|bearer|pairing|payload|\bfp\b',s,re.I) else s[:1000] for s in lines[:limit]]
 def package_anr_blocks(text):
     selected=[];active=False;count=0
     for line in text.splitlines():

@@ -7,3 +7,17 @@
 .st-import-notice.is-recovery{flex-wrap:wrap}
 .st-import-notice.is-recovery>span{flex-basis:100%;white-space:normal;overflow-wrap:anywhere}
 .st-import-notice.is-recovery>select{flex:1;min-width:0;max-width:100%;min-height:44px;font:inherit;color:var(--st-ink);background:var(--st-surface);border:1px solid var(--st-line);border-radius:8px}
+
+/* An inbox entry, not a second bottom sheet covering the graph selection card. */
+.st-import-inbox-trigger{position:absolute;top:var(--st-safe-top,0px);left:var(--st-page-x,16px);z-index:70;display:flex;align-items:center;max-width:min(60%,260px);min-height:44px;padding:8px 12px;border:1px solid var(--st-line);border-radius:999px;background:var(--st-sheet);color:var(--st-accent);box-shadow:0 2px 10px #0000000d;font:inherit;font-size:12px;line-height:1.4;white-space:normal;overflow-wrap:anywhere;text-align:left}
+.st-import-inbox-trigger:focus-visible{outline:2px solid var(--st-accent);outline-offset:2px}
+.st-legacy-recovery-heading{display:flex;align-items:center;flex-wrap:wrap;padding:4px var(--st-page-x,16px);font-size:12px;color:var(--st-secondary)}
+.st-legacy-recovery-heading button{min-height:44px;padding:8px 10px;color:var(--st-accent);font:inherit}
+
+/* Bridge precedes the root stage in the shell. Reserve an actual header row
+   instead of covering graph sources or node actions; detail pages hide entry. */
+.st-import-inbox-trigger ~ .st-root-stage{top:44px;height:calc(100% - 44px)}
+.st-legacy-recovery-heading>*+*{margin-left:8px}
+.st-import-inbox-recovery>*,.st-import-inbox-receipt>*{display:block;margin-bottom:12px}
+.st-import-inbox-recovery select{width:100%;min-height:44px;font:inherit}
+.st-import-inbox-recovery button,.st-import-inbox-receipt button{min-height:44px;color:var(--st-accent);font:inherit}
