@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,writeFileSync,mkdtempSync,rmSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdtempSync,rmSync,mkdirSync,chmodSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
@@ -21,7 +21,32 @@ test('actual reuse guard rejects changed run/attempt/API/profile and missing pro
 test('normal-shutdown marker is after driver and failed runs do not publish it',()=>{
  assert.ok(source.indexOf('"$GRAPH_TEST_DRIVER"\n')<source.indexOf("<<'PY_MARKER'"));
  assert.ok(source.indexOf('wait "$pid"')<source.indexOf("<<'PY_MARKER'"));
- assert.match(source,/\[\[ "\$phase" != preflight \]\] \|\| wipe_args=\(-wipe-data\)/);
  assert.match(source,/packages=\$\([^\n]+\) \|\| exit 3/);
  assert.ok(!source.includes('-no-snapshot -wipe-data'));
+});
+
+// Execute the production launch block, not a reimplementation or regex check.
+// On macOS CI this explicitly uses Apple's /bin/bash (3.2), before any APK build.
+test('real emulator argv: only preflight wipes; installed reopens without wipe under nounset',()=>{
+ const shell=process.env.GRAPH_QA_TEST_BASH || '/bin/bash';
+ const version=spawnSync(shell,['--version'],{encoding:'utf8'});
+ assert.equal(version.status,0); console.log(version.stdout.split('\n')[0]);
+ const launch=source.split('echo GRAPH_QA_PHASE_START_emulator_boot\n')[1]?.split('\nreport_boot_failure() {')[0];
+ assert.ok(launch?.includes('pid=$!'),'production launch block found');
+ const dir=mkdtempSync(join(tmpdir(),'avd argv contract '));
+ try {
+  const sdk=join(dir,'sdk with spaces'); mkdirSync(join(sdk,'emulator'),{recursive:true});
+  const stub=join(sdk,'emulator','emulator');
+  writeFileSync(stub,`#!/bin/bash\nset -eu\nprintf '%s\\0' "$@" > "$CAPTURE"\n`); chmodSync(stub,0o755);
+  for(const phase of ['preflight','installed']) {
+   const capture=join(dir,phase+'.argv');
+   const result=spawnSync(shell,['-c','set -euo pipefail\n'+launch+'\nwait "$pid"\n','contract','unexpected-inherited-argument'],{
+    env:{...process.env,ANDROID_HOME:sdk,RUNNER_TEMP:dir,CAPTURE:capture,phase,name:'synthetic avd',accel:'on'},encoding:'utf8'
+   });
+   assert.equal(result.status,0,phase+': '+result.stderr);
+   const argv=readFileSync(capture,'utf8').split('\0'); assert.equal(argv.pop(),'');
+   assert.deepEqual(argv,['-avd','synthetic avd','-accel','on','-port','5554','-no-window','-no-audio','-no-snapshot',
+    ...(phase==='preflight'?['-wipe-data']:[]),'-gpu','software','-memory','3072','-partition-size','4096','-no-boot-anim'],phase);
+  }
+ }finally{rmSync(dir,{recursive:true,force:true});}
 });

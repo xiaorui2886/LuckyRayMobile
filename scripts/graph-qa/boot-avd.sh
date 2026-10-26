@@ -93,9 +93,10 @@ print('GRAPH_QA_AVD_RESOURCES '+json.dumps(values))
 PY_RESOURCES
 fi
 echo GRAPH_QA_PHASE_START_emulator_boot
-wipe_args=()
-[[ "$phase" != preflight ]] || wipe_args=(-wipe-data)
-"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot "${wipe_args[@]}" -gpu software -memory 3072 -partition-size 4096 -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
+# Positional parameters remain safe under nounset in macOS /bin/bash 3.2.
+set --
+if [[ "$phase" == preflight ]]; then set -- -wipe-data; fi
+"$ANDROID_HOME/emulator/emulator" -avd "$name" -accel "$accel" -port 5554 -no-window -no-audio -no-snapshot "$@" -gpu software -memory 3072 -partition-size 4096 -no-boot-anim > "${RUNNER_TEMP:?}/graph-emulator.log" 2>&1 &
 pid=$!
 report_boot_failure() {
   # Only pre-install synthetic emulator startup diagnostics, no app logcat/environment.
@@ -138,7 +139,7 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 booted=no
 start=$SECONDS
 while (( SECONDS - start < boot_limit )); do
-  kill -0 "$pid" 2>/dev/null || { echo "Emulator exited during $GRAPH_EMULATION_MODE boot; unsupported configuration or startup failure, not test success" >&2; report_boot_failure; exit 3; }
+  kill -0 "$pid" 2>/dev/null || { echo "Emulator exited during $GRAPH_EMULATION_MODE boot; startup failed; inspect shell and emulator diagnostics before classifying the cause, not test success" >&2; report_boot_failure; exit 3; }
   if [[ "$(python3 "$(dirname "$0")/deadline.py" 8 adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == 1 ]]; then booted=yes; break; fi
   sleep 2
 done

@@ -91,7 +91,7 @@ try {
   assert.doesNotMatch(document.querySelector('.st-scroll').textContent, /Alpha/, 'A cannot render under B while B awaits');
   await act(async () => deferredB.resolve({ items: [note('b','Beta','missing')], total: 1, hasMore: false }));
   assert.match(document.body.textContent, /Beta/);
-  assert.match(document.body.textContent, /等待确认同步状态/, 'registration alone never claims download or sync completion');
+  assert.match(document.body.textContent, /原电脑未连接 · 可使用已保存的笔记/, 'unpaired registration never requests coverage or claims sync completion');
   const row = document.querySelector('.st-note-row'); await act(async () => row.dispatchEvent(new MouseEvent('click', { bubbles: true })));
   assert.equal(globalThis.__opens.at(-1)[1], 'vault:b:same'); assert.equal(globalThis.__opens.at(-1)[2].edit, false, 'missing body never opens editable empty document');
   assert.equal(button('导入笔记文件').disabled, false, 'bound vault import is available offline');

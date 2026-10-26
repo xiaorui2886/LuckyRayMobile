@@ -40,6 +40,13 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - name: Native Bash launch-argument contract before emulator and APK build
+        run: |
+          /bin/bash --version
+          GRAPH_QA_TEST_BASH=/bin/bash node --test scripts/graph-qa/boot-contract.test.mjs || {
+            echo 'GRAPH_QA_HARNESS_SHELL_CONTRACT_FAILED: shell/launcher compatibility; app not built or tested' >&2
+            exit 3
+          }
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         with:
           distribution: temurin
@@ -62,6 +69,10 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal
           rustup default 1.95.0
           rustup target add x86_64-linux-android
+      - name: Check synthetic peer and driver contracts before APK build
+        run: |
+          export UNIFIED_PEER_WS_MODULE="$GITHUB_WORKSPACE/scripts/graph-qa/tools/node_modules/ws/index.js"
+          node --test scripts/graph-qa/unified-expressions.test.mjs scripts/graph-qa/safe-diagnostics.test.mjs scripts/graph-qa/boot-contract.test.mjs scripts/unified-vault-qa/synthetic-peer.test.mjs
       - name: Build real Rust Kotlin debug APK (no production keys)
         run: bash scripts/graph-qa/build-debug.sh
       - name: Installed unified native and synthetic-peer checks

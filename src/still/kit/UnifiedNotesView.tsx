@@ -154,40 +154,57 @@ function NotesAuthority({ modeSwitch, legacy, active, conn }: { modeSwitch: Reac
 function VaultSyncStatus({ vault, conn, readOnly }: { vault?: ManagedVault; conn: ConnState | null; readOnly: boolean }) {
   const binding = vault?.binding;
   const owner = binding ? JSON.stringify([binding.instanceId, binding.remoteVaultId]) : "";
-  const [result, setResult] = useState<{ owner: string; value: KnowledgeReplicaLibrary | null; failed: boolean } | null>(null);
-  const connected = conn?.ws.state === "connected" && conn.identity?.instanceId === binding?.instanceId;
-  const [busy, setBusy] = useState(false), [actionError, setActionError] = useState(""), [revision, setRevision] = useState(0);
-  const currentOwner = useRef(owner); currentOwner.current = owner;
+  const pairedInstance = conn?.paired ? conn.identity?.instanceId || "" : "";
+  const canReadCoverage = !!binding && pairedInstance === binding.instanceId;
+  const connected = canReadCoverage && conn?.ws.state === "connected";
+  // Pair transitions invalidate even A -> B -> A, including transitions where
+  // both computers are offline. Gate during render, before effect cleanup.
+  const scope = JSON.stringify([owner, pairedInstance]);
+  const current = useRef({ scope, epoch: 0 });
+  if (current.current.scope !== scope) current.current = { scope, epoch: current.current.epoch + 1 };
+  const epoch = current.current.epoch;
+  const [result, setResult] = useState<{ epoch: number; value: KnowledgeReplicaLibrary | null; failed: boolean } | null>(null);
+  const [action, setAction] = useState<{ epoch: number; busy: boolean; error: string } | null>(null);
+  const [revision, setRevision] = useState(0);
+  const busy = action?.epoch === epoch && action.busy;
+  const actionError = action?.epoch === epoch ? action.error : "";
   const retry = async (confirm: boolean) => {
-    if (!binding || busy || readOnly || !connected) return;
-    setBusy(true); setActionError("");
+    if (!binding || busy || readOnly || !connected || current.current.epoch !== epoch) return;
+    setAction({ epoch, busy: true, error: "" });
     try {
       if (confirm) await managedVault.syncToPhone(binding.instanceId, binding.remoteVaultId);
       else await api.contentReplicaControl(binding.instanceId, binding.remoteVaultId, "resume");
+      if (current.current.epoch !== epoch) return;
       syncCoordinator.wake(); window.dispatchEvent(new Event("luckyray:managed-vault-change"));
-    } catch (reason) { if (currentOwner.current === owner) setActionError(failureCopy(reason)); }
-    finally { if (currentOwner.current === owner) setBusy(false); }
+      setAction({ epoch, busy: false, error: "" });
+    } catch (reason) {
+      if (current.current.epoch === epoch) setAction({ epoch, busy: false, error: failureCopy(reason) });
+    }
   };
-  useEffect(() => { setBusy(false); setActionError(""); }, [owner]);
   useEffect(() => {
-    if (!binding) return;
+    if (!binding || !canReadCoverage) return;
     let live = true, sequence = 0;
-    const load = async () => { const token = ++sequence; try {
-      const rows = await api.contentReplicaLibraries(binding.instanceId);
-      if (live && token === sequence) setResult({owner, value: rows.find(row => row.instanceId === binding.instanceId && row.vaultId === binding.remoteVaultId) || null, failed: false});
-    } catch { if (live && token === sequence) setResult({owner, value: null, failed: true}); } };
+    const load = async () => {
+      if (!live || current.current.epoch !== epoch) return;
+      const token = ++sequence;
+      try {
+        const rows = await api.contentReplicaLibraries(binding.instanceId);
+        if (live && current.current.epoch === epoch && token === sequence) setResult({epoch, value: rows.find(row => row.instanceId === binding.instanceId && row.vaultId === binding.remoteVaultId) || null, failed: false});
+      } catch { if (live && current.current.epoch === epoch && token === sequence) setResult({epoch, value: null, failed: true}); }
+    };
     void load(); const changed = () => void load(); window.addEventListener("luckyray:managed-vault-change", changed);
     const timer = connected ? setInterval(changed, 5000) : null;
     return () => { live = false; if (timer) clearInterval(timer); window.removeEventListener("luckyray:managed-vault-change", changed); };
-  }, [owner, connected, revision]);
+  }, [owner, epoch, canReadCoverage, connected, revision]);
   if (!binding) return null;
-  const state = result?.owner === owner ? result : null, value = state?.value;
+  if (!canReadCoverage) return <div className="st-folder-status"><p role="status">原电脑未连接 · 可使用已保存的笔记</p></div>;
+  const state = result?.epoch === epoch ? result : null, value = state?.value;
   const progress = !state ? "正在读取同步进度…" : state.failed ? "同步进度读取失败，已保存内容仍可使用" : !value?.confirmed ? "知识库已添加，等待确认同步状态" : !value.metadataReady ? `正在读取笔记目录 · 已保存 ${value.ready} 篇正文` : value.ready === value.total && !value.failed && !value.unverified ? `正文已保存 · ${value.ready} 篇` : `正文已保存 ${value.ready} / ${value.total} 篇${value.failed ? ` · ${value.failed} 篇需重试` : ""}${value.unverified ? ` · ${value.unverified} 篇待确认` : ""}`;
   const detail = value?.writeState === "revoked" ? "同步授权已撤销，需在电脑重新授权" : value?.paused ? "剩余正文下载已暂停" : value?.waitingCurrent ? "等待电脑打开此知识库" : !connected ? "电脑未连接 · 待同步内容保留在手机" : value?.writeState === "readonly" ? "电脑授权为只读" : "连接电脑后自动同步更改";
   return <div className="st-folder-status"><p role="status">{progress} · {detail}</p>
     {!readOnly && state && !state.failed && !value?.confirmed ? <Button kind="quiet" disabled={!connected || busy} onClick={() => void retry(true)}>{busy ? "正在确认…" : "开始同步"}</Button> : null}
     {!readOnly && value?.confirmed && (value.paused || value.failed > 0) ? <Button kind="quiet" disabled={!connected || busy} onClick={() => void retry(false)}>{busy ? "正在处理…" : value.paused ? "继续下载正文" : "重试未完成正文"}</Button> : null}
-    {state?.failed ? <Button kind="quiet" onClick={() => setRevision(value => value + 1)}>重新读取同步进度</Button> : null}
+    {state?.failed ? <Button kind="quiet" onClick={() => { if (current.current.epoch === epoch) setRevision(value => value + 1); }}>重新读取同步进度</Button> : null}
     {actionError ? <p role="alert">{actionError}</p> : null}
   </div>;
 }
