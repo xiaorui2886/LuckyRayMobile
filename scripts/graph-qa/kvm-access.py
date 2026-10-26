@@ -2,8 +2,17 @@
 import json, os, pathlib, shutil, stat, subprocess, sys
 
 REPO='xiaorui2886/LuckyRayMobile'
-REF='refs/heads/ray/mobile-unified-vault-kvm-20261026-2044'
+REF='refs/heads/ray/mobile-unified-vault-kvm-20261026-2124'
 BASIC_ACL='user::rw-\ngroup::rw-\nother::---\n'
+
+def expected_acl(uid):
+    return f'user::rw-\nuser:{uid}:rw-\ngroup::rw-\nmask::rw-\nother::---'
+
+def classify_acl(text, uid):
+    text=text.strip()
+    if text==expected_acl(uid):return 'exact-grant'
+    if text in (BASIC_ACL.strip(), 'user::rw-\ngroup::rw-\nmask::rw-\nother::---'):return 'only-our-entry-missing'
+    raise ValueError('Unexpected ACL principals/permissions; no overwrite or wider repair permitted')
 
 def validate_context(env, event, uid, system):
     required={'GITHUB_ACTIONS':'true','CI_GRAPH_QA_REVIEWED':'yes','GITHUB_REPOSITORY':REPO,
@@ -41,10 +50,30 @@ def main(action):
     if not stat.S_ISCHR(st.st_mode) or st.st_uid!=0:
         raise ValueError('Expected root-owned KVM character device, not a link or ordinary file')
     identity={'runId':env['GITHUB_RUN_ID'],'attempt':'1','uid':uid,'device':st.st_rdev,'inode':st.st_ino}
-    if action=='restore':
+    if action=='restore' or action in ('recheck-preflight-reopen','recheck-installed'):
         saved=json.loads(proof.read_text())
         if saved!=identity or backup.read_text()!=BASIC_ACL:
-            raise ValueError('ACL restoration provenance mismatch; refusing changes')
+            raise ValueError('ACL restoration/recheck provenance mismatch; refusing changes')
+        current=call('getfacl','-cpn','/dev/kvm')
+        state=classify_acl(current,uid)
+        if stat.S_IMODE(st.st_mode)!=0o660:
+            raise ValueError('Device mode drift; refusing permission repair')
+        if action!='restore':
+            marker_name='empty-avd-preflight.json' if action=='recheck-preflight-reopen' else 'empty-avd-reopen-preflight.json'
+            marker=json.loads((pathlib.Path(env['RUNNER_TEMP'])/'graph-qa/evidence'/marker_name).read_text())
+            required={'runId':env['GITHUB_RUN_ID'],'attempt':'1','noApp':True,'preflightPassed':True,'normalShutdown':True}
+            if action=='recheck-installed':required['reopenPreflightPassed']=True
+            if any(marker.get(key)!=value for key,value in required.items()):
+                raise ValueError('Successful prior empty-AVD phase proof missing; no permission reapply')
+            # At most one recheck/reapply for each of the two planned reopen stages.
+            # Existing private proof and exact UID/device/inode identity are mandatory.
+            private_write(root/(action+'.json'),json.dumps({**identity,'action':action,'before':state}))
+            if state=='only-our-entry-missing':
+                call('sudo','-n','setfacl','-m',f'u:{uid}:rw','/dev/kvm')
+            if call('getfacl','-cpn','/dev/kvm').strip()!=expected_acl(uid) or not os.access(device,os.R_OK|os.W_OK):
+                raise ValueError('Bounded exact-user ACL recheck failed; no retries')
+            print('KVM bounded '+action+': '+state+'; same UID/device only')
+            return
         call('sudo','-n','setfacl','--set-file='+str(backup),'/dev/kvm')
         if call('getfacl','-cpn','/dev/kvm').strip()!=BASIC_ACL.strip():
             raise ValueError('Original device ACL restoration verification failed')
@@ -60,7 +89,7 @@ def main(action):
     # verification gets the always-run cleanup. No user-controlled device path.
     private_write(proof,json.dumps(identity))
     call('sudo','-n','setfacl','-m',f'u:{uid}:rw','/dev/kvm')
-    expected=f'user::rw-\nuser:{uid}:rw-\ngroup::rw-\nmask::rw-\nother::---'
+    expected=expected_acl(uid)
     if call('getfacl','-cpn','/dev/kvm').strip()!=expected or not os.access(device,os.R_OK|os.W_OK):
         raise ValueError('Exact-user KVM ACL verification failed')
     if stat.S_IMODE(device.stat().st_mode)!=0o660:

@@ -1,7 +1,26 @@
+## Approved bounded follow-up after run 40401952198 (not yet executed)
+
+That run proved KVM acceleration, actual four guest CPUs, a 30-second cold boot,
+and a 120-second healthy observation. Before the second launch, effective access
+to `/dev/kvm` was gone. The ACL contents were not recorded at that point, so the
+actor and precise mutation are UNKNOWN; no emulator/System UI cause is asserted.
+The gate stopped before APK build, and original ACL restoration succeeded.
+
+The approved next-run candidate adds read-only per-phase UID/device/inode/mode/ACL
+observations before capability checks and before/after clean shutdown. A bounded
+recheck can restore only the same named UID's rw entry if that entry alone is
+missing, with unchanged root-owned device identity and safe base ACL. Extra users,
+groups, masks or permissions fail closed. At most one check/reapply per planned
+reopen stage is permitted, with prior successful empty-AVD phase proof. No loop,
+udev rule, group change, world access or root emulator is introduced. The owner approved one next run at 21:23 UTC, including public test scripts. The
+new exact branch is `ray/mobile-unified-vault-kvm-20261026-2124`, first creation
+and first attempt only. The earlier `2044` branch authorization is consumed and
+is not reused.
+
 ## Current one-shot Linux KVM lane (2026-10-26)
 
 The next installed-app run is restricted to creation of the exact fresh branch
-`ray/mobile-unified-vault-kvm-20261026-2044`, first attempt only. Later pushes,
+`ray/mobile-unified-vault-kvm-20261026-2124`, first attempt only. Later pushes,
 manual dispatch, and reruns do not reuse the owner's device-access approval.
 `kvm-access.py` independently checks the event, repository, ref, commit, hosted
 Linux identity and non-root UID. It adds only that UID's read/write ACL on the

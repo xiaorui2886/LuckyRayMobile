@@ -8,6 +8,15 @@ set -euo pipefail
 [[ "$GRAPH_API" == 29 || "$GRAPH_API" == 30 || "$GRAPH_API" == 35 ]] || exit 2
 # Hardware acceleration is mandatory; no software CPU fallback.
 : "${RUNNER_TEMP:?}"
+phase="${GRAPH_QA_PHASE:-installed}"
+[[ "$phase" == preflight || "$phase" == preflight-reopen || "$phase" == installed ]] || exit 2
+python3 "$(dirname "$0")/kvm-observe.py" "$phase" before-capability-check
+# Approved bounded retry: exact fresh-branch authorization enforced by helper.
+# No broad permissions or retry loop: one recheck for each planned reopen only.
+if [[ "$(uname -s)" == Linux && "$phase" != preflight ]]; then
+  python3 "$(dirname "$0")/kvm-access.py" "recheck-$phase"
+  python3 "$(dirname "$0")/kvm-observe.py" "$phase" after-permission-recheck
+fi
 mkdir -p "$RUNNER_TEMP/graph-qa/evidence"
 { uname -sm; bash --version | head -n 1; python3 --version
   if [[ "$(uname -s)" == Darwin ]]; then sw_vers; fi
@@ -43,8 +52,6 @@ cat "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
 echo GRAPH_QA_EMULATION_MODE_END
 image="system-images;android-${GRAPH_API};google_apis;x86_64"
 [[ -d "$ANDROID_HOME/system-images/android-${GRAPH_API}/google_apis/x86_64" ]] || { echo "Preinstalled/licensed image required: $image" >&2; exit 3; }
-phase="${GRAPH_QA_PHASE:-installed}"
-[[ "$phase" == preflight || "$phase" == preflight-reopen || "$phase" == installed ]] || exit 2
 name="lr_unified_qa_${GRAPH_API}_${GITHUB_RUN_ID:?}_${GITHUB_RUN_ATTEMPT:?}"
 marker="$RUNNER_TEMP/graph-qa/evidence/empty-avd-preflight.json"
 reopen_marker="$RUNNER_TEMP/graph-qa/evidence/empty-avd-reopen-preflight.json"
@@ -166,6 +173,7 @@ echo GRAPH_QA_ACTUAL_DISPLAY_CPU_END
 packages=$(python3 "$(dirname "$0")/deadline.py" 15 adb shell pm list packages com.luckyray.mobile | tr -d '\r') || exit 3
 [[ -z "$packages" ]] || { echo 'Expected app-empty synthetic AVD'; exit 3; }
 "$GRAPH_TEST_DRIVER"
+python3 "$(dirname "$0")/kvm-observe.py" "$phase" before-emulator-shutdown
 # Successful normal shutdown preserves initialized system state; no snapshot and
 # no second -wipe-data. A failure anywhere above never publishes reuse provenance.
 python3 "$(dirname "$0")/deadline.py" 15 adb shell sync
@@ -174,6 +182,7 @@ shutdown_start=$SECONDS
 while kill -0 "$pid" 2>/dev/null && (( SECONDS-shutdown_start < 45 )); do sleep 1; done
 if kill -0 "$pid" 2>/dev/null; then echo 'Normal emulator shutdown timeout; reuse forbidden'; exit 3; fi
 wait "$pid"
+python3 "$(dirname "$0")/kvm-observe.py" "$phase" after-emulator-shutdown
 trap - EXIT
 if [[ "$phase" == preflight || "$phase" == preflight-reopen ]]; then
   if [[ "$phase" == preflight-reopen ]]; then marker="$reopen_marker"; fi

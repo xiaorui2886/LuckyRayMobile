@@ -15,6 +15,12 @@ class Contracts(unittest.TestCase):
         for key,value in [('created',False),('deleted',True),('before','b'*40),('after','b'*40),('ref','refs/heads/main')]:
             with self.subTest(key=key),self.assertRaises(ValueError):k.validate_context(self.env,{**self.event,key:value},1001,'Linux')
         with self.assertRaises(ValueError):k.validate_context(self.env,self.event,0,'Linux')
+    def test_unexpected_acl_drift_never_normalized(self):
+        for acl in ('user::rw-\nuser:999:rw-\ngroup::rw-\nmask::rw-\nother::---',
+                    'user::rw-\nuser:1001:rw-\ngroup::rw-\nmask::---\nother::---',
+                    'user::rw-\ngroup::rw-\nother::rw-'):
+            with self.assertRaises(ValueError):k.classify_acl(acl,1001)
+        self.assertEqual(k.classify_acl(k.expected_acl(1001),1001),'exact-grant')
     def test_mock_grant_repeat_rejected_and_exact_restore(self):
         with tempfile.TemporaryDirectory() as tmp:
             event_path=pathlib.Path(tmp)/'event.json';event_path.write_text(json.dumps(self.event))
@@ -37,7 +43,19 @@ class Contracts(unittest.TestCase):
                 k.main('grant');self.assertEqual(len(mutations),1)
                 with self.assertRaises(ValueError):k.main('grant')
                 self.assertEqual(len(mutations),1)
-                k.main('restore');self.assertEqual(len(mutations),2)
+                evidence=pathlib.Path(tmp)/'graph-qa/evidence';evidence.mkdir(parents=True)
+                prior={'runId':'123','attempt':'1','noApp':True,'preflightPassed':True,'normalShutdown':True}
+                (evidence/'empty-avd-preflight.json').write_text(json.dumps(prior))
+                (evidence/'empty-avd-reopen-preflight.json').write_text(json.dumps({**prior,'reopenPreflightPassed':True}))
+                # Model exact observed class: only the named entry disappeared.
+                acl='user::rw-\ngroup::rw-\nmask::rw-\nother::---\n'
+                k.main('recheck-preflight-reopen');self.assertEqual(len(mutations),2)
+                with self.assertRaises(FileExistsError):k.main('recheck-preflight-reopen')
+                self.assertEqual(len(mutations),2)
+                # Healthy installed recheck is read-only and consumes its stage slot.
+                k.main('recheck-installed');self.assertEqual(len(mutations),2)
+                with self.assertRaises(FileExistsError):k.main('recheck-installed')
+                k.main('restore');self.assertEqual(len(mutations),3)
                 self.assertEqual(acl,k.BASIC_ACL)
                 self.assertEqual((pathlib.Path(tmp)/'graph-kvm-private/original.acl').stat().st_mode&0o777,0o600)
 if __name__=='__main__':unittest.main()

@@ -1,7 +1,7 @@
 name: Unified vault isolated Android QA
 on:
   push:
-    branches: [ray/mobile-unified-vault-qa-20261026, ray/mobile-unified-vault-host-20261026, ray/mobile-unified-vault-kvm-20261026-2044]
+    branches: [ray/mobile-unified-vault-qa-20261026, ray/mobile-unified-vault-host-20261026, ray/mobile-unified-vault-kvm-20261026-2124]
   workflow_dispatch:
     inputs:
       synthetic_only_ack:
@@ -17,7 +17,7 @@ jobs:
   installed-app:
     name: Linux KVM installed app API ${{ matrix.api }}
     # Owner approved only this new branch creation's first attempt, not later pushes/reruns.
-    if: github.event_name == 'push' && github.event.created == true && github.run_attempt == 1 && github.ref == 'refs/heads/ray/mobile-unified-vault-kvm-20261026-2044'
+    if: github.event_name == 'push' && github.event.created == true && github.run_attempt == 1 && github.ref == 'refs/heads/ray/mobile-unified-vault-kvm-20261026-2124'
     strategy:
       fail-fast: false
       matrix:
@@ -105,7 +105,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   host-browser:
-    if: (github.event_name == 'push' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-kvm-20261026-2044')) || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026') && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-kvm-20261026-2124')) || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026') && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
