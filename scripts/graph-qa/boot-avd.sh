@@ -6,7 +6,7 @@ set -euo pipefail
 : "${ANDROID_HOME:?}"
 : "${GRAPH_API:?29, 30 or 35}"
 [[ "$GRAPH_API" == 29 || "$GRAPH_API" == 30 || "$GRAPH_API" == 35 ]] || exit 2
-# CPU emulation fallback does not change permissions, OS security or sandbox settings.
+# Hardware acceleration is mandatory; no software CPU fallback.
 : "${RUNNER_TEMP:?}"
 mkdir -p "$RUNNER_TEMP/graph-qa/evidence"
 { uname -sm; bash --version | head -n 1; python3 --version
@@ -34,8 +34,8 @@ if [[ "$(uname -s)" == Darwin ]]; then
 elif [[ -r /dev/kvm && -w /dev/kvm && "$accel_check_status" == 0 ]]; then
   accel=on; export GRAPH_EMULATION_MODE=kvm; boot_limit=900
 else
-  accel=off; export GRAPH_EMULATION_MODE=software-functional-only; boot_limit=900
-  echo 'Existing KVM unavailable: software CPU emulation, functional-only evidence (no performance claim).'
+  echo 'Hardware acceleration unavailable; refusing software CPU emulation or further build/test.' >&2
+  exit 3
 fi
 printf '{"mode":"%s","accelArgument":"%s","bootLimitSeconds":%s,"gpuArgument":"software","memoryMiB":3072,"partitionMiB":4096,"performanceClaimsAllowed":false}\n' "$GRAPH_EMULATION_MODE" "$accel" "$boot_limit" > "$RUNNER_TEMP/graph-qa/evidence/emulation-mode.json"
 echo GRAPH_QA_EMULATION_MODE_BEGIN
@@ -44,9 +44,12 @@ echo GRAPH_QA_EMULATION_MODE_END
 image="system-images;android-${GRAPH_API};google_apis;x86_64"
 [[ -d "$ANDROID_HOME/system-images/android-${GRAPH_API}/google_apis/x86_64" ]] || { echo "Preinstalled/licensed image required: $image" >&2; exit 3; }
 phase="${GRAPH_QA_PHASE:-installed}"
-[[ "$phase" == preflight || "$phase" == installed ]] || exit 2
+[[ "$phase" == preflight || "$phase" == preflight-reopen || "$phase" == installed ]] || exit 2
 name="lr_unified_qa_${GRAPH_API}_${GITHUB_RUN_ID:?}_${GITHUB_RUN_ATTEMPT:?}"
 marker="$RUNNER_TEMP/graph-qa/evidence/empty-avd-preflight.json"
+reopen_marker="$RUNNER_TEMP/graph-qa/evidence/empty-avd-reopen-preflight.json"
+if [[ "$phase" == installed ]]; then marker="$reopen_marker"; fi
+if [[ "$phase" == preflight-reopen && -e "$reopen_marker" ]]; then echo 'Refusing duplicate reopen preflight' >&2; exit 3; fi
 [[ "$name" =~ ^[a-zA-Z0-9_]+$ ]] || exit 2
 # Android tools can disagree on legacy/default homes. Give both one explicit CI-only home.
 export ANDROID_USER_HOME="$RUNNER_TEMP/graph-android-user"
@@ -60,11 +63,12 @@ if [[ "$phase" == preflight ]]; then
   echo GRAPH_QA_PHASE_PASS_avd_create
 else
   # Only the same run/attempt's successfully observed, app-empty profile is eligible.
-  python3 - "$marker" "$name" "$GRAPH_API" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$ANDROID_AVD_HOME/$name.avd/config.ini" <<'PY_REUSE'
+  python3 - "$marker" "$name" "$GRAPH_API" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$ANDROID_AVD_HOME/$name.avd/config.ini" "$phase" <<'PY_REUSE'
 import json,sys,pathlib,hashlib
-p,name,api,run,attempt,config=sys.argv[1:]
+p,name,api,run,attempt,config,phase=sys.argv[1:]
 m=json.loads(pathlib.Path(p).read_text())
 expected={'avd':name,'api':api,'runId':run,'attempt':attempt,'noApp':True,'preflightPassed':True,'normalShutdown':True,'configSha256':hashlib.sha256(pathlib.Path(config).read_bytes()).hexdigest()}
+if phase=='installed': expected['reopenPreflightPassed']=True
 assert m==expected,'AVD preflight provenance mismatch; no fallback creation or wipe'
 print('GRAPH_QA_SAME_EMPTY_AVD_REOPEN '+json.dumps(m))
 PY_REUSE
@@ -171,11 +175,13 @@ while kill -0 "$pid" 2>/dev/null && (( SECONDS-shutdown_start < 45 )); do sleep 
 if kill -0 "$pid" 2>/dev/null; then echo 'Normal emulator shutdown timeout; reuse forbidden'; exit 3; fi
 wait "$pid"
 trap - EXIT
-if [[ "$phase" == preflight ]]; then
-  python3 - "$marker" "$name" "$GRAPH_API" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$ANDROID_AVD_HOME/$name.avd/config.ini" <<'PY_MARKER'
+if [[ "$phase" == preflight || "$phase" == preflight-reopen ]]; then
+  if [[ "$phase" == preflight-reopen ]]; then marker="$reopen_marker"; fi
+  python3 - "$marker" "$name" "$GRAPH_API" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$ANDROID_AVD_HOME/$name.avd/config.ini" "$phase" <<'PY_MARKER'
 import json,sys,pathlib,hashlib
-p,name,api,run,attempt,config=sys.argv[1:]
+p,name,api,run,attempt,config,phase=sys.argv[1:]
 m={'avd':name,'api':api,'runId':run,'attempt':attempt,'noApp':True,'preflightPassed':True,'normalShutdown':True,'configSha256':hashlib.sha256(pathlib.Path(config).read_bytes()).hexdigest()}
+if phase=='preflight-reopen': m['reopenPreflightPassed']=True
 pathlib.Path(p).write_text(json.dumps(m,indent=2)+'\n')
 print('GRAPH_QA_EMPTY_AVD_READY '+json.dumps(m))
 PY_MARKER

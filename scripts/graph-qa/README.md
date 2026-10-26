@@ -1,3 +1,26 @@
+## Current one-shot Linux KVM lane (2026-10-26)
+
+The next installed-app run is restricted to creation of the exact fresh branch
+`ray/mobile-unified-vault-kvm-20261026-2044`, first attempt only. Later pushes,
+manual dispatch, and reruns do not reuse the owner's device-access approval.
+`kvm-access.py` independently checks the event, repository, ref, commit, hosted
+Linux identity and non-root UID. It adds only that UID's read/write ACL on the
+root-owned `/dev/kvm` character device, preserving owner/group/world permissions.
+Existing ACL tools are required; no package install, chmod 666, group/udev/network
+changes, root emulator, or software CPU fallback. An always-run cleanup restores
+the original ACL before the disposable runner is destroyed.
+
+The empty AVD must cold boot, pass its observation gate, shut down normally, then
+reopen and pass the same health gate BEFORE dependency setup and expensive APK
+compilation. Both normal-shutdown provenance markers are required for the later
+installation boot; it never wipes the profile on reopen. First/reopened stability
+results are separate evidence files. A system failure is NOT_RUN app acceptance.
+
+Prior Mac Intel runs compiled the APK, but one hit a Bash 3.2 harness bug (fixed),
+and the next hit Android System UI ANR before app installation. Those builds are
+not evidence that LuckyRay installed-app or automatic-sync checks passed. The
+historical lane notes below describe previous capabilities, not current acceptance.
+
 # Unified-vault disposable Android QA
 
 This directory reuses the reviewed public graph QA transport/boot gates from
@@ -8,8 +31,9 @@ future expansion; their presence does **not** mean their checks ran this round.
 
 ## Guardrails
 
-- Dedicated branch `ray/mobile-unified-vault-qa-20261026`; one macOS Intel/API35 lane,
-  preflight before build, plus separately labelled host browser tests.
+- Current dedicated branch `ray/mobile-unified-vault-kvm-20261026-2044`; one Ubuntu
+  KVM/API35 lane with initial and reopened empty preflight before build, plus
+  separately labelled host browser tests. The macOS lane is historical only.
 - One run-unique disposable AVD: fresh preflight initialization, full stability and
   app-empty checks, normal shutdown; after build the same synthetic profile cold
   starts without a second wipe, repeats health/app-empty gates, then installs the

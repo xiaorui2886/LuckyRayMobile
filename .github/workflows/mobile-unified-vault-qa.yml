@@ -1,7 +1,7 @@
 name: Unified vault isolated Android QA
 on:
   push:
-    branches: [ray/mobile-unified-vault-qa-20261026, ray/mobile-unified-vault-host-20261026]
+    branches: [ray/mobile-unified-vault-qa-20261026, ray/mobile-unified-vault-host-20261026, ray/mobile-unified-vault-kvm-20261026-2044]
   workflow_dispatch:
     inputs:
       synthetic_only_ack:
@@ -15,13 +15,14 @@ concurrency:
   cancel-in-progress: false
 jobs:
   installed-app:
-    name: ${{ matrix.runner == 'ubuntu-24.04' && 'Linux installed app functional-only' || 'Mac Intel installed app' }} API ${{ matrix.api }}
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
+    name: Linux KVM installed app API ${{ matrix.api }}
+    # Owner approved only this new branch creation's first attempt, not later pushes/reruns.
+    if: github.event_name == 'push' && github.event.created == true && github.run_attempt == 1 && github.ref == 'refs/heads/ray/mobile-unified-vault-kvm-20261026-2044'
     strategy:
       fail-fast: false
       matrix:
         api: [35]
-        runner: [macos-15-intel]
+        runner: [ubuntu-24.04]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -43,6 +44,7 @@ jobs:
       - name: Native Bash launch-argument contract before emulator and APK build
         run: |
           /bin/bash --version
+          python3 scripts/graph-qa/kvm-access-test.py
           GRAPH_QA_TEST_BASH=/bin/bash node --test scripts/graph-qa/boot-contract.test.mjs || {
             echo 'GRAPH_QA_HARNESS_SHELL_CONTRACT_FAILED: shell/launcher compatibility; app not built or tested' >&2
             exit 3
@@ -56,9 +58,17 @@ jobs:
           test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" platform-tools emulator 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018' "system-images;android-${GRAPH_API};google_apis;x86_64" < /dev/null
           test -d "$ANDROID_HOME/system-images/android-${GRAPH_API}/google_apis/x86_64"
+      - name: One-run narrowly authorized KVM access for this test user
+        run: python3 scripts/graph-qa/kvm-access.py grant
       - name: Basic emulator preflight before expensive APK build
         env:
           GRAPH_QA_PHASE: preflight
+        run: |
+          export GRAPH_TEST_DRIVER="$GITHUB_WORKSPACE/scripts/graph-qa/preflight-installed.sh"
+          bash scripts/graph-qa/boot-avd.sh
+      - name: Reopen the same empty AVD and prove health before APK build
+        env:
+          GRAPH_QA_PHASE: preflight-reopen
         run: |
           export GRAPH_TEST_DRIVER="$GITHUB_WORKSPACE/scripts/graph-qa/preflight-installed.sh"
           bash scripts/graph-qa/boot-avd.sh
@@ -79,6 +89,9 @@ jobs:
         run: |
           export GRAPH_TEST_DRIVER="$GITHUB_WORKSPACE/scripts/graph-qa/run-installed.sh"
           bash scripts/graph-qa/boot-avd.sh
+      - name: Restore this device's original ACL before runner disposal
+        if: always()
+        run: python3 scripts/graph-qa/kvm-access.py restore
       - name: Upload explicit synthetic evidence only (never APK or raw logs)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -88,10 +101,11 @@ jobs:
             ${{ runner.temp }}/graph-qa/evidence/*.json
             ${{ runner.temp }}/graph-qa/evidence/*.png
             ${{ runner.temp }}/graph-qa/evidence/*.mp4
+            ${{ runner.temp }}/graph-qa/evidence/reopen-preflight/*.json
           if-no-files-found: warn
           retention-days: 7
   host-browser:
-    if: (github.event_name == 'push' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026')) || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026') && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-kvm-20261026-2044')) || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/ray/mobile-unified-vault-qa-20261026' || github.ref == 'refs/heads/ray/mobile-unified-vault-host-20261026') && inputs.synthetic_only_ack == 'SYNTHETIC-ONLY')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:

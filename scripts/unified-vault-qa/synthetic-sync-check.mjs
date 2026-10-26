@@ -56,9 +56,8 @@ export async function runSyntheticSync(ctx){
    const selector='[aria-label="图谱知识库"]';
    await poll(`Array.from(document.querySelector(${JSON.stringify(selector)}).options).some(o=>o.value===${JSON.stringify(localVaultId)})`,30000);
    const ids=await evaluate(`Array.from(document.querySelector(${JSON.stringify(selector)}).options).map(o=>o.value)`);assert.equal(ids.filter(id=>id===localVaultId).length,1);
-   await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
-   const key=async(key,code,windowsVirtualKeyCode)=>{for(const type of ['keyDown','keyUp'])await send('Input.dispatchKeyEvent',{type,key,code,windowsVirtualKeyCode});};
-   await key('Home','Home',36);for(let i=0;i<ids.indexOf(localVaultId);i++)await key('ArrowDown','ArrowDown',40);await key('Tab','Tab',9);
+   // Entering Graph must keep the library from Notes without correcting it
+   // through the selector. Explicit A/B switching is covered in the local phase.
    await poll(`document.querySelector(${JSON.stringify(selector)})?.value===${JSON.stringify(localVaultId)} && !document.querySelector('.mg-status,.mg-canvas-warning')`,60000);
    assert.equal((await invoke('managed_vault_list',{})).selectedVaultId,localVaultId);await screenshot('synthetic-bound-vault-graph',true);
    await clickText('笔记');await poll(`document.body.textContent.includes('Synthetic Desktop Note') && document.body.textContent.includes('Synthetic Added Desktop Note')`,30000);

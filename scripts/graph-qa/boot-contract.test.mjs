@@ -11,8 +11,11 @@ test('actual reuse guard rejects changed run/attempt/API/profile and missing pro
  const dir=mkdtempSync(join(tmpdir(),'unified-avd-guard-'));try{
  const config=join(dir,'config.ini'),marker=join(dir,'marker.json');writeFileSync(config,'synthetic config');
  const proof={avd:'lr_test',api:'35',runId:'1',attempt:'1',noApp:true,preflightPassed:true,normalShutdown:true,configSha256:createHash('sha256').update('synthetic config').digest('hex')};
- const run=()=>spawnSync('python3',['-',marker,'lr_test','35','1','1',config],{input:guard,encoding:'utf8'}).status;
+ const run=(phase='preflight-reopen')=>spawnSync('python3',['-',marker,'lr_test','35','1','1',config,phase],{input:guard,encoding:'utf8'}).status;
  writeFileSync(marker,JSON.stringify(proof));assert.equal(run(),0);
+ assert.notEqual(run('installed'),0,'initial boot alone cannot authorize installed phase');
+ writeFileSync(marker,JSON.stringify({...proof,reopenPreflightPassed:true}));assert.equal(run('installed'),0);
+ writeFileSync(marker,JSON.stringify(proof));
  for(const [key,value] of [['runId','2'],['attempt','2'],['api','30'],['noApp',false],['normalShutdown',false],['preflightPassed',false]]){writeFileSync(marker,JSON.stringify({...proof,[key]:value}));assert.notEqual(run(),0,key);}
  writeFileSync(marker,JSON.stringify(proof));writeFileSync(config,'changed config');assert.notEqual(run(),0);
  rmSync(marker);assert.notEqual(run(),0);
@@ -38,7 +41,7 @@ test('real emulator argv: only preflight wipes; installed reopens without wipe u
   const sdk=join(dir,'sdk with spaces'); mkdirSync(join(sdk,'emulator'),{recursive:true});
   const stub=join(sdk,'emulator','emulator');
   writeFileSync(stub,`#!/bin/bash\nset -eu\nprintf '%s\\0' "$@" > "$CAPTURE"\n`); chmodSync(stub,0o755);
-  for(const phase of ['preflight','installed']) {
+  for(const phase of ['preflight','preflight-reopen','installed']) {
    const capture=join(dir,phase+'.argv');
    const result=spawnSync(shell,['-c','set -euo pipefail\n'+launch+'\nwait "$pid"\n','contract','unexpected-inherited-argument'],{
     env:{...process.env,ANDROID_HOME:sdk,RUNNER_TEMP:dir,CAPTURE:capture,phase,name:'synthetic avd',accel:'on'},encoding:'utf8'
@@ -49,4 +52,23 @@ test('real emulator argv: only preflight wipes; installed reopens without wipe u
     ...(phase==='preflight'?['-wipe-data']:[]),'-gpu','software','-memory','3072','-partition-size','4096','-no-boot-anim'],phase);
   }
  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+const workflow=readFileSync(new URL('../../.github/workflows/mobile-unified-vault-qa.yml',import.meta.url),'utf8');
+test('hardware-only gate and healthy empty reopen precede expensive APK build',()=>{
+ assert.ok(!source.includes('accel=off'));
+ assert.ok(source.includes('refusing software CPU emulation'));
+ assert.ok(workflow.indexOf('GRAPH_QA_PHASE: preflight-reopen')<workflow.indexOf('Build real Rust Kotlin debug APK'));
+ assert.match(workflow,/github\.event\.created == true && github\.run_attempt == 1/);
+ assert.ok(workflow.includes('python3 scripts/graph-qa/kvm-access.py restore'));
+ assert.ok(source.includes("if phase=='installed': expected['reopenPreflightPassed']=True"));
+});
+
+test('actual acceleration selection fails closed without usable KVM',()=>{
+ const gate=source.split("if [[ \"$(uname -s)\" == Darwin ]]; then\n  sysctl")[1];
+ assert.ok(gate,'production acceleration gate located');
+ const body='if [[ \"$(uname -s)\" == Darwin ]]; then\n  sysctl'+gate.split("\nprintf '{\"mode\"")[0];
+ const result=spawnSync('/bin/bash',['-c','set -euo pipefail\nuname() { echo Linux; }\naccel_check_status=11\n'+body],{encoding:'utf8'});
+ assert.equal(result.status,3,result.stderr);
+ assert.match(result.stderr,/refusing software CPU emulation/);
 });
