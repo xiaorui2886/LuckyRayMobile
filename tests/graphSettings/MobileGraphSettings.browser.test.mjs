@@ -30,6 +30,22 @@ const headerHits=()=>evaluate(`(()=>{
   }
   const r=close.getBoundingClientRect();return {title:hits.length>0&&hits.every(h=>h.ok),titlePoints:hits,close:close.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))};
 })()`);
+// Whitelisted fixture diagnostics: no document text, storage, cookies or network.
+const dockDiagnostic=()=>evaluate(`(()=>{
+  const app=document.querySelector('.st-app'),root=document.querySelector('.st-root-stage'),dock=document.querySelector('.st-tab-wrap');
+  const snapshot=e=>{const c=getComputedStyle(e),r=e.getBoundingClientRect();return {
+    attrs:Object.fromEntries([...e.attributes].filter(a=>['class','style','data-text-entry','data-mode','data-reduced','aria-hidden'].includes(a.name)).map(a=>[a.name,a.value])),
+    css:Object.fromEntries(['visibility','display','opacity','pointer-events','transition','position','z-index'].map(k=>[k,c.getPropertyValue(k)])),
+    rect:{x:r.x,y:r.y,width:r.width,height:r.height}};};
+  const rules=[];const scan=(list,context=[])=>{for(const rule of list){
+    if(rule.selectorText){for(const [name,e] of [['app',app],['root',root],['dock',dock]])try{if(e.matches(rule.selectorText))rules.push({target:name,selector:rule.selectorText,css:rule.style.cssText,context});}catch{}}
+    else if(rule.cssRules)scan(rule.cssRules,[...context,{condition:rule.conditionText||rule.name||'',active:rule.media?matchMedia(rule.conditionText).matches:null}]);
+  }};for(const sheet of document.styleSheets)try{scan(sheet.cssRules);}catch{}
+  const a=document.activeElement;return {dataset:{...app.dataset},app:snapshot(app),root:snapshot(root),dock:snapshot(dock),matchingRules:rules,
+    viewport:{innerWidth,innerHeight,visualWidth:visualViewport?.width,visualHeight:visualViewport?.height},
+    activeElement:a?{tag:a.tagName,className:a.className,ariaLabel:a.getAttribute('aria-label'),type:a.getAttribute('type')}:null};
+})()`);
+const twoFrames=()=>evaluate(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))`);
 const metrics=()=>evaluate(`(()=>{const q=s=>document.querySelector(s),rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height};};const p=q('.mg-settings'),s=q('.mg-settings-scroll');return {bodyWidth:document.body.scrollWidth,stage:rect(q('.mg-stage')),panel:rect(p),header:rect(q('.mg-settings-actions')),scroll:rect(s),scrollHeight:s.scrollHeight,scrollTop:s.scrollTop,last:rect([...q('.mg-settings').querySelectorAll('input[type=range]')].at(-1)),overflow:getComputedStyle(s).overflowY};})()`);
 try {
   await send('Runtime.enable');await send('Page.enable');await send('Emulation.setTouchEmulationEnabled',{enabled:true});
@@ -74,8 +90,26 @@ try {
   await click('[aria-label="关闭图谱设置"]');
   await evaluate(`window.dispatchEvent(new Event('fixture-show-inbox'))`);await pause(60);
   for (const textEntry of [false,true]) for (const width of [320,360,430]) {
+    const stateBefore=await dockDiagnostic();
     await evaluate(`document.querySelector('.st-app').dataset.textEntry=${JSON.stringify(String(textEntry))}`);
     await send('Emulation.setDeviceMetricsOverride',{width,height:740,deviceScaleFactor:1,mobile:true});
+    const immediatelyAfter=await dockDiagnostic();
+    await twoFrames();
+    const samples=[];let settled=false;
+    // Bounded observation only: never force CSS or rewrite a mismatched state.
+    for(let attempt=0;attempt<30;attempt++){
+      const d=await dockDiagnostic();samples.push({attempt,dataset:d.dataset,viewport:d.viewport,dock:d.dock,activeElement:d.activeElement});
+      if(d.dataset.textEntry===String(textEntry)&&d.viewport.innerWidth===width&&d.viewport.innerHeight===740&&d.dock.css.visibility===(textEntry?'hidden':'visible')){settled=true;break;}
+      await pause(50);
+    }
+    const stateAfter=await dockDiagnostic();
+    const stateEvidence={requested:{textEntry,width,height:740},stateBefore,immediatelyAfter,settled,samples,stateAfter};
+    const caseName='import-inbox-'+(textEntry?'ime-':'dock-')+width;
+    if(out)await writeFile(path.join(out,caseName+'-state.json'),JSON.stringify(stateEvidence,null,2));
+    await shot(caseName+'-before-assert');
+    assert.equal(stateAfter.dataset.textEntry,String(textEntry),'requested text-entry state reached DOM');
+    assert.equal(settled,true,'requested viewport and actual dock state settle within bounded observation');
+    checks.push({inboxState:stateEvidence});
     const inbox=await evaluate(`(()=>{
       const app=document.querySelector('.st-app');
       const entry=app.querySelector('.st-import-inbox-trigger'),card=app.querySelector('.mg-selection');
