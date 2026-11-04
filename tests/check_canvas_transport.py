@@ -88,7 +88,7 @@ mod pinning {{
 #[path = "{actual}"]
 mod canvas_upstream;
 ''')
-        subprocess.run(['cargo', 'generate-lockfile', '--offline'], cwd=work, check=True)
+        subprocess.run(['cargo', 'update', '--workspace', '--offline'], cwd=work, check=True)
         resolved = tomllib.loads((work / 'Cargo.lock').read_text())['package']
         for p in resolved:
             if 'source' in p and (p['name'], p['version'], p.get('source'), p.get('checksum')) not in allowed:
