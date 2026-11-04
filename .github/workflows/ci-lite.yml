@@ -11,7 +11,7 @@ concurrency:
 jobs:
   focused-native:
     if: >-
-      github.event_name == 'push' && github.event.before == 'fd21f120369e64779ed52666d3dd29e3f2e7f9c8' && github.event.head_commit.message == 'test: run reviewed readonly canvas native QA after workflow validation fix (20261104)'
+      github.event_name == 'push' && github.event.before == '46a0009b482f762ca2cf96b49c284e2efb501a17' && github.event.head_commit.message == 'test: run readonly canvas native QA with preserved lock (20261104-1936)'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -20,10 +20,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          ref: aba6cd856fa6d0f6da796b76f39d99dcbeb7ba12
+          ref: 030faa34a93b2120f98564bdb069e6b9e666f18c
       - name: Verify exact reviewed source commit
         run: |
-          test "$(git rev-parse HEAD)" = "aba6cd856fa6d0f6da796b76f39d99dcbeb7ba12"
+          test "$(git rev-parse HEAD)" = "030faa34a93b2120f98564bdb069e6b9e666f18c"
           git rev-parse HEAD
       - name: Verify reviewed source bytes
         run: sha256sum --check tests/canvas-qa-sources.sha256
@@ -42,6 +42,7 @@ jobs:
       - name: Actual local carrier with synthetic connection fixtures
         run: python3 tests/check_canvas_carrier.py
       - name: Verify dependency lock and reviewed inputs unchanged
+        if: always()
         run: |
           sha256sum --check tests/canvas-qa-sources.sha256
           git diff --exit-code -- src-tauri/Cargo.lock
