@@ -11,12 +11,10 @@ concurrency:
 jobs:
   focused-native:
     if: >-
-      github.event_name == 'push' && github.event.before == 'aba6cd856fa6d0f6da796b76f39d99dcbeb7ba12' && github.event.head_commit.message == 'test: run reviewed readonly canvas QA once (20261104-1927-mobile)'
+      github.event_name == 'push' && github.event.before == 'fd21f120369e64779ed52666d3dd29e3f2e7f9c8' && github.event.head_commit.message == 'test: run reviewed readonly canvas native QA after workflow validation fix (20261104)'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CARGO_HOME: ${{ runner.temp }}/canvas-cargo-home
-      CARGO_TARGET_DIR: ${{ runner.temp }}/canvas-target
       CARGO_BUILD_JOBS: '2'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -33,6 +31,10 @@ jobs:
         run: |
           rustup toolchain install 1.95.0 --profile minimal --no-self-update
           rustup override set 1.95.0
+      - name: Isolate Cargo cache and target directories
+        run: |
+          printf 'CARGO_HOME=%s/canvas-cargo-home\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'CARGO_TARGET_DIR=%s/canvas-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Prepare exact application-locked test dependencies
         run: python3 tests/prepare_canvas_dependency_cache.py
       - name: Actual upstream with synthetic loopback HTTP and fail-closed TLS adapter
