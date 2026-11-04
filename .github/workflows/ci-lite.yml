@@ -1,11 +1,8 @@
 name: Read-only canvas focused native QA
 on:
-  workflow_dispatch:
-    inputs:
-      reviewed_sha:
-        description: Exact reviewed QA branch commit SHA
-        required: true
-        type: string
+  push:
+    branches: [qa/canvas-readonly-20261104]
+    paths: ['.github/workflows/ci-lite.yml']
 permissions:
   contents: read
 concurrency:
@@ -13,7 +10,8 @@ concurrency:
   cancel-in-progress: false
 jobs:
   focused-native:
-    if: github.event_name == 'workflow_dispatch' && inputs.reviewed_sha == github.sha
+    if: >-
+      github.event_name == 'push' && github.event.before == 'aba6cd856fa6d0f6da796b76f39d99dcbeb7ba12' && github.event.head_commit.message == 'test: run reviewed readonly canvas QA once (20261104-1927-mobile)'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -24,6 +22,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          ref: aba6cd856fa6d0f6da796b76f39d99dcbeb7ba12
+      - name: Verify exact reviewed source commit
+        run: |
+          test "$(git rev-parse HEAD)" = "aba6cd856fa6d0f6da796b76f39d99dcbeb7ba12"
+          git rev-parse HEAD
       - name: Verify reviewed source bytes
         run: sha256sum --check tests/canvas-qa-sources.sha256
       - name: Select pinned official Rust toolchain
