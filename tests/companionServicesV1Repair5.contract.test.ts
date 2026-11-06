@@ -84,7 +84,7 @@ test("P1-H7 — lock ordering is deterministic and cannot deadlock", () => {
 test("P1-H7 — the worker refuses BEFORE any dial", () => {
   const worker = code(WORKER);
   const installAt = worker.indexOf("state.install_cancellation_if_current(generation)");
-  const dialAt = worker.indexOf("hint_websocket_connect(&url, &authorization, &fingerprint)");
+  const dialAt = worker.indexOf("hint_scoped_websocket_connect(&url, &authorization, &fingerprint, library.as_deref(), vault.as_deref())");
   assert.ok(installAt >= 0, "the worker installs through the current-aware API");
   assert.ok(dialAt > installAt, "…before it ever builds the dial future");
   // Refusal returns immediately.

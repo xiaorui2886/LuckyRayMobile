@@ -13,10 +13,10 @@ test("local Wiki root-relative .md spelling resolves the local title, not a gues
   assert.equal(result.kind, "resolved");
   assert.equal(result.notes[0]?.noteId, "note-target");
 });
-test("local Wiki unsupported nested/traversing paths and anchors stop before catalog access", async () => {
+test("local Wiki paths escaping the logical root stop before catalog access", async () => {
   let requests = 0;
   const client = { list: async () => { requests++; return { items: rows, total: rows.length, hasMore: false }; }, get: catalog(rows).get };
-  for (const syntax of ["[[Folder/本机目标.md]]", "[[../本机目标]]", "[[./Folder/../本机目标]]", "[[本机目标#章节]]"]) {
+  for (const syntax of ["[[../本机目标]]", "[[./Folder/../../本机目标]]", "[[Folder/..]]"]) {
     await assert.rejects(resolveLocalWiki(reference(syntax), client), /LOCAL_WIKI_(?:PATH|ANCHOR)_UNSUPPORTED/);
   }
   assert.equal(requests, 0);

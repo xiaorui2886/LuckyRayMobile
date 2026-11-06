@@ -1,0 +1,20 @@
+.st-attachment-source{margin-bottom:18px;display:flow-root}
+.st-attachment-controls{border:0;margin:0;padding:0;min-width:0}
+.st-attachment-source>.st-source{margin:0}
+.st-attachment-filters{display:flex;flex-direction:column;gap:8px;margin:0 0 14px}
+.st-attachment-filter,.st-attachment-choice,.st-attachment-back{font:inherit;color:var(--st-ink);border:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;cursor:pointer}
+.st-attachment-filter{display:flex;align-items:center;gap:12px;width:100%;min-height:48px;padding:12px 14px;border-radius:14px;background:var(--st-surface-2,rgba(127,127,140,.09));text-align:left}
+.st-attachment-filter-label{flex:none;font-size:12px;opacity:.58}
+.st-attachment-filter-value{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500}
+.st-attachment-chevron{width:18px;height:18px;flex:0 0 18px;display:block;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;opacity:.5}
+.st-attachment-filter:focus-visible,.st-attachment-choice:focus-visible,.st-attachment-back:focus-visible{outline:2px solid var(--st-accent);outline-offset:2px}
+.st-attachment-filter:disabled,.st-attachment-choice:disabled{opacity:.45;cursor:default}
+.st-attachment-back{display:flex;align-items:center;gap:8px;min-height:44px;padding:0 4px;margin:0 0 12px;background:transparent;font-size:14px;opacity:.72}
+.st-attachment-back>span{font-size:24px;line-height:1}
+.st-attachment-choice{display:flex;align-items:center;gap:12px;text-align:left;width:100%;min-height:52px;padding:14px;border-radius:14px;background:transparent;margin-bottom:4px}
+.st-attachment-choice[aria-pressed=true]{background:var(--st-surface-2,rgba(127,127,140,.09))}
+.st-attachment-choice>span:first-child{flex:1;min-width:0;overflow-wrap:anywhere;font-size:15px;line-height:1.5}
+.st-attachment-choice>small{flex:none;font-size:12px;opacity:.6}
+.st-attachment-check{flex:none;color:var(--st-accent);font-size:17px}
+@media (prefers-reduced-motion:no-preference){.st-attachment-filter,.st-attachment-choice{transition:background-color .12s ease}}
+

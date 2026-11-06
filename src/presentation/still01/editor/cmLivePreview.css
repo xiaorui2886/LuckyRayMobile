@@ -1,0 +1,107 @@
+/* Keep preview line rules more specific than the retained .is-cm .cm-line reset. */
+/* Ordinary editing and source mode share one document. Only this decoration
+   layer disappears in source mode. No hidden editable HTML mirror. */
+.st-note-editor .cm-lp-strong{font-weight:700}
+.st-note-editor .cm-lp-emphasis{font-style:italic}
+.st-note-editor .cm-lp-delete{text-decoration:line-through;color:var(--st-secondary)}
+.st-note-editor .cm-lp-inlineCode{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.92em;background:var(--st-selected,#eef0f5);border-radius:4px;padding:.08em .2em}
+.st-note-editor .cm-lp-highlight{background:var(--note-highlight,var(--st-focus));color:inherit;border-radius:3px;box-shadow:inset 0 -1px var(--st-accent)}
+.st-note-editor.is-cm .cm-line.cm-lp-heading{font-weight:700;line-height:1.4;padding-top:.35em;padding-bottom:.15em}
+.st-note-editor.is-cm .cm-line.cm-lp-h1{font-size:1.65em}.st-note-editor.is-cm .cm-line.cm-lp-h2{font-size:1.4em}.st-note-editor.is-cm .cm-line.cm-lp-h3{font-size:1.2em}.st-note-editor.is-cm .cm-line.cm-lp-h4{font-size:1.1em}
+.st-note-editor.is-cm .cm-line.cm-lp-setext{line-height:.3em;min-height:.3em}
+.st-note-editor.is-cm .cm-line.cm-lp-quote{border-left:3px solid var(--st-accent,#6554c0);padding-left:.8em;color:var(--st-secondary)}
+.st-note-editor.is-cm .cm-line.cm-lp-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--st-selected,#eef0f5);font-size:.92em;padding-left:.65em;padding-right:.65em}
+.st-note-editor.is-cm .cm-line.cm-lp-code.is-first{border-radius:7px 7px 0 0;padding-top:.3em}.st-note-editor.is-cm .cm-line.cm-lp-code.is-last{border-radius:0 0 7px 7px;padding-bottom:.3em}
+.st-note-editor.is-cm .cm-line.cm-lp-code .cm-lp-marker{font:11px/1.5 var(--st-font);color:var(--st-secondary)}
+.st-note-editor.is-cm .cm-line.cm-lp-list.is-checked{color:var(--st-secondary)}
+.st-note-editor .cm-lp-task{display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;width:1.15em;height:1.15em;margin:0 .2em 0 0;padding:0;border:1.5px solid var(--st-secondary,#6b7280);border-radius:4px;background:transparent;color:var(--st-accent,#6554c0);font-size:inherit;line-height:1;touch-action:manipulation}
+.st-note-editor .cm-lp-task[aria-checked=true]{border-color:var(--st-accent,#6554c0);background:var(--st-selected,#eef0f5)}
+.st-note-editor .cm-lp-rule{display:block;height:1.2em;position:relative;cursor:text}.st-note-editor .cm-lp-rule:after{content:'';position:absolute;top:50%;left:0;right:0;border-top:1px solid var(--st-line,#d5d9e3)}
+.st-note-editor .cm-lp-link-wrap{display:inline;position:relative}
+.st-note-editor button.cm-lp-link,.st-note-editor button.cm-lp-file{display:inline;padding:0 .06em;border:0;border-radius:3px;background:transparent;color:var(--st-accent,#6554c0);font:inherit;line-height:inherit;text-decoration:underline;text-decoration-thickness:.06em;text-underline-offset:.17em;white-space:normal;overflow-wrap:anywhere;touch-action:pan-y}
+.st-note-editor button.cm-lp-link:focus-visible,.st-note-editor button.cm-lp-file:focus-visible{outline:2px solid var(--st-accent);outline-offset:2px}
+.st-note-editor .cm-lp-link.is-missing{opacity:.7;text-decoration-style:dashed}.st-note-editor .cm-lp-link.is-ambiguous{text-decoration-style:dotted}
+.st-note-editor .cm-lp-external{font-size:.75em;margin-left:.15em;text-decoration:none}.st-note-editor .cm-lp-link-status{font-size:.8em}
+.st-note-editor .cm-lp-file-status{font-size:.8em;color:var(--st-secondary)}
+.st-note-editor .cm-lp-link-menu{position:fixed;z-index:21000;display:flex;flex-direction:column;box-sizing:border-box;padding:5px;border:1px solid var(--st-line,#ddd);border-radius:12px;background:var(--st-sheet,#fff);color:var(--st-ink,#222);box-shadow:0 8px 24px #0002;white-space:normal}
+.st-note-editor .cm-lp-link-menu button{display:block;width:100%;min-height:42px;text-align:left;border:0;border-radius:8px;padding:8px 12px;background:transparent;font:14px var(--st-font);color:inherit}
+.st-note-editor .cm-lp-link-menu button:active{background:var(--st-selected,#eef0f5)}
+.st-note-editor .cm-lp-preview-status{font-size:12px;line-height:1.5;color:var(--st-muted,#888);padding:8px 12px;pointer-events:none}
+
+/* Table geometry is identical before/during/after selection. Controls live in
+   small, constant edge lanes, never subtract an active-only 80px from the grid. */
+.st-note-editor .cm-lp-table-wrap{position:relative;box-sizing:border-box;width:100%;max-width:100%;margin:.2em 0;padding:18px 0 22px;overflow:visible}
+.st-note-editor .cm-lp-table{table-layout:fixed;border-collapse:collapse;width:100%;min-width:0;font-size:1em;line-height:1.5}
+.st-note-editor .cm-lp-table td,.st-note-editor .cm-lp-table th{box-sizing:border-box;border:1px solid var(--st-line,#d5d9e3);padding:.25em .5em;min-width:0;max-width:none;white-space:normal;overflow-wrap:anywhere;word-break:break-word;vertical-align:top;cursor:text}
+.st-note-editor .cm-lp-table th{background:transparent;font-weight:600}
+.st-note-editor .cm-lp-table code{white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.st-note-editor .cm-lp-table td:focus-visible{outline:1px solid var(--st-accent);outline-offset:-1px}
+.cm-lp-table-input{position:absolute;z-index:1;display:block;width:100%;min-width:0;box-sizing:border-box;margin:0;padding:0;border:0;border-radius:0;outline:0;background:transparent;color:inherit;font:inherit;line-height:inherit;resize:none;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.cm-lp-table-tools{position:static;color:var(--st-muted,#727b79)}
+.cm-lp-table-tools[hidden],.cm-lp-table-tools button[hidden],.cm-lp-table-status[hidden]{display:none}
+.cm-lp-table-tools button{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-height:28px;min-width:28px;padding:5px;border:0;border-radius:8px;background:transparent;color:inherit;touch-action:manipulation;cursor:pointer}
+.cm-lp-table-tools svg,.cm-lp-table-menu svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+.cm-lp-table-tools button:active,.cm-lp-table-tools button:focus-visible,.cm-lp-table-tools button[aria-expanded="true"]{background:var(--st-hover,rgba(110,120,120,.1));color:var(--st-ink,inherit);opacity:1}
+.cm-lp-table-tools button:focus-visible{outline:2px solid var(--st-accent,#4b7d78);outline-offset:-2px}
+.cm-lp-table-tools button:disabled{opacity:.3;cursor:default}
+.cm-lp-table-edge{position:absolute;z-index:2;opacity:.85;transition:background-color .15s,color .15s}
+.cm-lp-table-edge--corner{top:0;left:0}
+.cm-lp-table-edge--top{top:0;left:var(--table-column-x,50%);transform:translateX(-50%)}
+.cm-lp-table-tools .cm-lp-table-edge--left,.cm-lp-table-tools .cm-lp-table-edge--right{min-width:20px;width:20px;min-height:36px;padding:2px}
+.cm-lp-table-edge--left{left:-22px;top:var(--table-row-y,50%);transform:translateY(-50%)}
+.cm-lp-table-edge--right{right:-22px;top:var(--table-row-y,50%);transform:translateY(-50%)}
+.cm-lp-table-edge--bottom{top:var(--table-bottom,100%);left:var(--table-column-x,50%);transform:translateX(-50%)}
+.cm-lp-table-menu{position:fixed;left:12px;right:12px;bottom:8px;z-index:21000;box-sizing:border-box;display:flex;flex-direction:column;gap:2px;width:auto;max-width:560px;max-height:55vh;overflow-y:auto;overscroll-behavior:contain;margin:0 auto;padding:8px;background:var(--st-sheet,#f4f5f8);color:var(--st-ink,#26312f);border:1px solid var(--st-line,#dce2df);border-radius:18px;box-shadow:0 8px 28px #0003}
+.cm-lp-table-menu button{display:inline-flex;align-items:center;box-sizing:border-box;border:0;background:transparent;color:inherit;cursor:pointer;touch-action:manipulation;flex:0 0 auto;min-height:44px;width:100%;justify-content:flex-start;gap:12px;padding:10px 14px;border-radius:10px;font:14px/1.4 var(--st-font);text-align:left}
+.cm-lp-table-menu button svg{flex:none;width:19px;height:19px}
+.cm-lp-table-menu button:disabled{opacity:.3;cursor:default}
+.cm-lp-table-menu button:focus-visible{outline:2px solid var(--st-accent);outline-offset:-2px}
+.cm-lp-table-menu button:active{background:var(--st-selected);color:var(--st-accent)}
+.cm-lp-table-tools [data-table-grip]{touch-action:none;cursor:grab;background:var(--st-hover,var(--st-selected));color:var(--st-ink);border:1px solid var(--st-line);border-radius:9px}
+.cm-lp-table-tools [data-table-grip="column"]{min-width:40px;height:22px;min-height:22px;top:2px;padding:3px 7px}
+.cm-lp-table-tools [data-table-grip="row"]{border-radius:6px;min-height:32px}
+.cm-lp-table-tools .cm-lp-table-edge--right,.cm-lp-table-tools .cm-lp-table-edge--bottom{border:1px solid var(--st-line);border-radius:8px;background:var(--st-sheet);color:var(--st-ink)}
+.cm-lp-table-tools .cm-lp-table-edge--bottom{height:24px;min-height:24px;margin-top:1px}
+.cm-lp-table-wrap[data-table-drag="row"] .is-selected-row>*,.cm-lp-table-wrap[data-table-drag="column"] .is-selected-column{background:var(--st-selected);box-shadow:inset 0 0 0 1px var(--st-accent)}
+.cm-lp-table-wrap[data-table-drag] [data-table-grip]{color:var(--st-accent);cursor:grabbing}
+.cm-lp-table-wrap .is-table-drop-target{outline:2px solid var(--st-accent);outline-offset:-2px}
+/* Only the edited cell is accented. No filled cross covering the whole grid. */
+.st-note-editor .cm-lp-table .is-editing{background:transparent;box-shadow:inset 0 0 0 1px var(--st-accent,#4b7d78)}
+@media(prefers-reduced-motion:reduce){.cm-lp-table-edge{transition:none}}
+.cm-lp-table-status{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+.st-note-editor .cm-lp-table-viewport{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin}
+
+/* Browser anchoring must not compete with the explicit note viewport policy. */
+.st-note-editor .cm-scroller{position:relative;overflow-anchor:none;scroll-behavior:auto}
+
+.cm-lp-table-wrap[data-table-selection="row"] .is-selected-row>*,.cm-lp-table-wrap[data-table-selection="column"] .is-selected-column{background:var(--st-selected);box-shadow:inset 0 0 0 1px var(--st-accent)}
+/* A small painted grip retains a forgiving target without widening the grid. */
+.cm-lp-table-edge::before{content:'';position:absolute;inset:-4px -3px}
+.st-note-editor .cm-lp-table mark{background:var(--note-highlight,var(--st-focus));color:inherit;border-radius:3px;box-shadow:inset 0 -1px var(--st-accent)}
+
+/* Borrow the existing page gutter without narrowing the table or paragraph. */
+.st-note-surface .st-note-editor.is-cm{width:calc(100% + 44px);margin-left:-22px}
+.st-note-surface .st-note-editor.is-cm .cm-content{box-sizing:border-box;padding-left:var(--st-note-editor-inset,22px);padding-right:var(--st-note-editor-inset,22px)}
+.st-note-editor .cm-lp-table .is-editing{color:transparent}
+.st-note-editor .cm-lp-table .is-editing>*{visibility:hidden}
+.cm-lp-table-menu-group{display:flex;flex-direction:column;flex:0 0 auto;padding:3px;background:var(--st-surface,var(--st-selected));border-radius:12px}
+.cm-lp-table-menu-group+.cm-lp-table-menu-group{margin-top:7px}
+.cm-lp-table-menu button.is-destructive{color:var(--st-danger,#b84b50)}
+
+.st-note-editor .cm-lp-table-input{font-size:var(--note-body-size,15px);line-height:1.5;color:var(--st-ink)}
+
+/* Unfocused preview is content only. The hidden DOM state also removes the
+   controls from keyboard/accessibility navigation, not just their paint. */
+.cm-lp-table-wrap:not(.has-table-selection) .cm-lp-table-tools{display:none}
+.cm-lp-table-input[hidden]{display:none}
+/* One compact separator lane per actual blank Markdown line. Do not target
+   .cm-gap, content children, viewport placeholders, or source-mode lines. */
+.st-note-editor.is-cm .cm-line.cm-lp-blank-separator{line-height:.55em;min-height:.55em}
+.st-note-editor.is-cm .cm-line.cm-lp-rule-line{line-height:.8em}
+.st-note-editor .cm-lp-rule{height:.8em}
+/* Border strips join the grid, rather than floating pills in the page gutter. */
+.cm-lp-table-tools .cm-lp-table-edge--right{top:var(--table-top,18px);right:-20px;transform:none;height:var(--table-height,100%);border-left:0;border-radius:0 4px 4px 0;background:transparent}
+.cm-lp-table-tools .cm-lp-table-edge--bottom{left:0;top:var(--table-bottom,100%);width:100%;height:22px;min-height:22px;transform:none;margin:0;border-top:0;border-radius:0 0 4px 4px;background:transparent}
+.cm-lp-table-tools [data-table-grip]{background:transparent;border:0;border-radius:6px;padding:2px}
+.cm-lp-table-tools [data-table-grip="column"]{min-width:28px;height:18px;min-height:18px;top:0;padding:0 4px}
+.cm-lp-table-tools [data-table-grip="row"]{min-height:28px}

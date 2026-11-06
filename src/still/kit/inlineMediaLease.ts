@@ -17,7 +17,8 @@ export function openInlineMediaLease(options: {
       try { grant = await options.cached(); }
       catch (error) {
         // Permission/source/version failures may never turn into a stream retry.
-        if (!live || !String(error).includes("CONTENT_NOT_CACHED")) throw error;
+        const code = String(error);
+        if (!live || !(code.includes("CONTENT_NOT_CACHED") || code.includes("MEDIA_CACHED_TYPE_UNCONFIRMED"))) throw error;
         grant = await options.stream();
       }
       if (!live) { release(grant.token); return; }

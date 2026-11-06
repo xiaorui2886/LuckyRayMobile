@@ -135,7 +135,7 @@ test("interaction closure — dock/compose hide on text focus via visibility onl
   assert.match(appTsx, /const \[editingText, setEditingText\] = useState\(false\);/, "editing state exists");
   assert.match(appTsx, /return <StillApp conn=\{conn\} editingText=\{editingText\} \/>;/, "the flag is handed to the Still shell");
   assert.match(shellTsx, /className="st-app"/, "Still app shell present");
-  assert.match(shellTsx, /data-text-entry=\{editingText \? "true" : undefined\}/, "Still shell hides dock/compose via data-text-entry");
+  assert.match(shellTsx, /data-text-entry=\{editingText \|\| \(rootTab === "ai" && lshIme\) \? "true" : undefined\}/, "Still shell hides dock/compose via data-text-entry");
   assert.match(stillCss, /data-text-entry/, "authority CSS consumes the flag");
   assert.doesNotMatch(appTsx, /BottomNav|ComposeFab|bottom-nav|compose-fab/, "legacy nav/FAB no longer rendered");
   assert.doesNotMatch(appTsx, /--ime-inset/, "still no second IME authority");
@@ -144,9 +144,10 @@ test("interaction closure — dock/compose hide on text focus via visibility onl
 
 // ---- system bar appearance (用户问题1 标记1) ---------------------------------
 test("interaction closure — system-bar appearance follows color mode (visual only)", () => {
-  assert.match(clientTs, /setSystemBarAppearance: \(dark: boolean, dimmed = false\)/, "TS api present");
-  assert.match(appTsx, /document\.documentElement\.dataset\.theme === "dark"/, "reads the theme authority");
-  assert.match(appTsx, /attributeFilter: \["data-theme"\]/, "syncs on color-mode change");
+  assert.match(clientTs, /setSystemBarAppearance: \(dark: boolean, dimmed = false, statusRgb\?: number, navigationRgb\?: number\)/, "TS api present");
+  const appearance = readFileSync(new URL("../src/services/systemBarAppearance.ts", import.meta.url), "utf8");
+  assert.match(appearance, /app\.dataset\.mode === "dark"/, "reads the rendered theme authority");
+  assert.match(appearance, /"data-theme", "data-mode", "data-reduced"/, "syncs on color-mode change");
   assert.match(deviceKt, /isAppearanceLightStatusBars = !dark/, "light/dark icon appearance flips");
   // Frozen: the approved inset math must be untouched.
   assert.match(mainKt, /val bottom = maxOf\(safe\.bottom, ime\.bottom\)/);

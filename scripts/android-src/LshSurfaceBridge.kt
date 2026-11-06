@@ -42,6 +42,10 @@ object LshSurfaceBridge {
     /** P1-F4: retire the carrier bound to this lease (Activity destroy). */
     private external fun nativeRetire(lease: String)
 
+    /** Native-only read check at actual UI execution, never exposed to page JS. */
+    private external fun nativeIsLeaseCurrent(lease: String): Boolean
+    fun isLeaseCurrent(lease: String): Boolean = lease.isNotEmpty() && nativeIsLeaseCurrent(lease)
+
     /**
      * Launch the full-screen surface on top of the current task.
      *
@@ -60,6 +64,9 @@ object LshSurfaceBridge {
         activity.startActivity(intent)
         return true
     }
+
+    @JvmStatic
+    fun embedded(request: String): String = LshEmbeddedSurface.command(request)
 
     /**
      * P1-F4: called by the Activity when it is destroyed. Rust retires the

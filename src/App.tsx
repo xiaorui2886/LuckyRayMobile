@@ -1,12 +1,14 @@
-import { systemBarScrim, systemBarUpdater } from "./services/systemBarAppearance";
-import { useCallback, useEffect, useSyncExternalStore, useState } from "react";
+import { foregroundConnection } from "./services/foregroundConnection";
+import { installTextEntryReveal, isTextEntryTarget } from "./services/textEntryTarget";
+import { observeSystemBarAppearance } from "./services/systemBarAppearance";
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onBackButtonPress } from "@tauri-apps/api/app";
 import { api, type ConnState } from "./services/client";
 import { syncCoordinator } from "./services/syncCoordinator";
 import { KnowledgeLiveSync } from "./services/knowledgeLiveSync";
 import { knowledgeChangeFeed, knowledgePermissionsChanged } from "./still/kit/knowledgeSession";
-import { refreshConnectionStateOnDataCommit } from "./services/connectionStateRefresh";
+import { createConnectionSnapshotRefresh, refreshConnectionStateOnDataCommit } from "./services/connectionStateRefresh";
 import { localDataStore } from "./services/localDataStore";
 import { shouldPublishInboxCommit } from "./services/shareIngest";
 import { overlayStack } from "./services/overlayStack";
@@ -16,7 +18,10 @@ import { StillHealthRecovery } from "./still/StillSettings";
 
 export { navigation };
 export type { Tab };
-const knowledgeLiveSync = new KnowledgeLiveSync(knowledgeChangeFeed, () => syncCoordinator.wake(), knowledgePermissionsChanged);
+const knowledgeLiveSync = new KnowledgeLiveSync(knowledgeChangeFeed, () => syncCoordinator.wake(), (instance, revision) => {
+  knowledgePermissionsChanged(instance, revision);
+  syncCoordinator.authorizationChanged(instance);
+});
 
 export default function App() {
   const [conn, setConn] = useState<ConnState | null>(null);
@@ -50,15 +55,12 @@ export default function App() {
   );
   void route; // the Still shell subscribes to the same authority itself
 
-  const refresh = useCallback(async () => {
-    try {
-      const c = await api.connState();
-      setConn(c);
-      if (c.ws) setWs(c.ws);
-    } catch {
-      /* not ready */
-    }
-  }, []);
+  const currentPairedInstance = useRef("");
+  currentPairedInstance.current = conn?.paired ? conn.identity?.instanceId || "" : "";
+  const refresh = useMemo(() => createConnectionSnapshotRefresh(api.connState, c => {
+    setConn(c);
+    if (c.ws) setWs(c.ws);
+  }, instance => syncCoordinator.authorizationChanged(instance)), []);
 
   useEffect(() => {
     const instance = conn?.paired ? conn.identity?.instanceId || "" : "";
@@ -70,6 +72,7 @@ export default function App() {
 
   useEffect(() => {
     if (!conn?.paired || ws.state !== "connected") return;
+    syncCoordinator.authorizationChanged(conn.identity?.instanceId || "");
     syncCoordinator.trigger();
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") syncCoordinator.trigger();
@@ -82,14 +85,7 @@ export default function App() {
   // 连接电脑 and tap 重新连接. Idempotent on the Rust side (already-running
   // returns immediately; an explicit 断开连接 is honoured and never
   // overridden; an unpaired device does nothing).
-  const resumeConnection = useCallback(async () => {
-    try {
-      await api.connResume();
-    } catch {
-      /* transport/runtime unavailable — the manual 重新连接 action remains */
-    }
-    void refresh();
-  }, [refresh]);
+  const resumeConnection = useMemo(() => foregroundConnection(api.connResume, refresh), [refresh]);
 
   useEffect(() => {
     let un1: (() => void) | undefined, un2: (() => void) | undefined, unShare: (() => void) | undefined, unFocus: (() => void) | undefined;
@@ -99,8 +95,9 @@ export default function App() {
       un1 = await listen("lr:ws-status", (e) => {
         const v = e.payload as any;
         setWs((p) => ({ ...p, state: v.state, last_seq: v.last_seq }));
-        refresh();
-        if (v.state === "connected") syncCoordinator.trigger(); // WS reconnect -> sync
+        // A native authenticated reconnect is meaningful even when React
+        // coalesced the intermediate stopped/connecting snapshot.
+        void refresh(v.state === "connected" ? currentPairedInstance.current : undefined);
       });
       un2 = await listen("lr:ws-event", (e) => {
         const v = e.payload as any;
@@ -117,6 +114,7 @@ export default function App() {
       // the WebView was ready and got lost. Re-ingest is idempotent by share
       // digest, so a focus-triggered sweep closes that gap safely.
       unFocus = await listen("tauri://focus", async () => {
+        window.dispatchEvent(new Event("luckyray:foreground"));
         await ingestShares();
         setInboxTick((t) => t + 1);
       });
@@ -126,12 +124,12 @@ export default function App() {
       void resumeConnection();
       // Official Android back-button handling (Tauri 2).
       unBack = await onBackButtonPress(() => {
-        // A note editor with unsaved work consumes BACK first (same contract
-        // as before — it preventDefaults and runs its own guarded exit).
-        if (!window.dispatchEvent(new Event("luckyray:desktop-note-back", {cancelable: true}))) return;
-        // A modal sheet/dialog consumes BACK before any navigation: closing the
-        // overlay is always the least surprising result.
+        // A preview or sheet must consume BACK before the note's guarded exit.
+        // Otherwise a read-only image preview navigates out of the note and
+        // unmounts the dialog before its registered dismisser can run.
         if (overlayStack.dismissTop()) return;
+        // With no overlay, retain the note's save-before-navigation guard.
+        if (!window.dispatchEvent(new Event("luckyray:desktop-note-back", {cancelable: true}))) return;
         // MATERIAL-LIBRARY-INSTANT-R1 R7 (三): an active multi-select consumes
         // BACK before any navigation — exiting the selection is less surprising
         // than leaving the page. When no selection is active the event is not
@@ -150,14 +148,18 @@ export default function App() {
     // before the WebView was ready. Idempotent by share digest.
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
+        window.dispatchEvent(new Event("luckyray:foreground"));
         void ingestShares();
         setInboxTick((t) => t + 1);
-        // M3-M1 R2: a phone returning to the foreground (or waking from a
-        // doze-killed socket) re-establishes the existing pairing. The manual
-        // 断开连接 opt-out still vetoes this on the Rust side.
-        void resumeConnection();
       }
     };
+    const onForeground = () => { void resumeConnection(); };
+    // Some Android returns emit only the native signal (no visibility/focus
+    // edge). Fan it through the same app-wide event so AI and other retained
+    // surfaces revalidate too, rather than waking only the socket authority.
+    const onNativeForeground = () => window.dispatchEvent(new Event("luckyray:foreground"));
+    window.addEventListener("luckyray:foreground", onForeground);
+    window.addEventListener("lr:main-resume", onNativeForeground);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       un1?.();
@@ -167,6 +169,8 @@ export default function App() {
       unBack?.unlisten?.();
       unDataCommit();
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("luckyray:foreground", onForeground);
+      window.removeEventListener("lr:main-resume", onNativeForeground);
     };
   }, [refresh, resumeConnection]);
 
@@ -253,7 +257,7 @@ export default function App() {
   useEffect(() => {
     const onFocusIn = (e: FocusEvent) => {
       const t = e.target as HTMLElement | null;
-      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || (t instanceof HTMLElement && t.isContentEditable)) {
+      if (isTextEntryTarget(t)) {
         setEditingText(true);
       }
     };
@@ -261,8 +265,7 @@ export default function App() {
       // Defer: focus may move between fields (search -> clear button).
       window.setTimeout(() => {
         const a = document.activeElement;
-        const stillEditing = a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement ||
-          (a instanceof HTMLElement && a.isContentEditable);
+        const stillEditing = isTextEntryTarget(a);
         if (!stillEditing) setEditingText(false);
       }, 60);
     };
@@ -287,7 +290,7 @@ export default function App() {
       const h = window.visualViewport?.height ?? window.innerHeight;
       if (h < closedViewportHeight - 60) {
         const a = document.activeElement;
-        if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || (a instanceof HTMLElement && a.isContentEditable)) {
+        if (isTextEntryTarget(a)) {
           setEditingText(true);
         }
       } else if (h >= closedViewportHeight - 60) {
@@ -311,36 +314,12 @@ export default function App() {
   // appearance in sync with the color mode (light -> light bar with dark
   // icons; dark -> dark bar with light icons). Presentation only — the
   // approved native inset geometry is never touched here.
-  useEffect(() => {
-    const updater = systemBarUpdater(api.setSystemBarAppearance);
-    const apply = () => {
-      const dark = document.documentElement.dataset.theme === "dark";
-      updater.request(dark, systemBarScrim.active());
-    };
-    apply();
-    const observer = new MutationObserver(apply);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-    const release = systemBarScrim.subscribe(apply);
-    return () => { release(); observer.disconnect(); updater.dispose(); };
-  }, []);
+  useEffect(() => observeSystemBarAppearance(api.setSystemBarAppearance), []);
 
   // Android System WebView 83 does not reliably scroll a nested flex scroller
   // when an IME focuses an input, even with ADJUST_RESIZE.  Bring any editor
   // control into the visible portion of the shell after the IME settles.
-  useEffect(() => {
-    const revealFocusedControl = (event: FocusEvent) => {
-      const target = event.target;
-      const isEditor = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement ||
-        (target instanceof HTMLElement && target.isContentEditable);
-      if (!isEditor) return;
-      window.setTimeout(() => {
-        target.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
-      }, 160);
-    };
-
-    document.addEventListener("focusin", revealFocusedControl);
-    return () => document.removeEventListener("focusin", revealFocusedControl);
-  }, []);
+  useEffect(() => installTextEntryReveal(document), []);
 
   if (health && !health.ok) {
     return (

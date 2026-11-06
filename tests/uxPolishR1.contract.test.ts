@@ -157,8 +157,8 @@ test("ux-r1 — LSH-ready page is led by LightSeek, not the Runs-unsupported emp
   // The D/E/F actions live in the SHARED section every canUseLsh state uses.
   const section = src.slice(src.indexOf("const lshSection = ("), src.indexOf("// Runs-unsupported: LightSeek leads"));
   assert.match(section, /进入 LightSeek/, "F: the primary entry is the section's action");
-  assert.match(section, /等待电脑授权/, "D: grant-off is a truthful waiting state");
-  assert.match(section, /暂时不可用/, "E: runtime-down is truthful");
+  assert.match(section, /重新检查授权/, "D: grant-off is a truthful waiting state");
+  assert.match(section, /重新连接/, "E: runtime-down is truthful");
   assert.match(section, /st-lsh-mark/, "the structured mark is part of the section");
   assert.match(panel, /st-lsh-subnote/, "Runs-unsupported is demoted to a footnote");
   assert.match(panel, /\{lshSection\}/, "it renders the SAME structured section");
@@ -213,7 +213,7 @@ test("ux-r1 — selection lifecycle: explicit entry, exits, no resurrection", ()
     "a Desktop identity change exits selection");
   // REPAIR-R5: the owner change is now the authority bind, and it still clears
   // both the ids and the mode (A selections never survive into B).
-  const bindIdx = LIBRARY.indexOf("desktopAuthority.bind(desktopOwner, DESKTOP_SOURCE());");
+  const bindIdx = LIBRARY.indexOf("desktopAuthority.bind(desktopOwner, source);");
   assert.ok(bindIdx > 0, "the owner bind exists");
   const ownerEffect = LIBRARY.slice(bindIdx, bindIdx + 460);
   assert.match(ownerEffect, /setSelectedIds\(\[\]\);/, "owner change clears the ids");

@@ -42,8 +42,9 @@ export class KnowledgeFolderCatalog {
   private active = "";
   private online = false;
   private task: Promise<void> | null = null;
-  private client: Pick<KnowledgeClient, "directories"> & Partial<Pick<KnowledgeNavigationReader, "subscribe" | "authorityKey" | "denied" | "refresh">>;
+  private client: Pick<KnowledgeClient, "directories"> & Partial<Pick<KnowledgeNavigationReader, "subscribe" | "authorityKey" | "denied" | "refresh" | "securityRevision">>;
   private authority = "unknown";
+  private revisions = new Map<string, number>();
   private legacy: (instance: string, vault: string) => Promise<string[]>;
   private storage?: FolderStorage;
   constructor(client: KnowledgeFolderCatalog["client"],
@@ -54,20 +55,21 @@ export class KnowledgeFolderCatalog {
       // Denial also invalidates inactive scopes so switching back cannot
       // resurrect an earlier cached inventory for the same desktop.
       for (const snapshot of this.snapshots.values()) {
-        if (client.denied?.(snapshot.instance, "directories")) this.deny(snapshot);
+        this.snapshot(snapshot); // security epoch changes retire inactive scopes too
+        if (client.denied?.(snapshot.instance, "directories", snapshot.vault)) this.deny(snapshot);
       }
       const snapshot = this.snapshots.get(this.active);
       if (!snapshot || !this.online) return;
-      const next = client.authorityKey?.(snapshot.instance, "directories") || "unknown";
+      const next = client.authorityKey?.(snapshot.instance, "directories", snapshot.vault) || "unknown";
       if (next === this.authority) return;
       const previous = this.authority; this.authority = next;
-      if (client.denied?.(snapshot.instance, "directories")) return;
+      if (client.denied?.(snapshot.instance, "directories", snapshot.vault)) return;
       // The first discovery belongs to the already-running request. A later
       // authority change retires all pages before starting a new read.
-      if (previous === "unknown" && snapshot.phase === "loading") return;
+      if (previous === "unknown" && this.task) return;
       ++this.epoch; this.task = null;
       if (snapshot.phase !== "denied") {
-        this.snapshots.set(this.active, { ...snapshot, paths: [], complete: false, phase: "loading", origin: "none" }); this.emit();
+        this.snapshots.set(this.active, { ...snapshot, phase: snapshot.complete ? snapshot.phase : "loading" }); this.emit();
       }
       void this.activate(snapshot, true, true);
     });
@@ -77,7 +79,14 @@ export class KnowledgeFolderCatalog {
   snapshot(scope: FolderScope): FolderSnapshot {
     const key = folderScopeKey(scope);
     let value = this.snapshots.get(key);
-    if (this.client.denied?.(scope.instance, "directories") && value?.phase !== "denied") {
+    const revision = this.client.securityRevision?.(scope.instance, scope.vault) ?? 0;
+    if (this.revisions.has(key) && this.revisions.get(key) !== revision) {
+      if (key === this.active) { ++this.epoch; ++this.refreshToken; this.task = null; }
+      value = empty(scope); this.snapshots.set(key, value);
+      try { this.storage?.removeItem(CACHE_PREFIX + key); } catch { /* session fence is sufficient */ }
+    }
+    this.revisions.set(key, revision);
+    if (this.client.denied?.(scope.instance, "directories", scope.vault) && value?.phase !== "denied") {
       this.deny(scope, false); value = this.snapshots.get(key);
     }
     if (!value) {
@@ -108,14 +117,14 @@ export class KnowledgeFolderCatalog {
     if (!changed && this.task && !force) return this.task;
     if (!changed && !force && this.snapshot(scope).phase !== "idle") return Promise.resolve();
     this.active = key; this.online = online;
-    this.authority = this.client.authorityKey?.(scope.instance, "directories") || "unknown";
+    this.authority = this.client.authorityKey?.(scope.instance, "directories", scope.vault) || "unknown";
     const token = ++this.epoch;
     const live = () => token === this.epoch && key === this.active;
     const old = this.snapshot(scope);
-    if (this.client.denied?.(scope.instance, "directories") || (!online && old.phase === "denied")) {
+    if (this.client.denied?.(scope.instance, "directories", scope.vault) || (!online && old.phase === "denied")) {
       this.deny(scope); return Promise.resolve();
     }
-    this.snapshots.set(key, { ...old, phase: online ? "loading" : "offline" }); this.emit();
+    this.snapshots.set(key, { ...old, phase: online ? old.complete ? "ready" : "loading" : "offline" }); this.emit();
     const work = async () => {
       if (!scope.instance || !scope.vault) return;
       if (!online) {
@@ -165,7 +174,7 @@ export class KnowledgeFolderCatalog {
     const before = this.epoch;
     const refreshToken = ++this.refreshToken;
     if (!online || !scope.instance || !scope.vault) return this.activate(scope, online, true);
-    try { await this.client.refresh?.(scope.instance); }
+    try { await this.client.refresh?.(scope.instance, scope.vault); }
     catch (error) {
       if (refreshToken !== this.refreshToken || key !== this.active || !this.online) return;
       const code = String((error as { code?: string })?.code || error);
@@ -197,7 +206,7 @@ export class KnowledgeFolderCatalog {
 }
 export function folderStatus(snapshot: FolderSnapshot, online: boolean): string {
   if (snapshot.phase === "denied") return "未获电脑目录读取授权，请在电脑端开启后刷新。";
-  if (snapshot.phase === "loading" && online) return snapshot.complete ? "显示上次目录，正在更新…" : "正在读取电脑目录…";
+  if (snapshot.phase === "loading" && online) return snapshot.complete ? "" : "正在读取电脑目录…";
   if (!online) return snapshot.complete ? "电脑暂未连接 · 显示上次完整目录" : "电脑暂未连接 · 仅显示已缓存笔记的目录，可能缺少空目录";
   if (snapshot.phase === "ready") return "";
   const suffix = snapshot.complete ? "显示上次完整目录" : "仅显示已缓存笔记的目录，可能缺少空目录";

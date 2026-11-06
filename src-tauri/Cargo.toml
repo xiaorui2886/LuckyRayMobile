@@ -26,11 +26,14 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 sha2 = "0.10"
+unicode-normalization = "0.1"
 getrandom = "0.2"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "functions"] }
 uuid = { version = "1", features = ["v4"] }
 x509-parser = "0.16"
 base64 = "0.22"
+png = "=0.17.16"
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = false }

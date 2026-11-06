@@ -229,7 +229,7 @@ test("R5b-9 — no owner issues nothing; a coalesced call leaves state honest", 
 
 test("R5b-W1 — the page performs the bind + request + revalidate sequence", () => {
   const lib = LIB();
-  assert.match(lib, /desktopAuthority\.bind\(desktopOwner, DESKTOP_SOURCE\(\)\);/u,
+  assert.match(lib, /desktopAuthority\.bind\(desktopOwner, source\);/u,
     "the owner bind issues the first page-1");
   assert.match(lib, /const source = DESKTOP_SOURCE\(\);/u,"capture the current axes once");
   assert.match(lib, /setTimeout\(\(\) => desktopAuthority\.request\(source\), 180\)/u,

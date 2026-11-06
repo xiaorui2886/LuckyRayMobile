@@ -1,3 +1,12 @@
+import { NoteVaultWorkspace } from "./kit/NoteVaultWorkspace";
+import { noteSourceSelection } from "../services/noteSourceSelection";
+import { prepareManagedNote, type PreparedManagedNote } from "../services/preparedManagedNote";
+import { nextPageMotion } from "./kit/pageMotion";
+import { managedVault, managedNoteRoute, parseManagedNoteRoute } from "../services/managedVault";
+import "./kit/rootSwipe.css";
+import { RootSwipeContext, ROOT_SWIPE_TABS, rootSwipeTarget, useHorizontalSwipe, type SwipeDirection } from "./kit/useHorizontalSwipe";
+import { LocalNoteImportBridge } from "./kit/LocalNoteImportBridge";
+import type { NoteHeadingIntent } from "./kit/useNoteHeadingNavigation";
 // STILL-01.1 parity rebuild — production shell.
 //
 // The .st-app tree is the ONLY visible presentation in this build: every
@@ -12,7 +21,7 @@
 // feedback, and native insets stay the only IME geometry authority
 // (data-text-entry decides VISIBILITY of the dock/compose action only — it
 // never estimates a keyboard height).
-import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { HomeCapture, TabBar, type Root } from "../presentation/still01/Still";
 import { PageLayer } from "../presentation/still01/PageLayer";
 import "../presentation/still01/still.css";
@@ -40,11 +49,15 @@ import type { NoteSearchTarget } from "./kit/noteSearch";
 import { StillNote, StillNewNote } from "./StillNote";
 import { stillScene, NOTE_EDIT_PREFIX, type Scene } from "./stillScene";
 
-const ROOT_TABS: readonly string[] = ["home", "library", "ai", "knowledge", "settings"];
+import "./kit/knowledgeActions.css";
+import "../presentation/still01/defaultTheme.css";
+import "./kit/librarySurfaces.css";
+
+const ROOT_TABS: readonly string[] = ROOT_SWIPE_TABS;
 
 export type StillNav = {
   conn: ConnState | null;
-  open: (page: string, id?: string, opts?: { edit?: boolean; assetPreview?: AssetPreview; noteSearch?: NoteSearchTarget; linked?: boolean }) => void;
+  open: (page: string, id?: string, opts?: { edit?: boolean; assetPreview?: AssetPreview; noteHeading?: NoteHeadingIntent; noteSearch?: NoteSearchTarget; linked?: boolean; vaultName?: string }) => void;
   back: () => void;
   registerOverlay: (d: () => void) => () => void;
   mode: "light" | "dark";
@@ -77,6 +90,12 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
   const [reduced, setReducedState] = useState(() => {
     try { return localStorage.getItem(REDUCED_KEY) === "true"; } catch { return false; }
   });
+  const [lshIme, setLshIme] = useState(false);
+  useEffect(() => {
+    const onIme = (event: Event) => setLshIme((event as CustomEvent).detail?.active === true);
+    window.addEventListener("luckyray-lsh-ime", onIme);
+    return () => window.removeEventListener("luckyray-lsh-ime", onIme);
+  }, []);
   const [entered, setEntered] = useState(true);
   const [maskedKey, setMaskedKey] = useState<number | null>(null);
   const [leaving, setLeaving] = useState(false);
@@ -85,24 +104,43 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
   const exitKey = useRef<number | null>(null);
   const returnKey = useRef<number | null>(null);
   const appRef = useRef<HTMLDivElement>(null);
-  // Only the materials root is retained, after its first visit. Its existing
+  // Visited content roots retain their existing controllers and view state. Their existing
   // pagers/session own the state; do not invent another root snapshot cache.
   const libraryVisited = useRef(false);
+  const knowledgeVisited = useRef(false);
+  if (rootTab === "knowledge") knowledgeVisited.current = true;
+  const agentVisited = useRef(false);
+  if (rootTab === "ai") agentVisited.current = true;
   if (rootTab === "library") libraryVisited.current = true;
 
   // Pages above the root, in stack order. Pure derivation — nothing here
   // creates, pops or rewrites history.
+  const [, refreshAssetPreview] = useState(0);
   const assetPreviews = useRef(new WeakMap<Route, AssetPreview>());
+  const preparedNotes = useRef(new WeakMap<Route, PreparedManagedNote>());
+  const stagedNote = useRef<{ id: string; prepared: PreparedManagedNote } | null>(null);
+  const noteHeadings = useRef(new WeakMap<Route, NoteHeadingIntent>());
   const noteSearches = useRef(new WeakMap<Route, NoteSearchTarget>());
   const [, refreshNoteIntent] = useState(0);
-  const pages: (Scene & { assetPreview?: AssetPreview; noteSearch?: NoteSearchTarget })[] = [];
+  const pages: (Scene & { assetPreview?: AssetPreview; noteHeading?: NoteHeadingIntent; noteSearch?: NoteSearchTarget; prepared?: PreparedManagedNote })[] = [];
   for (let i = 1; i < stack.length; i++) {
     const r = stack[i];
     const key = routeKey(r);
     const scene = stillScene(r, key);
-    if (scene) pages.push({ ...scene, assetPreview: assetPreviews.current.get(r), noteSearch: noteSearches.current.get(r) });
+    if (stagedNote.current && scene?.name === "note" && scene.id === stagedNote.current.id && !preparedNotes.current.has(r)) {
+      preparedNotes.current.set(r, stagedNote.current.prepared);
+    }
+    if (scene) pages.push({ ...scene, assetPreview: assetPreviews.current.get(r), noteHeading: noteHeadings.current.get(r), noteSearch: noteSearches.current.get(r), prepared: preparedNotes.current.get(r) });
   }
   const top = pages[pages.length - 1];
+  // A replaced asset is a change inside the viewer, not a new full-page push.
+  // Adjust before commit so even the first replacement paint keeps its parent
+  // masked. The route remains the sole history authority.
+  const motionTarget = { key: top?.key ?? null, name: top?.name ?? "", parent: stack.length === 2 ? `root:${stack[0].tab}` : stack.length > 2 ? routeKey(stack[stack.length - 2]) : null };
+  const [pageMotion, setPageMotion] = useState(() => nextPageMotion(null, motionTarget));
+  const motion = pageMotion.key === motionTarget.key ? pageMotion : nextPageMotion(pageMotion, motionTarget);
+  if (motion !== pageMotion) setPageMotion(motion);
+  const replacingAsset = motion.replacingAsset;
 
   const setMode = (m: "light" | "dark") => { applyColorMode(m); setModeState(m); };
   const setReduced = (v: boolean) => {
@@ -112,8 +150,13 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
 
   // Enter animation for a freshly pushed page (double rAF, as the authority
   // demo does); a Back reveal re-enters without the animation.
-  useEffect(() => {
-    if (top && returnKey.current === top.key) {
+  useLayoutEffect(() => {
+    if (exitKey.current !== null && exitKey.current !== top?.key) {
+      if (navTimer.current) clearTimeout(navTimer.current);
+      exitKey.current = null;
+      navigating.current = false;
+    }
+    if (replacingAsset || top?.name === "note-vault" || top && returnKey.current === top.key) {
       returnKey.current = null;
       setEntered(true);
       setLeaving(false);
@@ -138,7 +181,7 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
     const timer = setTimeout(() => setMaskedKey(key), reduce ? 1 : 300);
     return () => clearTimeout(timer);
   }, [top?.key, entered, reduced]);
-  const maskUnderlay = !!top && maskedKey === top.key && !leaving;
+  const maskUnderlay = !!top && (replacingAsset || top.name === "note-vault" || maskedKey === top.key) && !leaving;
 
   useEffect(() => () => { if (navTimer.current) clearTimeout(navTimer.current); }, []);
 
@@ -160,11 +203,19 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
 
   function finishBack() {
     if (exitKey.current === null) return; // transitionend after the timer fallback
+    // A newer route supersedes a pending exit; never pop that newer page.
+    if (routeKey(navigation.current()) !== exitKey.current) {
+      exitKey.current = null;
+      navigating.current = false;
+      setLeaving(false);
+      return;
+    }
     exitKey.current = null;
     if (navTimer.current) clearTimeout(navTimer.current);
     setLeaving(false);
     navigating.current = false;
-    returnKey.current = top?.key ?? null;
+    const beforeBack = navigation.snapshot();
+    returnKey.current = beforeBack.length > 2 ? routeKey(beforeBack[beforeBack.length - 2]) : null;
     navigation.goBack();
   }
 
@@ -172,6 +223,7 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
    *  Returns false at the home root with no layers (system fallback). */
   function back(): boolean {
     if (navigating.current) return true;
+    ++openGeneration.current;
     if (top) {
       navigating.current = true;
       exitKey.current = top.key;
@@ -191,7 +243,42 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
     return () => { stillNav.back = () => false; };
   });
 
-  const open = (page: string, id?: string, opts?: { edit?: boolean; assetPreview?: AssetPreview; noteSearch?: NoteSearchTarget; linked?: boolean }) => {
+  const workspaceName = useRef<{ id: string; name?: string } | undefined>(undefined);
+  const openGeneration = useRef(0);
+  const open = (page: string, id?: string, opts?: { edit?: boolean; assetPreview?: AssetPreview; noteHeading?: NoteHeadingIntent; noteSearch?: NoteSearchTarget; linked?: boolean; vaultName?: string }, aliasChecked = false, prepared?: PreparedManagedNote) => {
+    const generation = ++openGeneration.current;
+    if (page === "note" && id && !parseManagedNoteRoute(id) && !aliasChecked) {
+      const origin = navigation.current();
+      let retired = false;
+      const stopWatching = navigation.subscribe(() => { if (navigation.current() !== origin) retired = true; });
+      void managedVault.resolveLegacy(id).then(target => {
+        if (retired || generation !== openGeneration.current) return;
+        open(page, target ? managedNoteRoute(target.localVaultId, target.noteId) : id, opts, true);
+      }, () => { if (!retired && generation === openGeneration.current) toast.error("暂时无法确认笔记位置，请重试。原有内容未改变。"); }).finally(stopWatching);
+      return;
+    }
+    const managedTarget = page === "note" && id ? parseManagedNoteRoute(id) : null;
+    if (managedTarget && opts?.linked && !prepared) {
+      const origin = navigation.current();
+      let retired = false;
+      const stopWatching = navigation.subscribe(() => { if (navigation.current() !== origin) retired = true; });
+      void prepareManagedNote(managedTarget, managedVault).then(snapshot => {
+        if (retired || generation !== openGeneration.current || navigating.current) return;
+        open(page, managedNoteRoute(snapshot.note.localVaultId, snapshot.note.noteId), opts, true, snapshot);
+      }, error => {
+        if (!retired && generation === openGeneration.current && !navigating.current)
+          toast.error(failureCopy(error, "加载笔记失败，原有内容未改变。"));
+      }).finally(stopWatching);
+      return;
+    }
+    if (page === "note-vault" && id) {
+      // A library switch retires every old note/save owner, not a linked-note Back entry.
+      workspaceName.current = { id, name: opts?.vaultName };
+      noteSourceSelection.select({ kind: "managed", localVaultId: id });
+      navigation.reset({ tab: "knowledge" });
+      navigation.pushDetail({ tab: "knowledge", detail: "note-vault:" + encodeURIComponent(id) });
+      return;
+    }
     if (ROOT_TABS.includes(page)) {
       navigation.switchRoot(page as Route["tab"]);
       return;
@@ -217,12 +304,26 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
       // explicit read-mode escape hatch; every ordinary entry omits opts.
       // A search result is a reading intent even when the ordinary note-open
       // default is editable. Input still starts only from an explicit tap.
-      const editable = opts?.noteSearch?.query ? false : opts?.edit !== false;
+      const editable = (opts?.noteSearch?.query || opts?.noteHeading) ? false : opts?.edit !== false;
+      stagedNote.current = prepared && id ? { id, prepared } : null;
       navigation.pushDetail({ tab: "knowledge", detail: (editable ? NOTE_EDIT_PREFIX : "") + (id || "") }, { originRoot: origin, retainDetail: opts?.linked });
+      if (prepared) preparedNotes.current.set(navigation.current(), prepared);
+      stagedNote.current = null;
+      // An explicit newer open/search supersedes any pending old heading.
+      // Back does not use open(), so retained-page position is left alone.
+      if (!opts?.noteHeading && noteHeadings.current.has(navigation.current())) {
+        noteHeadings.current.delete(navigation.current());
+        refreshNoteIntent(version => version + 1);
+      }
       if (opts?.noteSearch?.query) {
         noteSearches.current.set(navigation.current(), { ...opts.noteSearch });
         // Reusing the CURRENT route preserves its React key, so the external
         // store's current-reference snapshot alone cannot redraw new metadata.
+        refreshNoteIntent(version => version + 1);
+      }
+      if (opts?.noteHeading) {
+        noteHeadings.current.set(navigation.current(), { ...opts.noteHeading });
+        noteSearches.current.delete(navigation.current());
         refreshNoteIntent(version => version + 1);
       }
       return;
@@ -241,12 +342,17 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
       });
       void (async () => {
         try {
-          const note = await api.localNoteAdd("新笔记", "", []);
-          localDataStore.publish("note");
+          const vaults = await managedVault.list();
+          const selected = vaults.items.find(vault => vault.localVaultId === vaults.selectedVaultId && vault.migrationState === "ready");
+          if (!selected && vaults.items.some(vault => vault.migrationState === "ready")) throw Error("请先在笔记中选择一个知识库。");
+          const note = selected ? await managedVault.create(selected.localVaultId, "新笔记", "") : await api.localNoteAdd("新笔记", "", []);
+          const route = selected ? managedNoteRoute(selected.localVaultId, note.noteId) : note.noteId;
+          if (selected) window.dispatchEvent(new Event("luckyray:managed-vault-change"));
+          else localDataStore.publish("note");
           // The durable note remains saved; a covered/retired origin no
           // longer owns navigation or an automatic entry into editing.
           if (retired || navigation.current() !== creatingOrigin || navigating.current) return;
-          navigation.pushDetail({ tab: "knowledge", detail: NOTE_EDIT_PREFIX + (note?.noteId || "") }, { originRoot: origin });
+          navigation.pushDetail({ tab: "knowledge", detail: NOTE_EDIT_PREFIX + route }, { originRoot: origin });
         } catch (e: any) {
           toast.error(failureCopy(e, "新建笔记失败。"));
         } finally {
@@ -258,7 +364,11 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
     }
     if (page === "asset") {
       navigation.pushDetail({ tab: "library", detail: id || "" }, { originRoot: origin });
-      if (opts?.assetPreview) assetPreviews.current.set(navigation.current(), opts.assetPreview);
+      if (opts?.assetPreview) {
+        assetPreviews.current.set(navigation.current(), opts.assetPreview);
+        // Navigation can publish synchronously; metadata must trigger its own render.
+        refreshAssetPreview(version => version + 1);
+      }
       return;
     }
     if (page === "run") { navigation.pushDetail({ tab: "ai", detail: id || "" }, { originRoot: origin }); return; }
@@ -285,24 +395,47 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
     mode, setMode, reduced, setReduced,
   };
 
+  const currentRootRoute = () => navigation.current() === stack[0] && navigation.snapshot().length === 1;
+  const canSwipeRoot = () => currentRootRoute() && !top && !editingText && !lshIme && !overlayStack.depth() && !navigating.current;
+  const navigateRootSwipe = (direction: SwipeDirection) => {
+    if (!canSwipeRoot()) return;
+    const next = rootSwipeTarget(rootTab, direction);
+    if (next) open(next);
+  };
+  const navigateLshSwipe = (direction: SwipeDirection, backOwner: () => void) => {
+    if (!currentRootRoute() || rootTab !== 'ai' || top || editingText || lshIme || navigating.current || !overlayStack.isOnly(backOwner)) return;
+    const next = rootSwipeTarget(rootTab, direction);
+    if (next) open(next);
+  };
+  const rootSwipe = useHorizontalSwipe(navigateRootSwipe, { disabled: Boolean(top) || editingText || lshIme, canStart: canSwipeRoot, systemEdgeInset: 16 });
+
   const rootView =
     rootTab === "home" ? <StillHome key={"root-" + rootTab} />
     : rootTab === "library" ? null
-    : rootTab === "knowledge" ? <StillKnowledge key={"root-" + rootTab} conn={conn} active={!top} />
-    : rootTab === "ai" ? <StillAgent key={"root-" + rootTab} conn={conn} />
+    : rootTab === "knowledge" ? null
+    : rootTab === "ai" ? null
     : <StillSettingsRoot key={"root-" + rootTab} conn={conn} />;
 
   return (
     <StillNavContext.Provider value={nav}>
-      <div ref={appRef} className="st-app" data-mode={mode} data-text-entry={editingText ? "true" : undefined} data-reduced={reduced ? "true" : undefined}>
+      <RootSwipeContext.Provider value={{ canNavigate: canSwipeRoot, navigate: navigateRootSwipe, navigateLsh: navigateLshSwipe }}>
+      <div ref={appRef} className="st-app" data-mode={mode} data-text-entry={editingText || (rootTab === "ai" && lshIme) ? "true" : undefined} data-reduced={reduced ? "true" : undefined}>
+        <LocalNoteImportBridge showEntry={!top} />
         <div
+          data-swipe-owner="root" {...rootSwipe} style={{touchAction:"pan-y"}}
           className={"st-root-stage" + (top && !(leaving && pages.length === 1) ? " is-under" : "") + (leaving && pages.length === 1 ? " is-revealing" : "") + (maskUnderlay ? " is-masked" : "")}
           aria-hidden={!!top || undefined}
         >
           {libraryVisited.current ? <div key="retained-library" hidden={rootTab !== "library"} style={{ height: "100%" }}>
-            <StillLibrary conn={conn} active={rootTab === "library"} />
+            <StillLibrary conn={conn} active={rootTab === "library" && !top} />
           </div> : null}
-          {rootTab !== "library" ? <div key={rootTab} className="st-crossfade" style={{ height: "100%" }}>{rootView}</div> : null}
+          {knowledgeVisited.current ? <div key="retained-knowledge" hidden={rootTab !== "knowledge"} style={{ height: "100%" }}>
+            <StillKnowledge conn={conn} active={rootTab === "knowledge" && !top} />
+          </div> : null}
+          {agentVisited.current ? <div key="retained-agent" hidden={rootTab !== "ai"} style={{ height: "100%" }}>
+            <StillAgent conn={conn} active={rootTab === "ai" && !top} />
+          </div> : null}
+          {rootTab !== "library" && rootTab !== "ai" && rootTab !== "knowledge" ? <div key={rootTab} className="st-crossfade" style={{ height: "100%" }}>{rootView}</div> : null}
           <HomeCapture root={rootTab} onCapture={() => open("capture")} />
           <TabBar value={rootTab} onChange={(r) => open(r)} />
         </div>
@@ -314,17 +447,18 @@ export default function StillApp({ conn, editingText }: { conn: ConnState | null
             covered={i === pages.length - 2 && !leaving}
             buried={i < pages.length - 2}
             masked={i !== pages.length - 1 && maskUnderlay}
-            entered={i === pages.length - 1 ? entered : true}
+            entered={i === pages.length - 1 ? replacingAsset || page.name === "note-vault" || entered : true}
             leaving={i === pages.length - 1 && leaving}
             revealing={i === pages.length - 2 && leaving}
             onExited={finishBack}
             onSettled={i === pages.length - 1 ? () => setMaskedKey(page.key) : undefined}
           >
-            {renderScene(page, i === pages.length - 1, page.assetPreview, page.noteSearch)}
+            {renderScene(page, i === pages.length - 1, page.assetPreview, page.noteSearch, page.noteHeading, page.prepared, workspaceName.current?.id === page.id ? workspaceName.current?.name : undefined)}
           </PageLayer>
         ))}
         <StillToast />
       </div>
+    </RootSwipeContext.Provider>
     </StillNavContext.Provider>
   );
 }
@@ -339,9 +473,10 @@ function routeKey(r: Route): number {
   return k;
 }
 
-function renderScene(page: Scene, current = true, assetPreview?: AssetPreview, noteSearch?: NoteSearchTarget) {
+function renderScene(page: Scene, current = true, assetPreview?: AssetPreview, noteSearch?: NoteSearchTarget, noteHeading?: NoteHeadingIntent, prepared?: PreparedManagedNote, vaultName?: string) {
   switch (page.name) {
-    case "note": return <StillNote id={page.id || ""} startInEdit={page.startInEdit} current={current} search={noteSearch} />;
+    case "note": return <StillNote id={page.id || ""} startInEdit={page.startInEdit} current={current} search={noteSearch} heading={noteHeading} prepared={prepared} />;
+    case "note-vault": return <NoteVaultWorkspace localVaultId={page.id!} initialName={vaultName} />;
     case "new-note": return <StillNewNote />;
     case "capture": return <StillCapture />;
     case "inbox-detail": return <StillInboxDetail id={page.id || ""} />;
@@ -355,7 +490,7 @@ function renderScene(page: Scene, current = true, assetPreview?: AssetPreview, n
     case "storage": return <StillStorage />;
     case "diagnostics": return <StillDiagnostics />;
     case "recovery": return <StillRecoveryPage />;
-    default: return <StillNote id={page.id || ""} startInEdit={page.startInEdit} current={current} search={noteSearch} />;
+    default: return <StillNote id={page.id || ""} startInEdit={page.startInEdit} current={current} search={noteSearch} heading={noteHeading} prepared={prepared} />;
   }
 }
 

@@ -85,7 +85,7 @@ test("refresh adopting a new vault never labels old rows as the new vault or rev
   assert.equal(c.snapshot().rows.length,0);assert.equal(c.snapshot().vaultId,"B");
   assert.ok(snapshots.filter(s=>s.vaultId==="B").every(s=>s.rows.length===0));
 });
-for(const state of ["notGranted","unsupported","temporarilyUnavailable"])test(`refresh ${state} catalog clears kept rows`,async()=>{
+for(const state of ["notGranted","unsupported"])test(`refresh ${state} catalog clears kept rows`,async()=>{
   let permission="implemented";
   const registry={refreshAdopting:async()=>catalog(),operation:()=>({state:permission}),snapshot:()=>catalog(),invalidate(){}};
   const knowledge={vaults:async()=>({items:[{vaultId:"v",activeInDesktop:true,readGranted:true}]}),registeredList:async()=>({items:[{noteId:"n"}],hasMore:false})};
@@ -186,4 +186,16 @@ test("QA history isolation refuses unexpected history and unsupported reset with
     return {currentIndex:0,entries:[{id:2,url:'http://127.0.0.1/'}]};
   }},'http://127.0.0.1',evidence),/HISTORY_ISOLATION_BLOCKED/);
   assert.equal(resets,1);assert.equal(evidence.outcome,'BLOCKED');
+});
+
+ test("temporary catalog outage keeps exact-owner rows without keeping live authority",async()=>{
+  let permission="implemented",lists=0;
+  const registry={refreshAdopting:async()=>catalog(),operation:()=>({state:permission}),snapshot:()=>catalog(),invalidate(){}};
+  const knowledge={vaults:async()=>({items:[{vaultId:"v",activeInDesktop:true,readGranted:true}]}),registeredList:async()=>{lists++;return{items:[{noteId:"n"}],hasMore:false}}};
+  const c=new KnowledgeBrowseController({registry,knowledge} as any);c.setConnection({paired:true,connected:true,instanceId:"A",isLive:()=>true});await settle();
+  permission="temporarilyUnavailable";c.refresh();await settle();
+  assert.deepEqual(c.snapshot().rows.map(row=>[row.instanceId,row.vaultId,row.noteId]),[["A","v","n"]]);
+  assert.equal(c.snapshot().phase,"temporarily-unavailable");assert.equal(c.snapshot().stale,true);
+  c.fastRevalidate();await settle();assert.equal(lists,1,"cached rows do not retain live browse authority");
+  assert.equal(c.snapshotFor("other-owner","v"),undefined);
 });

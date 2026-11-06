@@ -81,7 +81,7 @@ export class KnowledgeClient {
   /** Exact immutable caller payload; durable retry ownership stays in Content. */
   async createUnique(instance: string, input: KnowledgeUniqueCreate): Promise<KnowledgeUniqueReceipt> {
     const receipt = await callServices<KnowledgeUniqueReceipt>(this.transport, {
-      instance, operationId: "knowledge.createUnique", method: "POST",
+      instance, vault: input.vaultId, operationId: "knowledge.createUnique", method: "POST",
       path: "/v1/services/knowledge/notes", body: input,
     });
     const document = receipt?.document;
@@ -99,7 +99,7 @@ export class KnowledgeClient {
   /** Non-idempotent inert reservation; never stored in a durable outbox. */
   async editingOpen(instance: string, vaultId: string, noteId: string): Promise<KnowledgeEditingLease> {
     const lease = await callServices<KnowledgeEditingLease>(this.transport, {
-      instance, operationId: "knowledge.editingOpen", method: "POST",
+      instance, vault: vaultId, operationId: "knowledge.editingOpen", method: "POST",
       path: `/v1/services/knowledge/notes/${encodeURIComponent(noteId)}/editing`,
       body: { vaultId },
     });
@@ -113,7 +113,7 @@ export class KnowledgeClient {
 
   async editing(instance: string, vaultId: string, noteId: string): Promise<KnowledgeEditingStatus> {
     const status = await callServices<KnowledgeEditingStatus>(this.transport, {
-      instance, operationId: "knowledge.editing", method: "GET",
+      instance, vault: vaultId, operationId: "knowledge.editing", method: "GET",
       path: `/v1/services/knowledge/notes/${encodeURIComponent(noteId)}/editing`, query: { vault: vaultId },
     });
     if (!status || status.vaultId !== vaultId || status.noteId !== noteId || status.leaseMs !== 15000
@@ -129,7 +129,7 @@ export class KnowledgeClient {
       throw new ServicesError("INPUT_INVALID", 400);
     }
     const lease = await callServices<KnowledgeEditingLease>(this.transport, {
-      instance, operationId: "knowledge.editingSet", method: "PUT",
+      instance, vault: input.vaultId, operationId: "knowledge.editingSet", method: "PUT",
       path: `/v1/services/knowledge/notes/${encodeURIComponent(noteId)}/editing`, body: input,
     });
     if (!lease || lease.vaultId !== input.vaultId || lease.noteId !== noteId || lease.sessionId !== input.sessionId
@@ -142,7 +142,7 @@ export class KnowledgeClient {
 
   async directories(instance: string, vaultId: string, options: { limit?: number; afterPath?: string } = {}): Promise<KnowledgeDirectoryPage> {
     const page = await callServices<KnowledgeDirectoryPage>(this.transport, {
-      instance, operationId: "knowledge.directories", method: "GET",
+      instance, vault: vaultId, operationId: "knowledge.directories", method: "GET",
       path: `/v1/services/knowledge/vaults/${encodeURIComponent(vaultId)}/directories`, query: options,
     });
     if (!page || page.vaultId !== vaultId || !Array.isArray(page.items) || page.items.length > 100
@@ -153,7 +153,7 @@ export class KnowledgeClient {
 
   async relations(instance: string, vaultId: string, noteId: string, options: { limit?: number; after?: string } = {}): Promise<KnowledgeRelationPage> {
     const page = await callServices<KnowledgeRelationPage>(this.transport, {
-      instance, operationId: "knowledge.relations", method: "GET",
+      instance, vault: vaultId, operationId: "knowledge.relations", method: "GET",
       path: `/v1/services/knowledge/notes/${encodeURIComponent(noteId)}/relations`, query: { vault: vaultId, ...options },
     });
     if (!page || page.vaultId !== vaultId || page.noteId !== noteId || typeof page.revision !== "string"
@@ -163,7 +163,7 @@ export class KnowledgeClient {
 
   async materialReferences(instance: string, vaultId: string, assetId: string, options: { limit?: number; after?: string } = {}): Promise<KnowledgeMaterialReferencePage> {
     const page = await callServices<KnowledgeMaterialReferencePage>(this.transport, {
-      instance, operationId: "knowledge.materialReferences", method: "GET",
+      instance, vault: vaultId, operationId: "knowledge.materialReferences", method: "GET",
       path: `/v1/services/knowledge/materials/${encodeURIComponent(assetId)}/references`, query: { vault: vaultId, ...options },
     });
     if (!page || page.vaultId !== vaultId || page.assetId !== assetId || !paged(page)
@@ -174,9 +174,9 @@ export class KnowledgeClient {
   }
 
   /** Registered vault discovery (never implies an active-vault switch). */
-  async vaults(instance: string): Promise<VaultPage> {
+  async vaults(instance: string, vault?: string): Promise<VaultPage> {
     return callServices<VaultPage>(this.transport, {
-      instance,
+      instance, ...(vault ? {vault} : {}),
       operationId: "knowledge.vaults",
       method: "GET",
       path: "/v1/services/knowledge/vaults",
@@ -197,6 +197,7 @@ export class KnowledgeClient {
   ): Promise<KnowledgeNotePage> {
     return callServices<KnowledgeNotePage>(this.transport, {
       instance,
+      vault: vaultId,
       operationId: "knowledge.registeredList",
       method: "GET",
       path: `/v1/services/knowledge/vaults/${encodeURIComponent(vaultId)}/notes`,
@@ -212,6 +213,7 @@ export class KnowledgeClient {
   ): Promise<KnowledgeMoveReceipt> {
     return callServices<KnowledgeMoveReceipt>(this.transport, {
       instance,
+      vault: move.vaultId,
       operationId: "knowledge.move",
       method: "PATCH",
       path: `/v1/services/knowledge/notes/${encodeURIComponent(noteId)}/move`,
@@ -256,6 +258,7 @@ export class KnowledgeClient {
     try {
       page = await callServices<KnowledgeChangePage>(this.transport, {
         instance,
+        vault: vaultId,
         operationId: "knowledge.registeredChanges",
         method: "GET",
         path: `/v1/services/knowledge/vaults/${encodeURIComponent(vaultId)}/changes`,
@@ -295,6 +298,7 @@ export class KnowledgeClient {
     this.contexts.set(scope, { generation: recoveryGeneration, instance, requestToken });
     const page = await callServices<KnowledgeChangePage>(this.transport, {
       instance,
+      vault: vaultId,
       operationId: "knowledge.registeredChanges",
       method: "GET",
       path: `/v1/services/knowledge/vaults/${encodeURIComponent(vaultId)}/changes`,

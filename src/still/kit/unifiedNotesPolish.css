@@ -1,0 +1,52 @@
+/* Scoped knowledge controls: no app-wide input, sheet, or toolbar overrides. */
+.st-app .st-vault-create-form {display:grid;gap:12px;margin-top:20px;padding-top:20px;border-top:1px solid var(--st-line);min-width:0}
+.st-app .st-vault-create-form label {font-size:14px;font-weight:600;color:var(--st-ink)}
+.st-app .st-vault-create-form .st-input {display:block;box-sizing:border-box;width:100%;min-width:0;min-height:48px;padding:12px 14px;border:1px solid var(--st-line);border-radius:12px;background:var(--st-card);color:var(--st-ink);font:inherit;font-size:16px;outline-offset:3px}
+.st-app .st-vault-create-form .st-sheet-copy {margin:0;font-size:12px;line-height:1.6}
+.st-app .st-vault-create-form .st-button {width:100%;min-height:48px;margin:0;border-radius:12px}
+.st-app .st-knowledge-toolbar {gap:4px;min-width:0}
+.st-app .st-knowledge-toolbar .st-notes-vault-label {flex:1;min-width:0;min-height:44px;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-app .st-knowledge-toolbar .st-notes-vault-label:focus-visible {outline:2px solid var(--st-accent);outline-offset:-2px}
+.st-app .st-notes-full-location {overflow-wrap:anywhere;word-break:break-word}
+.st-app .st-sync-control {flex:none;min-width:0}
+.st-app .st-sync-pill {display:flex;align-items:center;gap:5px;min-height:44px;max-width:132px;padding:6px;border:0;background:transparent;color:var(--st-muted);font:inherit;font-size:11px;line-height:1.5;white-space:normal;overflow-wrap:anywhere;text-align:left}
+.st-app .st-sync-local {font-size:11px;white-space:nowrap;color:var(--st-muted)}
+.st-app .st-sync-dot {width:5px;height:5px;flex:none;border-radius:50%;background:var(--st-muted)}
+.st-app .st-sync-dot.is-connected {background:var(--st-accent)}
+.st-app .st-sync-dock {position:fixed;right:max(16px, env(safe-area-inset-right));bottom:calc(96px + env(safe-area-inset-bottom));z-index:20;display:flex;align-items:center;max-width:calc(100vw - 32px);width:212px;border:1px solid var(--st-line);border-radius:14px;background:var(--st-card);box-shadow:0 3px 14px #0000000d;touch-action:pan-y}
+.st-app .st-sync-dock-summary {flex:1;min-width:0;min-height:44px;display:grid;gap:6px;align-content:center;padding:8px 0 8px 12px;background:transparent;border:0;text-align:left;color:var(--st-muted);font:inherit;font-size:11px}
+.st-app .st-sync-dock-summary progress {appearance:none;display:block;width:100%;height:3px;border:0;border-radius:3px;overflow:hidden;background:var(--st-line);accent-color:var(--st-accent)}
+.st-app .st-sync-dock-summary progress::-webkit-progress-bar {background:var(--st-line)}
+.st-app .st-sync-dock-summary progress::-webkit-progress-value {background:var(--st-accent)}
+.st-app .st-sync-dock-summary progress:not([value]) {opacity:.5;background:var(--st-line)}
+.st-app .st-sync-dock-summary progress:not([value])::-webkit-progress-bar {background:var(--st-line)}
+.st-app .st-sync-details {white-space:normal;font-size:14px;line-height:1.6}
+.st-app .st-sync-control button:focus-visible,.st-app .st-vault-create-form :focus-visible {outline:2px solid var(--st-accent);outline-offset:2px}
+.st-app .st-new-folder {position:relative}
+.st-app .st-new-folder>span {position:absolute;right:7px;bottom:7px;width:11px;height:11px;border-radius:50%;background:var(--st-bg);font-size:12px;line-height:11px;color:var(--st-ink);font-weight:600}
+
+.st-app .st-sync-track {display:block;width:100%;height:3px;border-radius:3px;background:var(--st-line);opacity:.5}
+
+/* Folder sheet shares inline hierarchy, not a flat list of full paths. */
+.st-app .st-picker-folder-row{display:flex;align-items:center;min-width:0}
+.st-app .st-picker-disclosure,.st-app .st-picker-disclosure-space{width:40px;min-width:40px;height:44px;display:flex;align-items:center;justify-content:center}
+.st-app .st-picker-disclosure{border:0;background:none;color:var(--st-muted)}
+.st-app .st-picker-disclosure[aria-expanded=true] svg{transform:rotate(90deg)}
+.st-app .st-picker-folder-choice{flex:1;min-width:0}
+.st-app .st-picker-children{margin-left:16px;border-left:1px solid var(--st-line)}
+.st-app .st-notes-retry-link{border:0;background:none;color:var(--st-accent);font:inherit;text-decoration:underline;padding:8px;margin-left:4px;min-height:44px}
+
+/* Knowledge sheets only: long library names wrap; actions remain clear of the
+   scrollable copy and use the shared Sheet's existing safe-bottom padding. */
+.st-app .st-knowledge-view~.st-modal .st-sheet-heading,
+.st-app .st-knowledge-view .st-sheet-heading {height:auto;min-height:45px}
+.st-app .st-knowledge-view~.st-modal .st-sheet-heading h2,
+.st-app .st-knowledge-view .st-sheet-heading h2 {min-width:0;padding:6px 0;line-height:1.5;overflow-wrap:anywhere}
+.st-app .st-knowledge-view~.st-modal .st-sheet-copy,
+.st-app .st-knowledge-view~.st-modal .st-sheet-caption,
+.st-app .st-knowledge-view .st-sheet-caption,
+.st-app .st-knowledge-view .st-sheet-copy {overflow-wrap:anywhere}
+.st-app .st-knowledge-view~.st-modal .st-option > span,
+.st-app .st-knowledge-view .st-sheet .st-option > span {min-width:0;overflow-wrap:anywhere}
+.st-app .st-vault-actions {display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:12px;width:100%;min-width:0}
+.st-app .st-vault-actions > .st-button {width:100%;min-width:0;min-height:48px;margin:0;padding:10px 12px!important;font-size:1em!important;line-height:1.5;white-space:normal;overflow-wrap:anywhere}

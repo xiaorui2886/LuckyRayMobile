@@ -42,10 +42,17 @@ function emptySnapshot<T>(identity: string): SourceSnapshot<T> {
 }
 
 export class LibrarySession {
-  private snapshots: Record<LibrarySource, SourceSnapshot<any>> = {
-    local: emptySnapshot<any>(""),
-    desktop: emptySnapshot<any>(""),
+  private snapshots: Record<LibrarySource, Map<string, SourceSnapshot<any>>> = {
+    local: new Map(), desktop: new Map(),
   };
+
+  private snapshot<T>(source: LibrarySource, identity = this.bound[source]): SourceSnapshot<T> {
+    return this.snapshots[source].get(identity) ?? emptySnapshot<T>(identity);
+  }
+
+  private store<T>(source: LibrarySource, snapshot: SourceSnapshot<T>): void {
+    this.snapshots[source].set(snapshot.identity, snapshot);
+  }
 
   /** The identity currently bound per source (owner+filters+query). */
   private bound: Record<LibrarySource, string> = { local: "", desktop: "" };
@@ -57,9 +64,9 @@ export class LibrarySession {
    * — a Desktop A→B switch therefore never shows A's rows under B (fail-closed),
    * while a pure source toggle keeps everything.
    */
-  view<T>(source: LibrarySource): SourceView<T> {
-    const snap = this.snapshots[source] as SourceSnapshot<T>;
-    const current = snap.identity === this.bound[source];
+  view<T>(source: LibrarySource, identity = this.bound[source]): SourceView<T> {
+    const snap = this.snapshot<T>(source, identity);
+    const current = snap.identity === identity;
     return {
       items: current ? snap.items : [],
       retained: current && snap.items.length > 0,
@@ -76,32 +83,29 @@ export class LibrarySession {
    * (a plain source toggle) keeps them untouched.
    */
   bind(source: LibrarySource, identity: string): { changed: boolean; hasRetained: boolean } {
-    if (this.bound[source] === identity) {
-      return { changed: false, hasRetained: this.snapshots[source].items.length > 0 };
-    }
-    const prevScroll = this.snapshots[source].scrollTop;
+    const changed = this.bound[source] !== identity;
     this.bound[source] = identity;
-    this.snapshots[source] = { ...emptySnapshot<any>(identity), scrollTop: prevScroll };
-    return { changed: true, hasRetained: false };
+    if (!this.snapshots[source].has(identity)) this.store(source, emptySnapshot(identity));
+    return { changed, hasRetained: this.snapshot(source).items.length > 0 };
   }
 
   /** A refresh for this source/identity started (rows stay visible). */
   beginRefresh(source: LibrarySource, identity: string): void {
     if (this.bound[source] !== identity) return;
-    this.snapshots[source] = { ...this.snapshots[source], refreshing: true };
+    this.store(source, { ...this.snapshot(source), refreshing: true });
   }
 
   /** Fresh rows arrived for the same identity: swap in atomically. */
   commit<T>(source: LibrarySource, identity: string, items: T[]): boolean {
     if (this.bound[source] !== identity) return false; // stale response
-    this.snapshots[source] = {
-      ...this.snapshots[source],
+    this.store(source, {
+      ...this.snapshot(source),
       identity,
       items,
       refreshing: false,
       stale: false,
       settled: true,
-    };
+    });
     return true;
   }
 
@@ -112,19 +116,25 @@ export class LibrarySession {
    */
   fail(source: LibrarySource, identity: string): boolean {
     if (this.bound[source] !== identity) return false;
-    const had = this.snapshots[source].items.length > 0;
-    this.snapshots[source] = {
-      ...this.snapshots[source],
+    const had = this.snapshot(source).items.length > 0;
+    this.store(source, {
+      ...this.snapshot(source),
       refreshing: false,
       stale: had,
       settled: true,
-    };
+    });
     return had;
   }
 
   /** Remember a source's scroll offset (survives source toggles). */
-  setScroll(source: LibrarySource, scrollTop: number): void {
-    this.snapshots[source] = { ...this.snapshots[source], scrollTop };
+  setScroll(source: LibrarySource, scrollTop: number, identity = this.bound[source]): void {
+    this.store(source, { ...this.snapshot(source, identity), scrollTop });
+  }
+
+  /** Explicit permission withdrawal is not a transient refresh failure. */
+  discard(source: LibrarySource, identity?: string): void {
+    if (identity === undefined) this.snapshots[source].clear();
+    else this.snapshots[source].delete(identity);
   }
 
   /**

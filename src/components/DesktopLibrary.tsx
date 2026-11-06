@@ -17,10 +17,14 @@ const visits = new Map<string, any>();
 
 export function contentError(error: unknown): string {
   const value = String(error);
-  if (/UPGRADE|404/.test(value)) return "电脑版本尚不支持这项内容，请更新电脑端。";
+  if (/CONTENT_HTTP_429\b|\bhttp 429\b|\bRATE_LIMITED\b/.test(value)) {
+    const hint = /(?:^|\s)retryAfterMs=(\d+)(?=\s|$)/.exec(value);
+    return hint && Number(hint[1]) > 2_147_483_647 ? "电脑返回的等待时间过长，请检查电脑端。" : "读取频繁，请稍后重试。";
+  }
+  if (/UPGRADE|(?:CONTENT_HTTP_|\bhttp\s+)404\b/.test(value)) return "电脑版本尚不支持这项内容，请更新电脑端。";
   if (/DISCONNECTED/.test(value)) return "已断开电脑连接，可在连接设置中重新连接。";
   if (/SOURCE_CHANGED|CANCELLED/.test(value)) return "连接已改变，请重新打开。";
-  if (/401|REVOKED|PAIRING_REQUIRED/.test(value)) return "电脑授权已失效，请检查连接设置。";
+  if (/(?:CONTENT_HTTP_|\bhttp\s+)401\b|REVOKED|PAIRING_REQUIRED/.test(value)) return "电脑授权已失效，请检查连接设置。";
   if (/RESOURCE_UNAVAILABLE|PREVIEW_UNAVAILABLE/.test(value)) return "文件暂时不可用，请在电脑上检查原文件。";
   return "暂时无法读取电脑内容，请检查电脑与网络后重试。";
 }

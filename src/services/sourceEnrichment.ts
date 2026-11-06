@@ -27,7 +27,7 @@ export type SourceEnrichmentBinding = {
 };
 
 export type SourceEnrichmentDeps = {
-  detailV1: (owner: string, assetId: string) => Promise<MaterialDetail>;
+  detailV1: (owner: string, assetId: string, isCurrent: () => boolean) => Promise<MaterialDetail>;
   commit: (commit: SourceCommit) => void;
   /** Map a thrown failure to its canonical code (page-owned mapping). */
   errorCodeOf?: (error: unknown) => string;
@@ -67,7 +67,7 @@ export class SourceEnrichmentController {
 
     this.deps.commit({ phase: "loading" });
     void this.deps
-      .detailV1(binding.owner, binding.assetId)
+      .detailV1(binding.owner, binding.assetId, committed)
       .then((detail) => {
         if (!committed()) return;
         this.deps.commit({ phase: "ready", source: detail.source });

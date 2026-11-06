@@ -33,7 +33,7 @@ test("editingOpen uses the inert POST and accepts only the exact scope's server 
   }});
   const lease = await client.editingOpen("A", "v", "n");
   assert.equal(lease.sessionId, token);
-  assert.deepEqual(requests, [{ instance: "A", operationId: "knowledge.editingOpen", method: "POST",
+  assert.deepEqual(requests, [{ instance: "A", vault: "v", operationId: "knowledge.editingOpen", method: "POST",
     path: "/v1/services/knowledge/notes/n/editing", body: { vaultId: "v" } }]);
   for (const patch of [{ vaultId: "other" }, { noteId: "other" }, { sessionId: "client-uuid" },
     { editing: true }, { generation: 1 }, { leaseMs: 30000 }]) {
@@ -46,7 +46,7 @@ test("editingOpen uses the inert POST and accepts only the exact scope's server 
 test("higher Knowledge major fails closed even when an operation claims implemented", async () => {
   const transport = createFixtureTransport();
   const registry = new ServiceRegistry(transport);
-  const catalog = await registry.refreshAdopting("fixture-desktop-1");
+  const catalog = await registry.refreshAdopting("fixture-desktop-1", {vault:"vault-1"});
   catalog.services.knowledge.version = 2;
   let writes = 0;
   const knowledge = new KnowledgeClient({ request: async () => { writes++; throw new Error("unknown major must not mutate"); } });
@@ -191,7 +191,7 @@ test("editing GET and PUT preserve scope/token; unsafe generations never reach t
   assert.equal((await client.editing("A", "v", "n")).desktopEditing, true);
   assert.equal((await client.editingSet("A", "n", { vaultId: "v", sessionId: token, generation: 3, editing: true })).generation, 4,
     "a reordered PUT can return a newer current server generation");
-  assert.deepEqual(requests[0], { instance: "A", operationId: "knowledge.editing", method: "GET",
+  assert.deepEqual(requests[0], { instance: "A", vault: "v", operationId: "knowledge.editing", method: "GET",
     path: "/v1/services/knowledge/notes/n/editing", query: { vault: "v" } });
   assert.equal(requests[1].operationId, "knowledge.editingSet");
   assert.equal(requests[1].method, "PUT");

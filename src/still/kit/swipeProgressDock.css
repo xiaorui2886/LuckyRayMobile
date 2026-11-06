@@ -1,0 +1,5 @@
+.st-app .st-swipe-progress{transition:transform 180ms cubic-bezier(.22,.8,.3,1),opacity 180ms ease;will-change:transform;user-select:none;-webkit-user-select:none;touch-action:pan-y}
+.st-app .st-swipe-progress.is-dragging{transition:none;cursor:grabbing}
+.st-app .st-swipe-progress.is-closing{pointer-events:none}
+.st-app[data-reduced=true] .st-swipe-progress{transition:none}
+@media(prefers-reduced-motion:reduce){.st-app .st-swipe-progress{transition:none}}

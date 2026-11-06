@@ -19,6 +19,7 @@ pub(super) struct Authority {
     pub(super) url: String,
     pub(super) authorization: reqwest::header::HeaderValue,
     pub(super) check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    pub(super) response_check: Arc<dyn Fn(Option<&reqwest::Response>) -> Result<(), String> + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -225,7 +226,8 @@ async fn fetch(
     metrics.requests.fetch_add(1, Ordering::AcqRel);
     let mut response = super::super::cancellable(request.send(), check)
         .await?
-        .map_err(|_| "MEDIA_OFFLINE")?;
+        .map_err(|_| {let _=(authority.response_check)(None); "MEDIA_OFFLINE"})?;
+    (authority.response_check)(Some(&response))?;
     // A 200 could be a stale If-Range or an ignored Range. Never drain it or
     // silently turn it into a full-file download. 416/unknown totals also fail.
     if response.status().as_u16() != 206 {
@@ -238,7 +240,7 @@ async fn fetch(
     let mut bytes = Vec::with_capacity(count);
     while let Some(chunk) = super::super::cancellable(response.chunk(), check)
         .await?
-        .map_err(|_| "MEDIA_OFFLINE")?
+        .map_err(|_| {let _=(authority.response_check)(None); "MEDIA_OFFLINE"})?
     {
         metrics
             .bytes

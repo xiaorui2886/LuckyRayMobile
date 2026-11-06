@@ -10,27 +10,19 @@ export function createKnowledgeEditingEffects(deps: {
   isLive: (scope: EditingScope) => boolean;
   observe: EditingEffects["observe"];
 }): EditingEffects {
-  let refreshing: Promise<unknown> | null = null;
+  const ownerFor = (scope: EditingScope) => deps.registry.forScope?.(scope.instance, {vault: scope.vault}) ?? deps.registry;
   const current = (scope: EditingScope) => {
     if (!deps.isLive(scope)) throw new ServicesError("SOURCE_CHANGED", 409);
   };
-  const refresh = async (scope: EditingScope) => {
+  const ready = async (scope: EditingScope, operation: string) => {
     current(scope);
-    if (!refreshing) {
-      const request = deps.registry.refreshAdopting(scope.instance).finally(() => {
-        if (refreshing === request) refreshing = null;
-      });
-      refreshing = request;
-    }
-    await refreshing;
+    const owner = ownerFor(scope);
+    if (owner.ensureAdopting) await owner.ensureAdopting(scope.instance, {vault: scope.vault});
+    else if (owner.snapshot()?.desktopInstanceId !== scope.instance || owner.scopeMatches?.({vault:scope.vault}) === false)
+      await owner.refreshAdopting(scope.instance, {vault:scope.vault});
     current(scope);
-  };
-  const ready = async (scope: EditingScope, operation: string, fresh = false) => {
-    current(scope);
-    if (fresh || deps.registry.snapshot()?.desktopInstanceId !== scope.instance) await refresh(scope);
-    current(scope);
-    if (deps.registry.snapshot()?.services?.knowledge?.version !== 1) throw new ServicesError("VERSION_UNSUPPORTED", 426);
-    const state = deps.registry.operation(operation).state;
+    if (owner.snapshot()?.services?.knowledge?.version !== 1) throw new ServicesError("VERSION_UNSUPPORTED", 426);
+    const state = owner.operation(operation).state;
     if (state === "implemented") return;
     if (state === "notGranted") throw new ServicesError("GRANT_REQUIRED", 403);
     if (state === "temporarilyUnavailable") throw new ServicesError("SERVICE_UNAVAILABLE", 503);
@@ -46,8 +38,8 @@ export function createKnowledgeEditingEffects(deps: {
       return lease.sessionId;
     },
     async readDesktop(scope) {
-      // Refresh at the helper's existing5s read cadence, including revocation.
-      await ready(scope, "knowledge.editing", true);
+      // Presence reads remain server-authorized; do not rediscover on every 5s tick.
+      await ready(scope, "knowledge.editing");
       const status = await deps.knowledge.editing(scope.instance, scope.vault, scope.note);
       current(scope);
       return status.desktopEditing;
@@ -58,8 +50,9 @@ export function createKnowledgeEditingEffects(deps: {
         // this captured token's release synchronously up to the transport await;
         // native owner fences and the server's token scope remain authoritative.
         current(scope);
-        if (deps.registry.snapshot()?.desktopInstanceId !== scope.instance
-          || deps.registry.snapshot()?.services?.knowledge?.version !== 1 || !deps.registry.canCall("knowledge.editingSet")) return;
+        const owner = ownerFor(scope);
+        if (owner.snapshot()?.desktopInstanceId !== scope.instance
+          || owner.snapshot()?.services?.knowledge?.version !== 1 || !owner.canCall("knowledge.editingSet")) return;
         await deps.knowledge.editingSet(scope.instance, scope.note, { vaultId: scope.vault, sessionId, generation, editing });
         return;
       }

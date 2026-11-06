@@ -142,8 +142,8 @@ test("R2-3b — missing knowledge.registeredList -> unsupported with 0 list call
 
 test("R2-3c — the controller uses registry.operation (unknown -> unsupported)", () => {
   const ctrlSrc = strip(read("src", "still", "kit", "knowledgeBrowseController.ts"));
-  assert.match(ctrlSrc, /this\.registry\.operation\(op\)\.state/u,
-    "the per-operation check goes through registry.operation");
+  assert.match(ctrlSrc, /registry\.operation\(op\)\.state/u,
+    "the per-operation check goes through the captured scoped registry.operation");
   // No raw catalog indexing that would treat a missing op as "maybe fine".
   assert.doesNotMatch(ctrlSrc, /catalog\.operations\?\.\[op\]/u,
     "no direct catalog indexing for the capability check");
@@ -222,4 +222,15 @@ test("R2-4 — the Desktop knowledge toolbar label is ONLY the canonical vault",
   // The local branch keeps its own derivation.
   const localBranch = raw.slice(branchEnd);
   assert.ok(localBranch.includes("已归档"), "the local labels stay for Local");
+});
+
+test('saved-library retirement epoch restarts same vault while duplicate epoch remains coalesced', async () => {
+  const { deps, ctl } = makeDeps(); ctl.vaults = VAULT;
+  ctl.listByVault.v = { items: [{ noteId: 'n1' }], hasMore: false, nextAfterId: null };
+  const ctrl = new KnowledgeBrowseController(deps);
+  ctrl.selectVault('v', true, 1); ctrl.setConnection(binding()); await settled();
+  const initial = ctl.listCalls;
+  ctrl.selectVault('v', true, 1); await settled(); assert.equal(ctl.listCalls, initial);
+  ctrl.selectVault('v', true, 2); await settled(); assert.equal(ctl.listCalls, initial + 1);
+  assert.equal(ctrl.snapshot().phase, 'ready'); assert.deepEqual(ctrl.snapshot().rows.map(r=>r.noteId), ['n1']);
 });

@@ -49,10 +49,28 @@ pub(crate) async fn lsh_surface_bootstrap(
     state: tauri::State<'_, crate::SharedState>,
     expected_instance: String,
 ) -> Result<Value, String> {
+    // Cancel the actual asynchronous bootstrap work before the presentation
+    // controller's longer deadline; do not leave an orphan future to replace
+    // a later retry's carrier. This does not alter identity or TLS gates.
+    let stage = std::sync::atomic::AtomicU8::new(0);
+    tokio::time::timeout(std::time::Duration::from_secs(35), bootstrap_surface(state, expected_instance, &stage))
+        .await.map_err(|_| format!("LSH_BOOTSTRAP_TIMEOUT:{}", bootstrap_stage_label(stage.load(std::sync::atomic::Ordering::Relaxed))))?
+}
+
+fn bootstrap_stage_label(stage: u8) -> &'static str {
+    match stage { 1 => "hello", 2 => "state", 3 => "session_mint", 4 => "carrier_bootstrap", _ => "source_gate" }
+}
+
+async fn bootstrap_surface(
+    state: tauri::State<'_, crate::SharedState>,
+    expected_instance: String,
+    stage: &std::sync::atomic::AtomicU8,
+) -> Result<Value, String> {
     // ONE retained capture: the pinned gateway and the owner are the same
     // object. A mismatch (or an unpaired/empty owner) refuses before any
     // request leaves the device.
     let gateway = crate::content::expected_gateway(&state, &expected_instance)?;
+    stage.store(1, std::sync::atomic::Ordering::Relaxed);
     let hello = gateway.hello(&state).await?;
     // Strict capability gate: absence is never read as `true`.
     if hello["capabilities"]["lshRemoteSurface"] != true {
@@ -61,6 +79,7 @@ pub(crate) async fn lsh_surface_bootstrap(
     // Bearer state: the Desktop per-device LSH grant is authoritative. Mobile
     // never grants; an off grant fails truthfully and points at the Desktop
     // permission UI.
+    stage.store(2, std::sync::atomic::Ordering::Relaxed);
     let state_value = gateway.content_get(&state, "/v1/lsh/remote/state").await?;
     if state_value["granted"] != true {
         return Err("LSH_NOT_GRANTED".into());
@@ -72,6 +91,7 @@ pub(crate) async fn lsh_surface_bootstrap(
     }
     // Mint one short-lived session. The mint body contains the sensitive `ref`
     // plus the bootstrap path/origin/generations.
+    stage.store(3, std::sync::atomic::Ordering::Relaxed);
     let (status, mint_body) = gateway.lsh_session_mint(&state).await?;
     if !(200..300).contains(&status) {
         // The Desktop reports not-granted as 403 and busy/unavailable as
@@ -89,6 +109,7 @@ pub(crate) async fn lsh_surface_bootstrap(
     // authority; the ref and the upstream cookies never cross this boundary.
     let paired_base = gateway.paired_base().to_string();
     let pinned_fp = gateway.pinned_fingerprint().to_string();
+    stage.store(4, std::sync::atomic::Ordering::Relaxed);
     let handle = crate::lsh_carrier::start(paired_base, pinned_fp, mint).await?;
 
     Ok(json!({
@@ -154,6 +175,75 @@ pub(crate) async fn lsh_surface_open(
         return Err("LSH_SURFACE_DECLINED".into());
     }
     Ok(json!({ "opened": opened }))
+}
+
+/// Mobile tab presentation only. It does not create another LSH authority.
+#[tauri::command]
+pub(crate) async fn lsh_surface_embed(
+    state: tauri::State<'_, crate::SharedState>,
+    expected_instance: String,
+    action: String,
+    presentation_id: Option<String>,
+    presentation_activation: Option<u64>,
+    lifecycle_generation: Option<u64>,
+    session_url: Option<String>,
+    bounds: Option<Value>,
+    dark: Option<bool>,
+) -> Result<Value, String> {
+    if expected_instance.is_empty() { return Err("CONTENT_SOURCE_CHANGED".into()); }
+    if !matches!(action.as_str(), "open" | "layout" | "hide" | "close" | "back" | "status" | "suspend") {
+        return Err("LSH_SURFACE_DECLINED".into());
+    }
+    // Closing/hiding old A is allowed after pairing moved to B, but Kotlin
+    // matches its retained owner so it cannot close or hide B's surface.
+    if action != "close" && action != "hide" {
+        crate::content::require_expected_source(&state, &expected_instance)?;
+    }
+    // Cancel a completed bootstrap that never reached a WebView. Exact
+    // unconsumed launch proof retires only that carrier, not a newer one.
+    if action == "close" {
+        if let Some(ref url) = session_url {
+            if let Some(lease) = crate::lsh_carrier::claim_current_launch(url) {
+                crate::lsh_carrier::retire_leased(&lease);
+            }
+            // This is an unused-bootstrap retirement, NOT a view close. A late
+            // stale bootstrap must never close a newer view of the same owner.
+            return Ok(json!({"opened": false, "visible": false, "ready": false, "canGoBack": false}));
+        }
+    }
+    // Presentation fence is not authority: pairing, grant, origin and lease
+    // checks still apply. Bind before blocking/JNI dispatch can be delayed.
+    let presentation_id = presentation_id.filter(|id| !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'))
+        .ok_or("LSH_PRESENTATION_INVALID")?;
+    let presentation_activation = presentation_activation.filter(|value| *value > 0 && *value <= 9_007_199_254_740_991).ok_or("LSH_PRESENTATION_INVALID")?;
+    let mut request = json!({"lifecycleGeneration": lifecycle_generation.unwrap_or(0), "presentationActivation": presentation_activation, "expectedInstance": expected_instance, "action": action, "presentationId": presentation_id, "dark": dark.unwrap_or(false)});
+    let mut claimed_lease = None;
+    if action == "open" || action == "layout" || action == "suspend" {
+        let b = bounds.ok_or("LSH_SURFACE_BOUNDS_INVALID")?;
+        for key in ["x", "y", "width", "height", "viewportWidth"] {
+            let value = b.get(key).and_then(Value::as_f64).ok_or("LSH_SURFACE_BOUNDS_INVALID")?;
+            if !value.is_finite() || value.abs() > 100_000.0 ||
+                ((key == "width" || key == "height") && value < 0.0) ||
+                (key == "viewportWidth" && value <= 0.0) {
+                return Err("LSH_SURFACE_BOUNDS_INVALID".into());
+            }
+        }
+        request["bounds"] = b;
+    }
+    if action == "open" {
+        let url = session_url.ok_or("LSH_SURFACE_DECLINED")?;
+        if !is_loopback_session_url(&url) { return Err("LSH_SURFACE_DECLINED".into()); }
+        let lease = crate::lsh_carrier::claim_current_launch(&url).ok_or("LSH_SURFACE_DECLINED")?;
+        request["sessionUrl"] = json!(url);
+        request["lease"] = json!(lease);
+        claimed_lease = Some(lease);
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || shell::embedded(&request.to_string()))
+        .await.map_err(|_| "LSH_EMBED_OUTCOME_UNKNOWN".to_string()).and_then(|v| v);
+    if result.is_err() {
+        if let Some(ref lease) = claimed_lease { crate::lsh_carrier::retire_leased(lease); }
+    }
+    result
 }
 
 /// Strict loopback-origin check: only `http://127.0.0.1:<port>/…` (the
@@ -233,8 +323,37 @@ mod shell {
         crate::lsh_carrier::retire_leased(&lease);
     }
 
+    #[no_mangle]
+    pub extern "system" fn Java_com_luckyray_mobile_LshSurfaceBridge_nativeIsLeaseCurrent(
+        mut env: JNIEnv,
+        _class: JObject,
+        lease: jni::objects::JString,
+    ) -> jni::sys::jboolean {
+        match env_string(&mut env, lease) {
+            Some(lease) if !lease.is_empty() && crate::lsh_carrier::current_lease().as_deref() == Some(lease.as_str()) => 1,
+            _ => 0,
+        }
+    }
+
     fn env_string(env: &mut JNIEnv, s: jni::objects::JString) -> Option<String> {
         env.get_string(&s).ok().map(|v| v.to_string_lossy().to_string())
+    }
+
+    pub fn embedded(request: &str) -> Result<serde_json::Value, String> {
+        let vm = VM.get().ok_or("JVM not attached (LshSurfaceBridge not initialized)")?;
+        let mut env = vm.attach_current_thread().map_err(|_| "LSH_EMBED_JVM")?;
+        let g = BRIDGE_CLASS.get().ok_or("LSH_EMBED_JVM")?;
+        let obj: JObject = unsafe { JObject::from_raw(g.as_raw()) };
+        let class: jni::objects::JClass = obj.into();
+        let input = env.new_string(request).map_err(|_| "LSH_EMBED_JVM")?;
+        let result = env.call_static_method(class, "embedded", "(Ljava/lang/String;)Ljava/lang/String;", &[JValue::Object(&input)])
+            .map_err(|_| "LSH_EMBED_JVM")?.l().map_err(|_| "LSH_EMBED_JVM")?;
+        let result = env_string(&mut env, jni::objects::JString::from(result)).ok_or("LSH_EMBED_JVM")?;
+        let result: serde_json::Value = serde_json::from_str(&result).map_err(|_| "LSH_EMBED_INVALID_RESULT")?;
+        if result.get("opened").is_none() {
+            if let Some(error) = result.get("error").and_then(serde_json::Value::as_str) { return Err(error.to_owned()); }
+        }
+        Ok(result)
     }
 
     /// Launch the shell; `false` maps to a truthful refusal upstream.
@@ -273,6 +392,9 @@ mod shell {
 
 #[cfg(not(target_os = "android"))]
 mod shell {
+    pub fn embedded(_request: &str) -> Result<serde_json::Value, String> {
+        Err("LSH_SURFACE_UNSUPPORTED".into())
+    }
     // Desktop/dev builds have no Android shell; the caller surfaces this
     // truthfully instead of pretending the surface opened.
     pub fn open(_session_url: &str, _owner: &str, _title: &str, _lease: &str) -> Result<bool, String> {

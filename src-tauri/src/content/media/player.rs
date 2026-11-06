@@ -79,6 +79,8 @@ impl Session {
             }
         }
         result["format"] = format;
+        // Finite native receipt only: no URL, lease, file/asset ID or credential.
+        println!("[LRMaterialDiag] player={}",result);
         if let Ok(mut sender) = self.closed.lock() {
             if let Some(sender) = sender.take() {
                 let _ = sender.send(result);

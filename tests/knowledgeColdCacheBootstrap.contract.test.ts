@@ -39,7 +39,7 @@ test("adoption rejects wrong/incomplete/deleted bodies and never rewrites an int
   assert.match(adopt, /document\["resources"\]\.is_array\(\)/);
   assert.match(adopt, /text\(document, "revision"\)\.is_empty\(\)/);
   assert.match(adopt, /TransactionBehavior::Immediate/);
-  assert.match(adopt, /if existing\.is_none\(\) \{\s*apply_document/);
+  assert.match(adopt, /if existing\.is_none\(\) \{\s*offline::cache_allow_reader\(&tx, instance, vault, id\)\?;\s*apply_document\(&tx, instance, vault, document\)\?;\s*\}/);
   assert.doesNotMatch(adopt, /content_apply_batch|content_vault_cache|SET cursor|content_prepare|content_note_operation/);
   assert.doesNotMatch(adopt, /SET editor_epoch|editor_generation=0/);
 });
@@ -183,4 +183,16 @@ test("actual retained Still caller wires unfinished resume without re-running id
   assert.match(init, /opener\.dispose\(\)/);
   const visibility = caller.split("noteOpener.current?.setCurrent(current);")[1]?.slice(0, 80) ?? "";
   assert.match(visibility, /\}, \[current\]\)/);
+});
+
+
+test("explicit cold reader opt-in is fenced by the durable cache generation before adoption", () => {
+  assert.match(cold, /let cache_generation = source\.with_db\(state, \|db\| db\.content_cache_generation\(instance, vault\)\)\?;[\s\S]*bootstrap::fetch_if_missing/);
+  assert.match(cold, /if db\.content_cache_generation\(instance, vault\)\? != cache_generation \{\s*return Err\("CONTENT_CACHE_CHANGED"\.into\(\)\);\s*\}\s*db\.content_cache_bootstrap/);
+  const offline = readFileSync(new URL("../src-tauri/src/content_offline_db.rs", import.meta.url), "utf8");
+  assert.match(offline, /fn cache_clear_scoped_transaction_preserves_drafts_and_rejects_late_jobs/);
+  assert.match(offline, /fn cache_clear_retires_saved_editor_and_blocks_prefetch_until_explicit_read/);
+  assert.match(offline, /fn cache_clear_persists_for_historical_vault_and_can_be_repeated/);
+  assert.match(database, /offline::cache_suppress_body\(db, instance, vault, id\)\?/);
+  assert.match(database, /let adopt = !offline::cache_paused\(&tx, instance, vault\)\? && &current == expected/);
 });

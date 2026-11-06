@@ -16,3 +16,18 @@ test('ambiguous choices retain catalog previews without reading any arbitrary ta
   assert.deepEqual(result.notes.map(note=>note.preview),['first preview','second preview']);
   assert.ok(result.notes.every(note=>!('content' in note)));
 });
+
+test('ambiguous reader choices retain human folder context without body reads', async () => {
+  const rows = [{noteId:'note-work',title:'same',folder:'工作',content:'work preview'}, {noteId:'note-home',title:'same',folder:'生活',content:'home preview'}];
+  const result = await resolveLocalWiki(localWikiReferences('[[same]]')[0], { list:async()=>({items:rows,total:2,hasMore:false}),get:async()=>{throw Error('must not resolve ambiguity');} });
+  assert.equal(result.kind, 'ambiguous');
+  assert.match(localWikiChoiceDetail(result.notes[0]), /文件夹：工作 · work preview/);
+  assert.match(localWikiChoiceDetail(result.notes[1]), /文件夹：生活 · home preview/);
+});
+
+test('stable links survive title changes while legacy names are not guessed', async () => {
+  const row = {noteId:'note-stable',title:'New title',content:'unchanged'};
+  const client = {list:async()=>({items:[row],total:1,hasMore:false}), get:async()=>row};
+  assert.equal((await resolveLocalWiki(localWikiReferences('[[note-stable|Old alias]]')[0], client)).kind, 'resolved');
+  assert.equal((await resolveLocalWiki(localWikiReferences('[[Old title]]')[0], client)).kind, 'missing');
+});

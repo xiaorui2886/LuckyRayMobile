@@ -415,7 +415,7 @@ test("R1-12 — local results survive a Desktop error (page never hides them)", 
 
 test("R1-13/14 — material and knowledge hits carry captured identity routes", () => {
   const src = strip(read("src", "still", "StillSearch.tsx"));
-  assert.match(src, /desktopAssetRoute\(instance, hit\.assetId\)/u,
+  assert.match(src, /desktopAssetRoute\(instance, hit\.assetId, library\)/u,
     "material rows route with the captured search instance");
   assert.match(src, /desktop:\$\{encodeURIComponent\(instance\)\}:\$\{encodeURIComponent\(hit\.vaultId\)\}:\$\{encodeURIComponent\(hit\.noteId\)\}/u,
     "knowledge rows route with captured instance+vault+note");
@@ -642,10 +642,15 @@ test("R2-W1 — registry authority notifications never re-enter Desktop discover
     ["src", "still", "StillSearch.tsx"],
     ["src", "still", "StillCollection.tsx"],
     ["src", "still", "kit", "searchServicesController.ts"],
-    ["src", "still", "kit", "knowledgeBrowseController.ts"],
   ]) assert.doesNotMatch(strip(read(...path)), /registry\.subscribe/u,
     `${path.at(-1)} must not wire registry notifications back into discovery`);
 
+  // Browse now observes security epochs to synchronously remove revoked rows.
+  // Its bounded, non-recursive behavior is covered with the real registry in
+  // scopedServiceLifecycle.test.ts, rather than banning the subscription API.
+  const browse = strip(read("src", "still", "kit", "knowledgeBrowseController.ts"));
+  assert.match(browse, /activeSecurity === \(scope\.currentSecurityRevision/u,
+    "unchanged authority notifications return without rediscovery");
   const h = makeRegistry();
   const seen: Array<{ namespace: string; catalog: boolean }> = [];
   const unsubscribe = h.registry.subscribe(() => seen.push({

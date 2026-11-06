@@ -1,0 +1,7 @@
+/* Android intersects touch-action only up to the first scrolling ancestor.
+ * Put vertical ownership on the actual root scrollers as well as the owner;
+ * otherwise Chromium can cancel a horizontal pointer before JS sees it.
+ * Detail note rails and media viewers have separate gesture authorities. */
+.st-root-stage[data-swipe-owner="root"] .st-scroll {
+  touch-action: pan-y;
+}

@@ -20,6 +20,7 @@ const appTsx = read("src", "App.tsx");
 const shellTsx = read("src", "still", "StillShell.tsx");
 const kitSheet = read("src", "still", "kit", "Sheet.tsx");
 const libraryTsx = read("src", "still", "StillLibrary.tsx");
+const importSheetTsx = read("src", "still", "kit", "MaterialImportSheet.tsx");
 const assetTsx = read("src", "still", "StillAsset.tsx");
 
 // ---- 1–3. IME → dock recovery ----------------------------------------------
@@ -38,7 +39,7 @@ test("qa fix — IME close restores the dock via a one-bit viewport signal", () 
 test("qa fix — the input keeps focus and can re-enter text-entry", () => {
   assert.doesNotMatch(appTsx, /activeElement\.blur\(\)/, "restore never blurs the focused input");
   assert.match(appTsx, /const onFocusIn = \(e: FocusEvent\)/, "focusin still starts a text-entry session");
-  assert.match(shellTsx, /data-text-entry=\{editingText \? "true" : undefined\}/,
+  assert.match(shellTsx, /data-text-entry=\{editingText \|\| \(rootTab === "ai" && lshIme\) \? "true" : undefined\}/,
     "the flag still reaches the Still shell");
 });
 
@@ -95,11 +96,11 @@ test("qa fix — grip tap, backdrop and Back all dismiss through one close path"
 test("qa fix — library browse and import are two states, two sheets", () => {
   assert.match(libraryTsx, /const \[browseOpen, setBrowseOpen\] = useState\(false\);/, "browse state exists");
   assert.match(libraryTsx, /const \[importOpen, setImportOpen\] = useState\(false\);/, "import state exists");
-  assert.match(libraryTsx, /onNew=\{\(\) => setImportOpen\(true\)\}/, "plus opens import");
+  assert.match(libraryTsx, /onNew=\{beginMaterialImport\}/, "plus captures its own local or Desktop destination");
   assert.match(libraryTsx, /onBrowse=\{\(\) => setBrowseOpen\(true\)\}/, "folder opens browse");
   assert.match(libraryTsx, /title="浏览本机素材"/, "local browse sheet title");
-  assert.match(libraryTsx, /title="目录与标签"/, "desktop browse sheet title");
-  assert.match(libraryTsx, /title="导入到本机"/, "import sheet title");
+  assert.match(libraryTsx, /<DirectoryLibrarySheet instance=\{owner\} kind="materials"/, "desktop browse holds directory/library tabs without another overlay");
+  assert.match(importSheetTsx, /导入到电脑.*导入到本机/, "import sheet title matches its captured destination");
   assert.doesNotMatch(libraryTsx, /onBrowse=\{\(\) => setImportOpen\(true\)\}/, "browse no longer opens import");
 });
 
@@ -116,7 +117,7 @@ test("qa fix — local browse options really change the local filter", () => {
 
 test("qa fix — desktop browse drives real folder/tag request axes", () => {
   // The navigation read is owner-bound (SOURCE-OWNER-R2), not anonymous.
-  assert.match(libraryTsx, /api\.contentNavigation\(committedDesktopOwner\)/,
+  assert.match(libraryTsx, /scopedApi\.contentNavigation\(committedDesktopOwner\)/,
     "reads the real Desktop navigation authority for the owning Desktop");
   // REPAIR-R5: the axes are built once, by DESKTOP_SOURCE, and flow into the
   // authority's fetch — so the request still carries the selected axes.
@@ -136,7 +137,7 @@ test("qa fix — desktop browse drives real folder/tag request axes", () => {
   );
   assert.match(
     libraryTsx,
-    /\}, \[desktopAuthority, conn\?\.paired, desktopOwner\]\);/,
+    /\}, \[desktopAuthority, conn\?\.paired, desktopOwner, library, libraries\.materialsEpoch\]\);/,
     "and the owner bind depends on the owning Desktop",
   );
   assert.match(libraryTsx, /\}, \[desktopAuthority, version\]\);/,

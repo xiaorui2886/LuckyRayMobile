@@ -1,16 +1,18 @@
 // Minimal event-driven data snapshot store (no framework): every commit
 // (sync / capture / note update / asset cache update) bumps a version that
-// screens subscribe to. No page-level setTimeout polling.
+// screens subscribe to. Knowledge-only commits may be ignored by material viewers;
+// listeners without an argument keep the original behavior. No polling.
 
-type Listener = () => void;
+export type DataChange = "all" | "knowledge";
+type Listener = (kind: DataChange) => void;
 
 class DataStore {
   private version = 0;
   private listeners = new Set<Listener>();
 
-  bump(): void {
+  bump(kind: DataChange = "all"): void {
     this.version += 1;
-    for (const fn of this.listeners) fn();
+    for (const fn of this.listeners) fn(kind);
   }
 
   getVersion(): number {

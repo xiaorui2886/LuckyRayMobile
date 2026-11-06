@@ -202,7 +202,9 @@ test("content authority: production singleton invokes only capability-negotiated
 
   const source = readFileSync(join(import.meta.dirname, "..", "src", "services", "syncCoordinator.ts"), "utf8");
   assert.doesNotMatch(source, /setFoundationBlocked\s*\(/, "production authority exposes no mutable sync unlock");
-  assert.match(source, /export const syncCoordinator = new SyncCoordinator\(\(\) => api\.contentSync\(\), \{ foundationBlocked: false, contentOnly: true \}\)/, "production runs the scoped content adapter");
+  assert.match(source, /export const syncCoordinator = new SyncCoordinator\(\(instance,vault\) => api\.contentSync\(instance,vault\), \{\s*foundationBlocked: false, contentOnly: true,/, "production runs the scoped content adapter");
+  assert.match(source, /managedVault\.syncTargets\(instance\)/, "production enumerates bound replicas independently of the visible vault");
+  assert.match(source, /legacyFallback: migration\.state !== "ready"/, "legacy single-scope fallback retires after migration");
 });
 
 test("content completion never flushes legacy outbox and publishes committed changes", async () => {

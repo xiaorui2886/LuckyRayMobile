@@ -82,8 +82,8 @@ class MaterialsPlayerActivity : ComponentActivity() {
                 if (fullscreen) setFullscreen(false) else closePlayer(0)
             }
         })
-        val canvas = Color.parseColor(if (darkMode) "#111312" else "#FAFAF8")
-        val ink = Color.parseColor(if (darkMode) "#E6E8E2" else "#262825")
+        val canvas = Color.parseColor(if (darkMode) "#0a0a0c" else "#f1f2f5")
+        val ink = Color.parseColor(if (darkMode) "#f0f0f2" else "#18191f")
         val root = FrameLayout(this).apply {setBackgroundColor(canvas)}
         mediaRoot = root
         // Target36 edge-to-edge and Android10 both keep controls clear of the
@@ -219,7 +219,7 @@ class MaterialsPlayerActivity : ComponentActivity() {
     private fun applySystemBars() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = if (fullscreen) Color.BLACK else Color.parseColor(if (darkMode) "#111312" else "#FAFAF8")
+        window.navigationBarColor = if (fullscreen) Color.BLACK else Color.parseColor(if (darkMode) "#0a0a0c" else "#f1f2f5")
         if (Build.VERSION.SDK_INT >= 30) {
             window.insetsController?.apply {
                 systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE

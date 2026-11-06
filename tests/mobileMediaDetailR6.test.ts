@@ -46,6 +46,7 @@ test("late streamed grant is released on owner change", async () => {
   assert.deepEqual(h.urls,[]); assert.deepEqual(h.released,["old-owner-token"]);
 });
 const asset=readFileSync(new URL("../src/still/StillAsset.tsx",import.meta.url),"utf8");
+const player=readFileSync(new URL("../src/still/InlineAssetVideo.tsx",import.meta.url),"utf8");
 const tile=readFileSync(new URL("../src/still/kit/mediaTile.tsx",import.meta.url),"utf8");
 test("captionless cards preserve accessible names and selection gestures",()=>{
   assert.ok(tile.includes('aria-label={`${title}，${meta}`}'));
@@ -53,8 +54,9 @@ test("captionless cards preserve accessible names and selection gestures",()=>{
   assert.ok(tile.includes('{...press.handlers}')); assert.ok(tile.includes('aria-pressed={selecting ? selected : undefined}'));
 });
 test("detail uses inline controls and keeps destructive confirmation local",()=>{
-  assert.ok(asset.includes('controls playsInline preload="metadata"'));
-  assert.ok(asset.includes('element?.pause()')); assert.ok(asset.includes('element?.removeAttribute("src")'));
+  assert.ok(player.includes('playsInline preload="metadata"'));
+  assert.ok(player.includes('aria-label="播放进度"'));
+  assert.ok(player.includes('element?.pause()')); assert.ok(player.includes('element?.removeAttribute("src")'));
   assert.ok(!asset.includes('className="st-asset-caption"'));
   assert.ok(asset.includes('<AssetHeader title={asset.name} back={back} />'));
   assert.ok(asset.includes('<Sheet title="删除这条素材？"'));
@@ -73,7 +75,7 @@ test("image chrome overlays the full stage while video controls keep their space
   assert.ok(!css.includes('.st-asset-view .st-asset-actions { position:absolute'));
 });
 test("local inline video uses validated Range lease, never a raw WebView asset URL",()=>{
-  const inline=asset.slice(asset.indexOf('function InlineAssetVideo'),asset.indexOf('// --- shared zoomable'));
+  const inline=player;
   assert.ok(inline.includes('api.localAssetMediaSource(id)'));
   assert.ok(!inline.includes('convertFileSrc('));
   const rust=readFileSync(new URL('../src-tauri/src/content.rs',import.meta.url),'utf8');

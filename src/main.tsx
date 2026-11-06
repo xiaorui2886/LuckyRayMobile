@@ -1,4 +1,5 @@
 import "./services/webviewCompatibility";
+import "./services/graphQaTiming";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./design/tokens.css";

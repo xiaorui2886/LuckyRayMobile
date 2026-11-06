@@ -68,14 +68,47 @@
 .st-app .st-note-surface>.st-reader-bottom{position:absolute;left:0;right:0;bottom:0;z-index:4;padding:6px 20px calc(var(--st-safe-bottom) + 8px);background:transparent;pointer-events:none}
 .st-app .st-reader-bottom>.st-reader-tools{pointer-events:auto;min-height:48px;background:var(--st-surface);background:color-mix(in srgb,var(--st-surface) 88%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-radius:26px;box-shadow:0 3px 18px #0000000c}
 .st-app .st-note-surface .st-note-navigation>.st-note-nav-button{height:44px}
-.st-app .st-note-surface>.st-note-paper{padding-bottom:calc(80px + var(--st-safe-bottom));scroll-padding-bottom:80px}
+.st-app .st-note-surface>.st-note-paper{padding-bottom:var(--note-tail-clearance,calc(80px + var(--st-safe-bottom)));scroll-padding-bottom:80px}
 .st-app .st-note-paper.is-editing{display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}
 .st-app .st-note-paper.is-editing>.st-note-title{flex:none;margin-bottom:18px!important}
-.st-app .st-note-paper.is-editing>.st-note-editor.is-cm{flex:1;height:auto;min-height:0}
+.st-app .st-note-paper.is-editing .st-note-editor.is-cm{flex:1;height:auto;min-height:0}
 .st-app .st-note-editor.is-cm .cm-scroller{height:100%;min-height:0;overscroll-behavior-y:contain}
-.st-app .st-note-editor.is-cm .cm-content{padding-bottom:calc(84px + var(--st-safe-bottom));min-height:100px}
+.st-app .st-note-editor.is-cm .cm-content{padding-bottom:var(--note-tail-clearance,calc(84px + var(--st-safe-bottom)));min-height:100px}
 .st-app .has-editor-tools>.st-reader-bottom{padding:4px 8px calc(var(--st-safe-bottom) + 4px)}
 .st-app .st-editor-image{padding:6px 0;box-sizing:border-box}
 .st-app .st-editor-image.is-inline{display:inline-block;vertical-align:middle;max-width:100%}
 
 .st-note-opening{padding:28px 0;display:grid;gap:14px;opacity:.45}.st-note-opening i{display:block;height:9px;border-radius:5px;background:var(--st-line);width:92%}.st-note-opening i:nth-child(2){width:78%}.st-note-opening i:last-child{width:60%}
+
+/* Reading chrome overlays, rather than resizing, the single document viewport.
+   Revealing controls never changes scrollTop or shifts the paragraph underneath. */
+.st-app .st-note-surface{--st-note-header-height:58px}
+.st-app .st-note-surface>.st-header{position:absolute;top:var(--st-safe-top);left:0;right:0;z-index:5;background:var(--st-canvas);transition:transform 180ms ease,opacity 140ms ease,visibility 180ms}
+.st-app .st-note-surface>.st-note-paper{padding-top:calc(var(--st-note-header-height) + 30px);scroll-padding-top:calc(var(--st-note-header-height) + 8px)}
+.st-app .st-note-surface>.st-note-paper.is-editing.has-note-scroll-heading{padding-top:0}
+.st-app .st-note-surface>.st-note-paper.is-preview-waiting{display:block;overflow-y:auto}
+.st-app .st-note-surface>.st-notice{margin-top:var(--st-note-header-height)}
+.st-app .st-note-editor.is-cm .cm-scroller.has-note-heading{display:block!important;scroll-padding-top:calc(var(--st-note-header-height) + 8px)}
+.st-app .cm-scroller>.st-note-heading{padding-top:calc(var(--st-note-header-height) + 30px);padding-bottom:0}
+.st-app .st-note-heading>.st-note-title{margin-bottom:25px!important}
+.st-app .st-note-surface>.st-reader-bottom{transition:transform 180ms ease,opacity 140ms ease,visibility 180ms}
+.st-app .st-note-surface[data-chrome-hidden="true"]>.st-header{transform:translateY(calc(-100% - var(--st-safe-top)));opacity:0;visibility:hidden;pointer-events:none}
+.st-app .st-note-surface[data-chrome-hidden="true"]>.st-reader-bottom{transform:translateY(100%);opacity:0;visibility:hidden;pointer-events:none}
+@media(prefers-reduced-motion:reduce){
+ .st-app .st-note-surface>.st-header,.st-app .st-note-surface>.st-reader-bottom{transition:none}
+}
+
+.st-app .st-note-surface.has-note-warning>.st-note-paper{padding-top:30px}
+.st-app .st-note-surface.has-note-warning>.st-note-paper.has-note-scroll-heading{padding-top:0}
+.st-app .st-note-surface.has-note-warning .cm-scroller>.st-note-heading{padding-top:30px}
+.st-app .st-note-surface[data-chrome-hidden="true"]>.st-reader-bottom .st-reader-tools{pointer-events:none}
+
+.st-note-preview-unavailable{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:24px 0;color:var(--st-muted);font-size:13px}.st-note-preview-unavailable button{border:0;background:transparent;color:var(--st-accent);font:inherit;padding:8px 0;cursor:pointer}
+
+/* The heading is a sibling of cm-content in the single scroll owner. Match
+   its borrowed editor gutter; the reader title already inherits paper padding. */
+.st-app .st-note-surface{--st-note-editor-inset:22px}
+.st-app .st-note-editor.is-cm .cm-scroller>.st-note-heading{box-sizing:border-box;padding-left:var(--st-note-editor-inset);padding-right:var(--st-note-editor-inset)}
+
+/* Only document-end layout space, never synthetic Markdown or block margins. */
+.st-app .st-note-surface textarea.st-note-editor{padding-bottom:var(--note-tail-clearance,38vh)}

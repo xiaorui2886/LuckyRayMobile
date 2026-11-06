@@ -19,7 +19,7 @@ import React, { useEffect, useState } from "react";
 
 export type { MediaKind } from "./mediaTilePure";
 export { mediaPlaceholderLabel, shouldRenderImage } from "./mediaTilePure";
-import { mediaPlaceholderLabel, shouldRenderImage, type MediaKind } from "./mediaTilePure";
+import { fileFormat, mediaPlaceholderLabel, shouldRenderImage, type MediaKind } from "./mediaTilePure";
 import { useLongPress } from "./pressGesture";
 
 export type MediaTileProps = {
@@ -28,6 +28,7 @@ export type MediaTileProps = {
   src: string;
   kind: MediaKind;
   meta: string;
+  excerpt?: string;
   /** One bounded re-query of the existing thumbnail authority. */
   onRetry?: () => void;
   /** Fired when the tile becomes (near-)visible — used for viewport-first work. */
@@ -47,7 +48,7 @@ export type MediaTileProps = {
   onDragEnd?: () => void;
 };
 
-export function MediaTile({ title, src, kind, meta, onRetry, onVisible, onClick, onLongPress, selected = false, selecting = false, assetId, onDragSelect, onDragEnd }: MediaTileProps) {
+export function MediaTile({ title, src, kind, meta, excerpt, onRetry, onVisible, onClick, onLongPress, selected = false, selecting = false, assetId, onDragSelect, onDragEnd }: MediaTileProps) {
   const [failed, setFailed] = useState(false);
   const [retried, setRetried] = useState(false);
   // REPAIR-R2 (3B): a retry can legitimately return the SAME uri as before (the
@@ -156,14 +157,13 @@ export function MediaTile({ title, src, kind, meta, onRetry, onVisible, onClick,
               }
             }}
           />
-        ) : (
-          <span className="st-media-placeholder" aria-hidden="true">
-            {mediaPlaceholderLabel(kind)}
+        ) : excerpt ? <span className="st-file-excerpt">{excerpt}</span> : (
+          <span className="st-file-cover" data-kind={kind} aria-hidden="true">
+            <svg viewBox="0 0 32 36" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M7 2h12l7 7v25H7z"/><path d="M19 2v8h7M11 17h11M11 22h11M11 27h7"/></svg>
+            <span><strong>{fileFormat(title,kind)}</strong><small>{title}</small></span>
           </span>
         )}
-        {kind !== "image" ? (
-          <span className="st-media-type">{kind === "video" ? "视频" : "文档"}</span>
-        ) : null}
+        {kind !== "image" ? <span className="st-media-type st-file-format">{fileFormat(title,kind)}</span> : null}
         {/* Selection is expressed by a check mark over the art, never by a
             border or a colour fill on the card itself. */}
         {selecting ? (

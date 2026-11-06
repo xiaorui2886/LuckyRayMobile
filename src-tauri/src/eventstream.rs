@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::{
     http::{header::AUTHORIZATION, HeaderValue, Request},
     Error as TungsteniteError, Message,
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use tauri::Emitter;
 
 // 0 stopped, 1 connecting, 2 connected, 3 reconnecting
@@ -64,6 +64,7 @@ type StatusFn = Arc<dyn Fn(i8) + Send + Sync>;
 struct Inner {
     handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stop: Mutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
+    resume_probe: tokio::sync::Notify,
     state: AtomicI8,
     last_seq: AtomicI64,
     current: Mutex<String>,
@@ -98,6 +99,7 @@ impl EventStreamClient {
             inner: Arc::new(Inner {
                 handle: Mutex::new(None),
                 stop: Mutex::new(None),
+                resume_probe: tokio::sync::Notify::new(),
                 state: AtomicI8::new(ST_STOPPED),
                 last_seq: AtomicI64::new(0),
                 current: Mutex::new(String::new()),
@@ -184,6 +186,9 @@ impl EventStreamClient {
         if handle_slot.is_some() {
             return StartOutcome::AlreadyRunning;
         }
+        // A queued foreground hint belongs to the retired worker, not the
+        // next pairing/start. There is no live consumer while this slot is empty.
+        let _ = inner.resume_probe.notified().now_or_never();
         // Taking the handle slot under the lock serializes start/stop pairs,
         // so this generation is strictly newer than any retired worker's.
         let worker_gen = inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -244,6 +249,12 @@ impl EventStreamClient {
                 tokio::select! {
                     biased;
                     _ = stop_rx.recv() => break,
+                    // Foreground recovery must wake an already-running retry
+                    // worker as well as probe an established socket. Otherwise
+                    // a short background drop can keep waiting up to 30 seconds
+                    // despite conn_resume returning successfully. This reuses
+                    // the one worker, failure truth and existing dial deadline.
+                    _ = this.inner.resume_probe.notified() => {},
                     _ = tokio::time::sleep(Duration::from_millis(d)) => {}
                 }
             }
@@ -281,6 +292,16 @@ impl EventStreamClient {
         }
         inner.state.store(ST_STOPPED, Ordering::SeqCst);
         *inner.last_failure.lock().unwrap() = None;
+    }
+
+    /// A foreground signal checks the existing socket or wakes its retry wait,
+    /// never retires it. An in-flight dial keeps its existing bounded deadline.
+    /// The message loop owns the probe deadline; explicit stop still cancels
+    /// either path immediately. Terminal/manual-stop states remain untouched.
+    pub fn check_connection(&self) {
+        if matches!(self.inner.state.load(Ordering::SeqCst), ST_CONNECTED | ST_RECONNECTING) {
+            self.inner.resume_probe.notify_one();
+        }
     }
 
     fn is_current(&self, gen: u64) -> bool {
@@ -505,11 +526,10 @@ async fn connect_once(
 
     let (mut sink, mut stream) = ws.split();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
-    pump_messages(&mut sink, &mut stream, &mut heartbeat, |t| {
+    pump_messages(&mut sink, &mut stream, &mut heartbeat, &client.inner.resume_probe, |t| {
         client.on_event_gated(app, t, worker_gen);
     })
     .await
-    .map_err(|note| StreamFailure::Retryable { kind: RetryKind::Protocol, note })
 }
 
 /// M3-M1 Phase-B R1 (P1-5): THE EventStream message path, extracted verbatim
@@ -519,8 +539,15 @@ async fn pump_messages(
     sink: &mut (impl futures_util::SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
     stream: &mut (impl futures_util::StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
     heartbeat: &mut tokio::time::Interval,
+    resume_probe: &tokio::sync::Notify,
     mut on_event: impl FnMut(String),
-) -> Result<(), String> {
+) -> Result<(), StreamFailure> {
+    // Reuse the heartbeat timer for a foreground liveness check. Ordinary
+    // backgrounding neither closes the socket nor changes connection intent.
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut pending_probe: Option<Vec<u8>> = None;
+    let mut probe_sequence = 0_u64;
+    let protocol_failure = |note: String| StreamFailure::Retryable { kind: RetryKind::Protocol, note };
     loop {
         tokio::select! {
             msg = stream.next() => {
@@ -534,19 +561,40 @@ async fn pump_messages(
                     // RFC-legal and tolerated by the peer.)
                     Some(Ok(Message::Ping(payload))) => {
                         if sink.send(Message::Pong(payload)).await.is_err() {
-                            return Err("pong failed".into());
+                            return Err(protocol_failure("pong failed".into()));
                         }
                     }
-                    Some(Ok(Message::Close(_))) => return Err("closed".into()),
-                    Some(Err(e)) => return Err(format!("read: {e}")),
+                    Some(Ok(Message::Pong(payload))) => {
+                        if pending_probe.as_deref() == Some(payload.as_slice()) {
+                            pending_probe = None;
+                            heartbeat.reset();
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => return Err(protocol_failure("closed".into())),
+                    Some(Err(e)) => return Err(protocol_failure(format!("read: {e}"))),
                     Some(Ok(_)) => {}
-                    None => return Err("closed by server".into()),
+                    None => return Err(protocol_failure("closed by server".into())),
                 }
             }
             _ = heartbeat.tick() => {
-                if sink.send(Message::Ping(vec![].into())).await.is_err() {
-                    return Err("ping failed".into());
+                if pending_probe.is_some() {
+                    return Err(StreamFailure::Retryable { kind: RetryKind::Deadline, note: "resume probe deadline exceeded".into() });
                 }
+                if sink.send(Message::Ping(vec![].into())).await.is_err() {
+                    return Err(protocol_failure("ping failed".into()));
+                }
+            }
+            _ = resume_probe.notified() => {
+                // Focus, visibility and native resume can describe the same
+                // transition. Do not send another ping or extend its deadline.
+                if pending_probe.is_some() { continue; }
+                probe_sequence += 1;
+                let payload = format!("lr-resume-{probe_sequence}").into_bytes();
+                if sink.send(Message::Ping(payload.clone().into())).await.is_err() {
+                    return Err(protocol_failure("resume ping failed".into()));
+                }
+                pending_probe = Some(payload);
+                heartbeat.reset_after(WS_DIAL_TIMEOUT);
             }
         }
     }
@@ -604,7 +652,8 @@ mod tests {
         let seen = std::sync::Arc::clone(&seen_events);
 
         let pump_handle = tokio::spawn(async move {
-            let _ = pump_messages(&mut client_sink, &mut client_stream, &mut heartbeat, move |t| {
+            let resume_probe = tokio::sync::Notify::new();
+            let _ = pump_messages(&mut client_sink, &mut client_stream, &mut heartbeat, &resume_probe, move |t| {
                 seen.lock().unwrap().push(t);
             })
             .await;
@@ -635,6 +684,188 @@ mod tests {
             .await
             .expect("server sends text after pong");
         pump_handle.abort(); // stop the pump; server half drops
+    }
+
+    // Actual WebSocket frames over memory only: no listener, device or peer.
+    async fn resume_fixture() -> (
+        EventStreamClient,
+        tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (a, b) = tokio::io::duplex(4096);
+        let server = tokio_tungstenite::WebSocketStream::from_raw_socket(a, Role::Server, None).await;
+        let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(b, Role::Client, None).await;
+        let mut socket = Some(socket);
+        let mut client = EventStreamClient::new();
+        client.base_delay_ms = 1;
+        client.max_delay_ms = 2;
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_attempts = Arc::clone(&attempts);
+        let (events, received) = tokio::sync::mpsc::unbounded_channel();
+        let worker = client.clone();
+        let status = client.clone();
+        client.start_with_attempt(Box::new(move |_gen| {
+            seen_attempts.fetch_add(1, Ordering::SeqCst);
+            let socket = socket.take();
+            let worker = worker.clone();
+            let events = events.clone();
+            Box::pin(async move {
+                let Some(socket) = socket else { return std::future::pending().await; };
+                worker.set_state_for_runtime(ST_CONNECTED);
+                let (mut sink, mut stream) = socket.split();
+                let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
+                heartbeat.reset();
+                pump_messages(&mut sink, &mut stream, &mut heartbeat, &worker.inner.resume_probe,
+                    move |text| { let _ = events.send(text); }).await
+            })
+        }), Arc::new(move |state| status.set_state_for_runtime(state)), Some([90; 32])).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.snapshot()["state"] != "connected" { tokio::task::yield_now().await; }
+        }).await.expect("memory socket connected");
+        (client, server, received, attempts)
+    }
+
+    async fn next_resume_ping(socket: &mut tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>) -> Vec<u8> {
+        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next()).await
+            .expect("resume ping promptly").expect("socket open").expect("valid frame");
+        let Message::Ping(payload) = frame else { panic!("expected resume ping, got {frame:?}"); };
+        assert!(payload.starts_with(b"lr-resume-"));
+        payload.to_vec()
+    }
+
+    #[tokio::test]
+    async fn healthy_resume_keeps_same_socket_and_no_fake_reconnect_status() {
+        let (client, mut server, mut events, attempts) = resume_fixture().await;
+        let generation = client.spawned_generations_for_test();
+        client.check_connection();
+        let first = next_resume_ping(&mut server).await;
+        server.send(Message::Pong(first.into())).await.expect("matching pong");
+        server.send(Message::Text("after-resume".into())).await.expect("same socket usable");
+        assert_eq!(events.recv().await.as_deref(), Some("after-resume"));
+        // A second foreground checks the same live transport, not a new dial.
+        client.check_connection();
+        let second = next_resume_ping(&mut server).await;
+        server.send(Message::Pong(second.into())).await.expect("second matching pong");
+        tokio::time::sleep(WS_DIAL_TIMEOUT + Duration::from_millis(30)).await;
+        assert_eq!(client.snapshot()["state"], "connected", "successful probe cancels the short deadline");
+        assert_eq!(client.spawned_generations_for_test(), generation);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "resume never redials a healthy socket");
+        client.stop().await;
+    }
+
+    #[tokio::test]
+    async fn missing_resume_pong_retries_without_duplicate_signals_extending_deadline() {
+        let (client, mut server, _events, attempts) = resume_fixture().await;
+        client.check_connection();
+        let _ping = next_resume_ping(&mut server).await;
+        // Do not poll/write the peer again: tungstenite must not auto-flush a
+        // Pong. Duplicate lifecycle notifications cannot keep this socket alive.
+        let duplicate = client.clone();
+        let signals = tokio::spawn(async move {
+            for _ in 0..60 {
+                duplicate.check_connection();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        });
+        tokio::time::timeout(WS_DIAL_TIMEOUT + Duration::from_secs(1), async {
+            while attempts.load(Ordering::SeqCst) < 2 { tokio::task::yield_now().await; }
+        }).await.expect("missing pong enters the existing retry loop");
+        assert_eq!(client.snapshot()["state"], "reconnecting");
+        assert_eq!(client.snapshot()["last_failure"], "deadline");
+        assert_eq!(client.spawned_generations_for_test().len(), 1, "retry keeps the same worker owner");
+        signals.abort();
+        client.stop().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_stop_cancels_probe_and_late_pong_cannot_restore_connected() {
+        let (client, mut server, _events, attempts) = resume_fixture().await;
+        client.check_connection();
+        let ping = next_resume_ping(&mut server).await;
+        tokio::time::timeout(Duration::from_millis(800), client.stop()).await.expect("stop does not await probe");
+        let _ = server.send(Message::Pong(ping.into())).await;
+        client.check_connection();
+        tokio::task::yield_now().await;
+        assert_eq!(client.snapshot()["state"], "stopped");
+        assert_eq!(client.ownership_snapshot(), (false, false));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no post-stop retry or resume dial");
+    }
+
+    #[tokio::test]
+    async fn foreground_wakes_existing_retry_wait_without_restarting_worker_or_dial() {
+        use std::sync::atomic::AtomicUsize;
+        let mut client = EventStreamClient::new();
+        client.base_delay_ms = 30_000;
+        client.max_delay_ms = 30_000;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = attempts.clone();
+        let status = client.clone();
+        client.start_with_attempt(Box::new(move |_| {
+            let first = count.fetch_add(1, Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                if first {
+                    Err(StreamFailure::Retryable { kind: RetryKind::Network, note: "synthetic background drop".into() })
+                } else { std::future::pending().await }
+            })
+        }), Arc::new(move |state| status.set_state_for_runtime(state)), Some([91; 32])).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.snapshot()["state"] != "reconnecting" { tokio::task::yield_now().await; }
+        }).await.expect("real retry worker entered its backoff");
+        let generations = client.spawned_generations_for_test();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no extra background retry loop");
+        for _ in 0..8 { client.check_connection(); }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while attempts.load(Ordering::SeqCst) < 2 { tokio::task::yield_now().await; }
+        }).await.expect("foreground wakes the 30-second retry wait promptly");
+        assert_eq!(client.spawned_generations_for_test(), generations, "same worker owns the retry");
+        assert_eq!(client.snapshot()["state"], "reconnecting", "wake is not proof of connected");
+        assert_eq!(client.snapshot()["last_failure"], "network", "wake preserves the actual failure class");
+        for _ in 0..8 { client.check_connection(); }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "duplicate signals do not restart an active dial");
+        client.stop().await;
+        client.check_connection();
+        assert_eq!(client.snapshot()["state"], "stopped");
+        assert_eq!(client.ownership_snapshot(), (false, false));
+
+        // The signal queued during the second dial must not bypass a newer
+        // worker's own retry policy after explicit stop/start or re-pair.
+        let fresh_attempts = Arc::new(AtomicUsize::new(0));
+        let count = fresh_attempts.clone();
+        let status = client.clone();
+        client.start_with_attempt(Box::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(StreamFailure::Retryable { kind: RetryKind::Network, note: "fresh synthetic failure".into() }) })
+        }), Arc::new(move |state| status.set_state_for_runtime(state)), Some([92; 32])).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.snapshot()["state"] != "reconnecting" { tokio::task::yield_now().await; }
+        }).await.expect("fresh worker reached backoff");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(fresh_attempts.load(Ordering::SeqCst), 1, "old foreground permits cannot wake a newer worker");
+        client.stop().await;
+    }
+
+    #[tokio::test]
+    async fn foreground_cannot_wake_a_revoked_credential() {
+        let client = EventStreamClient::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = attempts.clone();
+        let status = client.clone();
+        client.start_with_attempt(Box::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(StreamFailure::AuthRevoked) })
+        }), Arc::new(move |state| status.set_state_for_runtime(state)), Some([93; 32])).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.ownership_snapshot() != (false, false) { tokio::task::yield_now().await; }
+        }).await.expect("revoked worker retired");
+        for _ in 0..8 { client.check_connection(); }
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(client.snapshot()["state"], "re_pair_required");
+        assert_eq!(client.ownership_snapshot(), (false, false));
     }
 
     #[tokio::test]
@@ -1192,6 +1423,22 @@ pub(crate) async fn hint_websocket_connect(
         })
 }
 
+/// Scope headers are immutable for the life of this socket. Foundation events
+/// deliberately keep their original transport and never inherit these headers.
+async fn hint_scoped_websocket_connect(url: &str, authorization: &str, fp: &str,
+    library: Option<&str>, vault: Option<&str>) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, String> {
+    let config = crate::pinning::build_pinned_client_config(fp)?;
+    let mut request = websocket_request(url, authorization)?;
+    for (name, value) in [("x-luckyray-material-library", library), ("x-luckyray-knowledge-vault", vault)] {
+        if let Some(value) = value {
+            request.headers_mut().insert(name, HeaderValue::from_str(value).map_err(|_| "CONTENT_SCOPE_INVALID")?);
+        }
+    }
+    tokio_tungstenite::connect_async_tls_with_config(request, None, false,
+        Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config))))
+        .await.map(|(socket, _)| socket).map_err(|_| "SERVICE_UNAVAILABLE".into())
+}
+
 /// Run the Services hint worker until the scope is retired or the socket ends.
 ///
 /// The loop selects on THREE things (P1-H4): the generation-scoped cancellation
@@ -1211,6 +1458,8 @@ pub(crate) async fn run_hint_worker(
     generation: u64,
     shared: crate::SharedState,
     owner: String,
+    library: Option<String>,
+    vault: Option<String>,
 ) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -1229,7 +1478,7 @@ pub(crate) async fn run_hint_worker(
 
     // Dial under cancellation too: a retire while dialling must not leave a
     // socket opening in the background.
-    let dial = hint_websocket_connect(&url, &authorization, &fingerprint);
+    let dial = hint_scoped_websocket_connect(&url, &authorization, &fingerprint, library.as_deref(), vault.as_deref());
     tokio::pin!(dial);
     let mut socket = tokio::select! {
         biased;
@@ -1284,6 +1533,11 @@ pub(crate) async fn run_hint_worker(
                     Message::Text(text) => {
                         match crate::services_hints::parse_hint(&text) {
                             Ok(Some(hint)) => {
+                                // A mismatched scope cannot wake the current library's consumers.
+                                if hint.get("materialLibraryId").and_then(|v| v.as_str()).is_some_and(|id| Some(id) != library.as_deref())
+                                    || hint.get("vaultId").and_then(|v| v.as_str()).is_some_and(|id| vault.as_deref().is_some_and(|selected| id != selected)) {
+                                    continue;
+                                }
                                 if !state.publish(generation, Some(hint)) {
                                     // Retired while in flight: stop this worker.
                                     state.finish(generation, false);

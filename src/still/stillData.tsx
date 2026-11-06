@@ -62,29 +62,8 @@ export function fmtBytes(n: number): string {
   return `${n} B`;
 }
 
-export function fmtTime(iso: string | undefined): string {
-  return iso ? iso.replace("T", " ").slice(0, 16) : "";
-}
-
-/** Authority-style relative day label: 今天 / 昨天 / M 月 D 日. */
-export function relativeDay(iso: string | undefined): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const day = (x: Date) => `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`;
-  if (day(d) === day(now)) return "今天";
-  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-  if (day(d) === day(yesterday)) return "昨天";
-  return `${d.getMonth() + 1} 月 ${d.getDate()} 日`;
-}
-
-/** 本机 note meta: 今天 · 10:24 */
-export function localMeta(iso: string | undefined): string {
-  const t = iso ? iso.slice(11, 16) : "";
-  const day = relativeDay(iso);
-  return day && t ? `${day} · ${t}` : t;
-}
+export { fmtTime, relativeDay, localMeta } from "./kit/noteDateDisplay";
+import { relativeDay, localMeta } from "./kit/noteDateDisplay";
 
 /** Desktop note meta: 电脑 · 今天 */
 export function desktopMeta(iso: string | undefined): string {

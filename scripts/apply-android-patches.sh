@@ -89,6 +89,8 @@ grep -q "android.permission.CAMERA" "$MANIFEST" || sed -i 's|<uses-permission an
 # 4b) Maintain the Gradle CLI task and SDK properties from tracked sources.
 # scripts/tauri-wrapper.cmd remains a portable manual CLI entry point.
 node "$SCRIPT_DIR/configure-android-build.mjs"
+# 4c) Restore tracked official artwork after every init on Linux and Windows.
+node "$SCRIPT_DIR/apply-android-icons.mjs"
 
 echo "android patches applied"
 
@@ -114,7 +116,20 @@ cat > app/src/main/res/xml/export_file_paths.xml <<'XML'
 </paths>
 XML
 # register the narrow provider (authority ${applicationId}.exportprovider)
-grep -q "exportprovider" "$MANIFEST" || sed -i 's|</application>|    <provider\n      android:name="androidx.core.content.FileProvider"\n      android:authorities="${applicationId}.exportprovider"\n      android:exported="false"\n      android:grantUriPermissions="true">\n      <meta-data\n        android:name="android.support.FILE_PROVIDER_PATHS"\n        android:resource="@xml/export_file_paths" />\n    </provider>\n  </application>|' "$MANIFEST"
+grep -q "exportprovider" "$MANIFEST" || sed -i 's|</application>|    <provider\n      android:name=".ExportFileProvider"\n      android:authorities="${applicationId}.exportprovider"\n      android:exported="false"\n      android:grantUriPermissions="true">\n      <meta-data\n        android:name="android.support.FILE_PROVIDER_PATHS"\n        android:resource="@xml/export_file_paths" />\n    </provider>\n  </application>|' "$MANIFEST"
+# Existing generated projects must also stop sharing the capture component.
+# Authority, non-exported status, URI grants and narrow paths stay unchanged.
+python - "$MANIFEST" <<'PYINNER'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text(encoding="utf-8")
+def export_component(match):
+    block = match.group(0)
+    if 'android:authorities="${applicationId}.exportprovider"' in block:
+        return re.sub(r'android:name="[^"]+"', 'android:name=".ExportFileProvider"', block, count=1)
+    return block
+p.write_text(re.sub(r'<provider\b[^>]*>', export_component, s), encoding="utf-8")
+PYINNER
 # M2.13 FIX-V2: the exported NarrowFileProvider (FIX-V1 experiment) must
 # NEVER be present — open/share go through the non-exported exportprovider.
 grep -q "NarrowFileProvider" "$MANIFEST" && python - "$MANIFEST" <<'PYINNER'
@@ -190,8 +205,11 @@ cp "$SRC_KOTLIN/CaptureBridge.kt" "$DEST_KOTLIN/CaptureBridge.kt"
 cp "$SRC_KOTLIN/DeviceBridge.kt" "$DEST_KOTLIN/DeviceBridge.kt"
 cp "$SRC_KOTLIN/QrScannerBridge.kt" "$DEST_KOTLIN/QrScannerBridge.kt"
 cp "$SRC_KOTLIN/ShareBridge.kt" "$DEST_KOTLIN/ShareBridge.kt"
+cp "$SRC_KOTLIN/NoteImportBridge.kt" "$DEST_KOTLIN/NoteImportBridge.kt"
 cp "$SRC_KOTLIN/ThumbnailBridge.kt" "$DEST_KOTLIN/ThumbnailBridge.kt"
 cp "$SRC_KOTLIN/ExportBridge.kt" "$DEST_KOTLIN/ExportBridge.kt"
+cp "$SRC_KOTLIN/ExportFileProvider.kt" "$DEST_KOTLIN/ExportFileProvider.kt"
+cp "$SRC_KOTLIN/LshEmbeddedSurface.kt" "$DEST_KOTLIN/LshEmbeddedSurface.kt"
 cp "$SRC_KOTLIN/LshSurfaceBridge.kt" "$DEST_KOTLIN/LshSurfaceBridge.kt"
 cp "$SRC_KOTLIN/LshSurfaceActivity.kt" "$DEST_KOTLIN/LshSurfaceActivity.kt"
 cp "$SRC_KOTLIN/MediaPlayerBridge.kt" "$DEST_KOTLIN/MediaPlayerBridge.kt"
@@ -210,3 +228,19 @@ grep -q "com.google.mlkit:barcode-scanning" "$BUILD_KTS" || sed -i 's|implementa
 # Platform MediaCodec + two pinned AndroidX modules, no FFmpeg/libmpv/codec
 # native extension bundle or GMS-dependent network stack.
 grep -q 'androidx.media3:media3-exoplayer:1.11.1' "$BUILD_KTS" || sed -i 's|implementation("com.google.android.material:material:1.12.0")|implementation("com.google.android.material:material:1.12.0")\n    implementation("androidx.media3:media3-exoplayer:1.11.1")\n    implementation("androidx.media3:media3-ui:1.11.1")|' "$BUILD_KTS"
+
+# Scoped document open only; no browsable/http URL or broad storage permission.
+python - "$MANIFEST" <<'PYNOTE'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+if '<!-- LuckyRay note document VIEW -->' not in s:
+    filters = '\n    <!-- LuckyRay note document VIEW -->\n'
+    for mime in ['text/markdown', 'text/x-markdown', 'text/plain', 'application/octet-stream']:
+        filters += ('    <intent-filter>\n      <action android:name="android.intent.action.VIEW" />\n'
+                    '      <category android:name="android.intent.category.DEFAULT" />\n'
+                    '      <data android:scheme="content" android:mimeType="' + mime + '" />\n'
+                    '    </intent-filter>\n')
+    s = s.replace('</activity>', filters + '  </activity>', 1)
+    open(p, 'w', encoding='utf-8').write(s)
+PYNOTE

@@ -19,7 +19,13 @@ export type DirectorySheetProps = {
   syncManagement?: ReactNode;
 };
 
-export function DirectorySheet({ registerOverlay, onClose, instanceId, vaultId, vaultName, connected, current, onSelect,
+export function DirectorySheet(props: DirectorySheetProps) {
+  return <Sheet title={props.title || "目录与知识库"} registerDismiss={props.registerOverlay} onClose={props.onClose}>
+    <DirectoryContents {...props} />
+  </Sheet>;
+}
+
+export function DirectoryContents({ instanceId, vaultId, vaultName, connected, current, onSelect,
   title = "目录与知识库", rootLabel = "全部笔记", notice, syncManagement }: DirectorySheetProps) {
   const catalog = sessionKnowledge().folders;
   const scope = { instance: instanceId, vault: vaultId };
@@ -29,7 +35,7 @@ export function DirectorySheet({ registerOverlay, onClose, instanceId, vaultId, 
   const snapshot = useSyncExternalStore(catalog.subscribe, () => catalog.snapshot(scope));
   useEffect(() => { void catalog.activate(scope, connected); }, [catalog, instanceId, vaultId, connected]);
   const browse = (path: string) => setLocation({ key, path });
-  return <Sheet title={title} registerDismiss={registerOverlay} onClose={onClose}>
+  return <>
     <p className="st-sheet-caption">{vaultName}（电脑知识库）</p>
     {notice ? <p className="st-sheet-copy" role="status">{notice}</p> : null}
     <FolderBreadcrumbs current={path} onSelect={browse} />
@@ -42,5 +48,5 @@ export function DirectorySheet({ registerOverlay, onClose, instanceId, vaultId, 
     {snapshot.complete && snapshot.phase === "ready" && snapshot.paths.filter(Boolean).length === 0
       ? <p className="st-sheet-copy">电脑知识库中还没有文件夹。</p> : null}
     {syncManagement}
-  </Sheet>;
+  </>;
 }

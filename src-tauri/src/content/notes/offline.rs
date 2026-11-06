@@ -9,6 +9,7 @@ pub(super) fn local_owner(db: &Db, instance: &str) -> Result<(), String> {
 }
 
 pub(super) async fn capabilities(source: &Source, state: &SharedState) -> Result<Value, String> {
+    source.ensure_scope_protocol(state).await?;
     let (status, value) = source
         .gateway
         .content_request(reqwest::Method::GET, "/v1/capabilities", None)
@@ -21,7 +22,7 @@ pub(super) async fn capabilities(source: &Source, state: &SharedState) -> Result
         source.with_db(state, |db| db.offline_revoke(&source.instance))?;
     }
     if status != 200 {
-        return Err(format!("CONTENT_HTTP_{status}"));
+        return Err(content_http_error(status, &value));
     }
     if value["contentVersion"] != 1 || value["capabilities"]["noteRead"] != true {
         return Err("CONTENT_UPGRADE_REQUIRED".into());
@@ -77,6 +78,35 @@ pub(crate) fn content_offline_create(
     })
 }
 
+/// Fresh, read-only admission for an explicitly re-added purged library. The
+/// durable stop remains in force until pair/protocol/read permission and exact
+/// vault identity are proven. No existing paused queue or grants are restored.
+pub(crate) async fn readd_purged(state: &SharedState, store: &crate::managed_vault::Store, instance: &str, vault: &str, id: &str) -> Result<Value, String> {
+    let mut source = Source::capture_expected(state, instance)?.scoped(None, Some(vault))?;
+    source.enrollment_probe = true;
+    source.ensure_scope_protocol(state).await?;
+    let caps = source.metadata_get(state, "/v1/capabilities").await?;
+    if caps["contentVersion"] != 1 || caps["capabilities"]["noteRead"] != true { return Err("CONTENT_UPGRADE_REQUIRED".into()); }
+    let vaults = source.metadata_get(state, "/v1/vaults").await?;
+    let current = vaults["items"].as_array().and_then(|rows|rows.iter().find(|r|r["vaultId"] == vault)).ok_or("CONTENT_VAULT_UNAVAILABLE")?;
+    source.with_db(state, |db| {
+        db.managed_recover()?;
+        { let _g=crate::managed_vault::lock()?; if store.removed_record(id)?.is_none_or(|r|r.state != "purged" || r.binding.as_ref().is_none_or(|b| b.instance_id != instance || b.remote_vault_id != vault)) { return Err("VAULT_PURGED".into()); } }
+        let result = (|| {
+            db.content_vault_remember(instance, vault, current["name"].as_str().unwrap_or("知识库"))?;
+            db.offline_select(instance, vault, caps["capabilities"]["noteWrite"] == true)?;
+            let _g=crate::managed_vault::lock()?;
+            store.begin_readd(id)?;
+            db.managed_reenroll_scope(store, instance, vault)
+        })();
+        if result.is_err() {
+            { let _g=crate::managed_vault::lock()?; store.abort_readd(id)?; }
+            db.managed_recover()?;
+        }
+        result
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn content_offline_control(
     state: State<'_, SharedState>,
@@ -94,12 +124,12 @@ pub(crate) async fn content_offline_control(
     if action != "start" {
         return Err("CONTENT_INPUT_INVALID".into());
     }
-    let source = Source::capture_expected(&state, &instance)?;
+    let source = Source::capture_expected(&state, &instance)?.scoped(None, Some(&vault))?;
     let caps = capabilities(&source, &state).await?;
     let vaults = source.gateway.content_get("/v1/vaults").await?;
     let current = vaults["items"]
         .as_array()
-        .and_then(|v| v.first())
+        .and_then(|v| v.iter().find(|row| row["vaultId"] == vault))
         .ok_or("CONTENT_VAULT_UNAVAILABLE")?;
     if current["vaultId"] != vault {
         return Err("CONTENT_VAULT_UNAVAILABLE".into());
@@ -114,29 +144,21 @@ pub(crate) async fn content_offline_control(
     })
 }
 
-pub(super) async fn prepare_one(
+/// Amortize discovery/pagination over at most eight bodies, with only two
+/// independent reads in flight. All adoption remains under SYNC_GATE and the
+/// existing per-note generation/revision/observed-document CAS transaction.
+pub(super) async fn prepare_batch(
     source: &Source,
     state: &SharedState,
     vault: &str,
-) -> Result<(bool, bool), String> {
-    let job = source.with_db(state, |db| db.offline_job(&source.instance, vault))?;
-    let Some(job) = job else {
-        return Ok((false, false));
-    };
-    // One read, bounded time. Each next pass starts with pending edits and changes.
-    // No new timer/sync owner, and no preparation of attachment bytes.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(1500),
-        remote_note(source, vault, &job.id),
-    )
-    .await
-    .unwrap_or_else(|_| Err("CONTENT_OFFLINE".into()));
-    let applied = source.with_db(state, |db| {
-        db.offline_finish(&source.instance, vault, &job, result)
-    })?;
-    let more = source.with_db(state, |db| {
-        Ok(db.offline_job(&source.instance, vault)?.is_some())
-    })?;
+) -> Result<(usize, bool), String> {
+    let jobs = source.with_db(state, |db| db.offline_jobs(&source.instance, vault, 8))?;
+    let applied = body_batch::run(jobs,
+        || source.check(state),
+        |job| async move { remote_note(source, vault, &job.id).await },
+        |job, result| source.with_db(state, |db| db.offline_finish(&source.instance, vault, &job, result)),
+    ).await?;
+    let more = source.with_db(state, |db| Ok(db.offline_job(&source.instance, vault)?.is_some()))?;
     Ok((applied, more))
 }
 
@@ -392,4 +414,15 @@ mod tests {
             empty
         );
     }
+}
+
+/// Local maintenance intentionally accepts historical owners, not only the
+/// currently paired Desktop. Never sends requests or removes original files.
+#[tauri::command]
+pub(crate) fn content_cache_libraries(state: State<'_, SharedState>) -> Result<Value, String> {
+    with_db(&state, |db| db.content_cache_libraries())
+}
+#[tauri::command]
+pub(crate) fn content_cache_clear(state: State<'_, SharedState>, instance: String, vault: String) -> Result<Value, String> {
+    with_db(&state, |db| db.content_cache_clear(&instance, &vault))
 }

@@ -1,0 +1,13 @@
+/* Only the note-page title. Keep the accepted typography, theme and toolbar. */
+.st-note-surface .st-note-title,
+.st-note-surface .st-note-paper > h1 {
+  min-width:0;
+  max-width:100%;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
+.st-note-surface textarea.st-note-title {
+  resize:none;
+  overflow:hidden;
+}

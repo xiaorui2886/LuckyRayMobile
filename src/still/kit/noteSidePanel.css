@@ -1,0 +1,74 @@
+/* Physical edges preserve the same layout in Android WebView before 87. */
+.st-note-drawer-layer {position:absolute;top:0;right:0;bottom:0;left:0;inset:0;z-index:80;isolation:isolate;}
+.st-note-drawer-scrim {position:absolute;top:0;right:0;bottom:0;left:0;inset:0;border:0;background:rgba(0,0,0,.24);width:100%;height:100%;padding:0;}
+.st-note-drawer {position:absolute;top:0;right:auto;bottom:0;left:0;width:min(88%,360px);display:flex;flex-direction:column;background:var(--st-sheet);color:var(--st-ink);border-right:1px solid var(--st-line);box-shadow:8px 0 32px rgba(0,0,0,.09);outline:0;touch-action:pan-y;animation:st-note-drawer-left .22s cubic-bezier(.2,.8,.2,1);}
+.side-right .st-note-drawer {left:auto;right:0;border-right:0;border-left:1px solid var(--st-line);box-shadow:-8px 0 32px rgba(0,0,0,.09);animation-name:st-note-drawer-right;}
+.st-note-drawer-heading {display:flex;align-items:center;justify-content:space-between;padding:14px 14px 10px 20px;gap:8px;border-bottom:1px solid var(--st-line);}
+.st-note-drawer-heading h2 {font-size:16px;font-weight:600;margin:0;}
+.st-note-drawer-body {flex:1;min-height:0;overflow:auto;padding:12px;overscroll-behavior:contain;scrollbar-width:thin;}
+.st-note-drawer-footer {display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 14px;border-top:1px solid var(--st-line);}
+.st-note-drawer-footer small {color:var(--st-muted);font-size:11px;}
+.st-note-drawer .st-note-row {border-radius:9px;}
+.st-note-drawer .st-note-row[aria-current="page"] {background:var(--st-selected);}
+.st-note-folder-tree {padding-bottom:12px;margin-bottom:8px;border-bottom:1px solid var(--st-line);}
+.st-note-folder-line {display:flex;align-items:center;min-height:38px;border-radius:8px;}
+.st-note-folder-line.is-current {background:var(--st-selected);color:var(--st-accent);}
+.st-note-folder-line button {border:0;background:none;color:inherit;min-height:38px;}
+.st-note-folder-toggle {width:30px;flex:0 0 30px;display:grid;place-items:center;}
+.st-note-folder-title {display:flex;align-items:center;gap:9px;text-align:left;flex:1;min-width:0;padding:5px 8px;}
+.st-note-folder-title span {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.st-note-folder-caption {margin:8px 8px 4px;color:var(--st-muted);font-size:12px;overflow-wrap:anywhere;}
+.st-note-drawer .st-link-panel {border:0;box-shadow:none;margin:0;padding:0;}
+@keyframes st-note-drawer-left {from {transform:translateX(-100%);opacity:.5;} to {transform:translateX(0);opacity:1;}}
+@keyframes st-note-drawer-right {from {transform:translateX(100%);opacity:.5;} to {transform:translateX(0);opacity:1;}}
+.st-app[data-reduced="true"] .st-note-drawer {animation:none;}
+@media(prefers-reduced-motion:reduce) {.st-note-drawer {animation:none;}}
+
+/* All three surfaces share one translated strip. No dimming scrim covers the note. */
+.st-note-paper-viewport{position:relative;width:100%;height:100%;min-height:0;overflow:hidden;flex:1;touch-action:auto;--st-note-panel-width:86%;background:var(--st-canvas)}
+.st-note-paper-track{position:relative;width:100%;height:100%;transform:translate3d(0,0,0);will-change:transform}
+.st-note-paper-page{position:absolute;top:0;left:0;width:100%;height:100%;background:var(--st-canvas)}
+.st-note-paper-side{position:absolute;top:0;bottom:0;width:var(--st-note-panel-width);background:var(--st-sheet);overflow:hidden}
+.st-note-paper-side.side-left{right:100%;border-right:1px solid var(--st-line)}
+.st-note-paper-side.side-right{left:100%;border-left:1px solid var(--st-line)}
+.st-note-paper-return{position:absolute;top:0;right:0;bottom:0;left:0;width:100%;height:100%;background:transparent!important;border:0;padding:0;z-index:79;touch-action:pan-y}
+.st-note-paper-viewport .is-paper-panel{z-index:auto;isolation:auto}
+.st-note-paper-viewport .is-paper-panel .st-note-drawer{width:100%;left:0;right:0;animation:none;box-shadow:none;border:0;padding-top:var(--st-safe-top);padding-bottom:var(--st-safe-bottom)}
+.st-note-paper-viewport .st-note-drawer-heading{padding:12px 12px 10px 18px;min-height:52px}
+.st-note-paper-viewport .st-note-drawer-body{scrollbar-width:none}
+.st-note-paper-viewport .st-note-drawer-body::-webkit-scrollbar{display:none}
+.st-note-paper-viewport.is-dragging{user-select:none;-webkit-user-select:none}
+.st-app[data-reduced="true"] .st-note-paper-track{transition:none!important}
+@media(prefers-reduced-motion:reduce){.st-note-paper-track{transition:none!important}}
+
+.st-note-paper-side .st-note-drawer-body { touch-action: pan-y; }
+
+/* Mobile note browser: compact file rows, not the knowledge page's cards.
+   Scope to the drawer so library density, fonts and global chrome stay intact. */
+.st-app .st-note-drawer-body{padding:10px 12px 16px}
+.st-app .st-note-drawer .st-note-folder-tree{padding-bottom:8px;margin-bottom:8px}
+.st-app .st-note-drawer .st-note-folder-line{min-height:44px;border-radius:7px}
+.st-app .st-note-drawer .st-note-folder-line button{min-height:44px}
+.st-app .st-note-drawer .st-note-folder-title{font-size:13px;line-height:20px;padding:6px 10px}
+.st-app .st-note-drawer .st-note-folder-title>.st-icon{flex:none;color:var(--st-secondary)}
+.st-app .st-note-drawer .st-note-folder-toggle:disabled{visibility:hidden}
+.st-app .st-note-drawer .st-note-row{position:relative;display:block;min-height:48px;padding:10px 10px 10px 38px!important;margin:2px 0;border:0!important;border-radius:7px;background:transparent;box-shadow:none}
+.st-app .st-note-drawer .st-note-row[aria-current=page]{background:var(--st-selected);color:var(--st-accent)}
+.st-app .st-note-drawer .st-note-row:active{background:var(--st-surface)}
+.st-app .st-note-drawer .st-knowledge-note-symbol{display:flex;position:absolute;left:11px;top:12px;width:18px;height:20px;align-items:center;justify-content:center;color:var(--st-secondary)}
+.st-app .st-note-drawer .st-knowledge-note-symbol .st-icon{width:17px;height:17px}
+.st-app .st-note-drawer .st-note-row strong{font-size:13px;font-weight:500;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st-app .st-note-drawer .st-note-row p:empty{display:none}
+.st-app .st-note-drawer .st-note-row p{font-size:11px;line-height:17px;margin:3px 0 0;-webkit-line-clamp:1}
+.st-app .st-note-drawer .st-note-row small{font-size:10px;line-height:16px;margin-top:2px}
+.st-app .st-note-drawer-footer{padding:8px 12px 8px 18px;min-height:60px}
+.st-app .st-note-drawer-footer>div{display:flex;align-items:center;flex:none}
+.st-app .st-note-drawer-footer .st-icon-button{width:44px;min-width:44px;height:44px}
+.st-app .st-note-drawer-footer small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Give the backlink heading room below its divider, not an accidental 4px. */
+.st-app .st-note-drawer .st-note-relations{margin-top:16px;padding-top:14px;border-color:var(--st-line)}
+.st-app .st-note-drawer .st-note-relations>.st-links-heading{margin:0 0 8px;line-height:20px}
+.st-app .st-note-drawer .st-note-relations>.st-folder-status{margin:0;padding:0 0 8px;line-height:20px}
+
+.st-app .st-note-drawer .st-note-relations>.st-relations-toggle{min-height:44px;margin:0;padding:0 0 8px;align-items:flex-start;line-height:20px}
+.st-app .st-note-drawer .st-note-relations>div>.st-folder-status{margin:0;padding:0 0 8px;line-height:20px}

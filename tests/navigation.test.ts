@@ -9,6 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { BOTTOM_NAV_TABS, NavigationController } from "../src/navigation.ts";
+import { noteRouteIdentity } from "../src/noteRoute.ts";
 
 test("ui-refresh-r1 — initial route is Home", () => {
   const nav = new NavigationController();
@@ -235,4 +236,39 @@ test("subscribe notifies on change", () => {
   un();
   nav.switchRoot("library");
   assert.equal(calls, 2, "unsubscribed no notify");
+});
+
+
+test("managed wiki cycle reuses the original owner across edit/read entry modes", () => {
+  for (const initialEdit of [false, true]) {
+    const nav = new NavigationController({ tab: "knowledge" });
+    const source = "vault:local%3Avault:note%3AA";
+    nav.pushDetail({ tab: "knowledge", detail: (initialEdit ? "edit:" : "") + source });
+    const owner = nav.current();
+    const ownerState = new WeakMap([[owner, { draft: "unsaved source", scroll: 432 }]]);
+    nav.pushDetail({ tab: "knowledge", detail: "edit:vault:local%3Avault:note-B" }, { retainDetail: true });
+    nav.pushDetail({ tab: "knowledge", detail: (initialEdit ? "" : "edit:") + source }, { retainDetail: true });
+    assert.strictEqual(nav.current(), owner, "reuse the route/React key, not a second save owner");
+    assert.deepEqual(ownerState.get(nav.current()), { draft: "unsaved source", scroll: 432 });
+    assert.equal(nav.snapshot().length, 2);
+    assert.equal(nav.goBack(), true);
+    assert.deepEqual(nav.current(), { tab: "knowledge" });
+  }
+});
+
+test("managed route identity includes decoded vault and note without separator collisions", () => {
+  for (const malformed of ["vault::n", "vault:v:", "vault:v:n:extra", "vault:%ZZ:n"]) {
+    assert.equal(noteRouteIdentity(malformed), undefined);
+  }
+  assert.notEqual(noteRouteIdentity("vault:v:note-a"), noteRouteIdentity("note-a"));
+  const nav = new NavigationController({ tab: "knowledge" });
+  nav.pushDetail({ tab: "knowledge", detail: "edit:vault:a%3Ab:c" });
+  const first = nav.current();
+  nav.pushDetail({ tab: "knowledge", detail: "vault:a:b%3Ac" }, { retainDetail: true });
+  assert.notStrictEqual(nav.current(), first);
+  nav.pushDetail({ tab: "knowledge", detail: "vault:other:c" }, { retainDetail: true });
+  assert.equal(nav.snapshot().length, 4, "same note id in another vault is a different owner");
+  nav.pushDetail({ tab: "knowledge", detail: "vault:a%3ab:%63" }, { retainDetail: true });
+  assert.strictEqual(nav.current(), first, "equivalent percent encodings reuse the owner");
+  assert.equal(nav.snapshot().length, 2);
 });

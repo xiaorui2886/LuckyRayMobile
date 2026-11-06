@@ -41,12 +41,12 @@ test("repair-A/R5 — the toolbar carries NO permanent select entry; long press 
   const rowStart = VIEWS.indexOf('className="st-compact-toolbar"');
   const filterAt = VIEWS.indexOf('label="筛选与排序"', rowStart);
   const toolbar = VIEWS.slice(rowStart, VIEWS.indexOf("</div>", filterAt) + 6);
-  assert.match(toolbar, /切换网格|切换列表/, "the view switch is still in the row");
+  assert.match(toolbar, /切换瀑布流|切换列表/, "the view switch is still in the row");
   assert.match(toolbar, /label="筛选与排序"/, "filter is still in the row");
   assert.doesNotMatch(toolbar, /icon="select"/, "the select action is GONE from the row");
   assert.doesNotMatch(toolbar, /选择素材/, "and no text entry replaces it");
   assert.doesNotMatch(toolbar, /p\.select/, "no dead prop is read for it");
-  const order = ["切换网格", 'label="筛选与排序"'];
+  const order = ["切换瀑布流", 'label="筛选与排序"'];
   const positions = order.map((t) => toolbar.indexOf(t));
   assert.ok(positions[0] >= 0 && positions[0] < positions[1], "grid/list -> filter, unchanged order");
   // The capability is not lost: the long press is the entry, and it is wired on
@@ -130,8 +130,8 @@ test("repair-C — grant/runtime states still drive the same section (D/E/F)", (
   // One line selection covers grant-off, runtime-down and ready.
   assert.match(AGENT, /!lshSnap\.granted[\s\S]{0,200}?还没有授权/);
   assert.match(AGENT, /!lshSnap\.runtimeAvailable[\s\S]{0,160}?正在启动或暂时不可用/);
-  assert.match(AGENT, /等待电脑授权/, "D: grant-off action");
-  assert.match(AGENT, /暂时不可用/, "E: runtime-down action");
+  assert.match(AGENT, /重新检查授权/, "D: grant-off action");
+  assert.match(AGENT, /重新连接/, "E: runtime-down action");
   assert.match(AGENT, /lshReady \? \([\s\S]{0,240}?进入 LightSeek/, "F: ready action");
   // Authority untouched.
   assert.match(AGENT, /lsh\.openSurface\(snap\.instanceId\)/);

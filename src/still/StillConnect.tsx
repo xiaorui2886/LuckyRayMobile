@@ -1,3 +1,4 @@
+import "./settingsPages.css";
 // STILL-01.1 — 连接电脑 page (Still composition, connectionShell authority).
 // State comes ONLY from createConnectionShellController, which wraps the
 // EXISTING pairing authorities. The secret/credential is never displayed;
@@ -13,6 +14,7 @@ import {
   type ShellSnapshot,
 } from "../services/connectionShell";
 import { useStillNav } from "./StillShell";
+import { EndpointRecovery } from "./EndpointRecovery";
 
 export function StillConnect() {
   const { conn, back, registerOverlay } = useStillNav();
@@ -36,10 +38,12 @@ export function StillConnect() {
 
   useEffect(() => shell.subscribe(() => { setSnap(shell.snapshot()); }), [shell]);
   useEffect(() => { void shell.refresh(); }, [shell]);
-  const wsState = conn?.ws?.state;
+  // Refresh changed authority facts, including failures within the same retry
+  // state. A new object with identical facts must not dismiss an active scan,
+  // pasted re-pair code or pending pairing when App reconciles on foreground.
   useEffect(() => {
-    if (wsState !== undefined) void shell.refresh();
-  }, [shell, wsState]);
+    if (conn) void shell.refresh();
+  }, [shell, conn?.paired, conn?.identity?.instanceId, conn?.identity?.baseUrl, conn?.ws?.state, conn?.ws?.last_failure, conn?.ws?.reason]);
   // Leaving the page mid-scan must tear the native camera down.
   useEffect(() => () => { shell.cancelIfScanning(); }, [shell]);
 
@@ -48,8 +52,8 @@ export function StillConnect() {
   const online = snap.ws.state === "connected";
 
   return (
-    <>
-      <div className="st-view">
+    <div className="st-settings-overlay-scope">
+      <div className="st-view st-settings-page st-settings-connect">
         <Header title="连接电脑" left={<IconButton icon="back" label="返回上一页" onClick={back} />} />
         <div className="st-scroll">
           {snap.phase === "unpaired" ? (
@@ -65,14 +69,12 @@ export function StillConnect() {
                   <label className="st-field">粘贴电脑端复制的配对信息
                     <textarea rows={5} value={paste} onChange={(e) => setPaste(e.target.value)} placeholder='{"v":1,...}' />
                   </label>
-                  <div style={{ marginTop: 12 }}>
+                  <div className="st-connect-actions">
                     <Button disabled={!paste.trim() || pairing} onClick={() => {
                       const p = paste.trim();
                       setPaste("");
                       void shell.submitPaste(p).catch(() => {});
                     }}>开始配对</Button>
-                  </div>
-                  <div style={{ marginTop: 10 }}>
                     <Button kind="quiet" onClick={() => { setPaste(""); setShowOther(false); shell.cancel(); }}>取消</Button>
                   </div>
                 </>
@@ -92,14 +94,12 @@ export function StillConnect() {
               <label className="st-field">粘贴电脑端复制的配对信息
                 <textarea rows={5} value={paste} onChange={(e) => setPaste(e.target.value)} placeholder='{"v":1,...}' />
               </label>
-              <div style={{ marginTop: 14 }}>
+              <div className="st-connect-actions">
                 <Button disabled={!paste.trim()} onClick={() => {
                   const p = paste.trim();
                   setPaste("");
                   void shell.submitPaste(p).catch(() => {});
                 }}>开始配对</Button>
-              </div>
-              <div style={{ marginTop: 10 }}>
                 <Button kind="quiet" onClick={() => { setPaste(""); shell.cancel(); }}>取消</Button>
               </div>
             </>
@@ -117,18 +117,20 @@ export function StillConnect() {
           {snap.phase === "re_pair_required" ? (
             <>
               <Notice tone="danger">此电脑已拒绝当前配对凭据，需要重新配对。旧凭据不会再次用于连接。</Notice>
-              <div style={{ marginTop: 14 }}><Button disabled={pairing} onClick={() => void shell.openScan()}>扫码重新配对</Button></div>
-              <div style={{ marginTop: 10 }}><Button kind="quiet" onClick={() => shell.openPaste()}>手动输入新配对信息</Button></div>
+              <div className="st-connect-actions">
+                <Button disabled={pairing} onClick={() => void shell.openScan()}>扫码重新配对</Button>
+                <Button kind="quiet" onClick={() => shell.openPaste()}>手动输入新配对信息</Button>
+              </div>
             </>
           ) : null}
 
           {snap.phase === "error" && snap.error ? (
             <>
               <Notice tone="danger">{shellErrorCopy(snap.error)}</Notice>
-              {snap.error.retryable ? (
-                <div style={{ marginTop: 14 }}><Button onClick={() => void shell.retry()}>重试</Button></div>
-              ) : null}
-              <div style={{ marginTop: 10 }}><Button kind="quiet" onClick={() => void shell.back()}>返回</Button></div>
+              <div className="st-connect-actions">
+                {snap.error.retryable ? <Button onClick={() => void shell.retry()}>重试</Button> : null}
+                <Button kind="quiet" onClick={() => void shell.back()}>返回</Button>
+              </div>
             </>
           ) : null}
 
@@ -136,20 +138,18 @@ export function StillConnect() {
             <>
               <Empty icon="monitor" title="LuckyRay Desktop"
                 body={online ? "已配对 · 当前连接正常" : "已配对 · 当前未连接"} />
-              <Row title="连接状态" trail={online ? "已连接" : snap.ws.state === "reconnecting" || snap.ws.state === "connecting" ? "正在连接" : "未实时连接"} onClick={() => void shell.refresh()} />
-              <Row title="连接方式" trail="同一局域网" onClick={() => void shell.refresh()} />
+              <div className="st-settings-group">
+                <Row title="连接状态" trail={online ? "已连接" : snap.ws.state === "reconnecting" || snap.ws.state === "connecting" ? "正在连接" : "未实时连接"} onClick={() => void shell.refresh()} />
+                <Row title="连接方式" trail="同一局域网" onClick={() => void shell.refresh()} />
+              </div>
               {/* 重新连接 is reachable in BOTH idle and reconnecting phases: a
                   wedged retry loop must be manually interruptible without
                   falling back to 断开连接 (which vetoes auto-resume). ws_start
                   retires the previous worker first, so this tap always dials
                   fresh. */}
-              {snap.phase === "paired_idle" || snap.phase === "reconnecting" ? (
-                <div style={{ marginTop: 20 }}><Button onClick={() => void shell.reconnect()}>重新连接</Button></div>
-              ) : null}
-              <div style={{ marginTop: snap.phase === "paired_idle" || snap.phase === "reconnecting" ? 10 : 20 }}>
+              <div className="st-connect-actions" role="group" aria-label="电脑连接操作">
+                {snap.phase === "paired_idle" || snap.phase === "reconnecting" ? <Button onClick={() => void shell.reconnect()}>重新连接</Button> : null}
                 <Button kind="quiet" disabled={pairing} onClick={() => void shell.disconnect()}>断开连接</Button>
-              </div>
-              <div style={{ marginTop: 10 }}>
                 <Button kind="quiet" disabled={pairing} onClick={() => setForgetOpen(true)}>忘记此电脑</Button>
               </div>
               {snap.notice === "preference_unsaved" ? (
@@ -166,17 +166,19 @@ export function StillConnect() {
               <p className="st-sheet-copy" style={{ marginTop: 28 }}>配对和内容同步是不同状态；此页面不代表素材或任务已同步。</p>
             </>
           ) : null}
+          {conn?.paired && conn.identity ? <EndpointRecovery key={conn.identity.instanceId}
+            registerOverlay={registerOverlay} onUpdated={() => { void shell.refresh(); }} /> : null}
         </div>
       </div>
       {forgetOpen ? (
         <Sheet title="忘记这台电脑？" registerDismiss={registerOverlay} onClose={() => setForgetOpen(false)}
-          footer={<>
+          footer={<div className="st-connect-actions">
             <Button kind="quiet" onClick={() => setForgetOpen(false)}>取消</Button>
             <Button kind="danger" disabled={pairing} onClick={() => { setForgetOpen(false); void shell.forget(); }}>忘记电脑</Button>
-          </>}>
+          </div>}>
           <p className="st-sheet-copy">清除配对后需要重新配对。不会删除手机上的本机笔记、素材或收集箱。</p>
         </Sheet>
       ) : null}
-    </>
+    </div>
   );
 }

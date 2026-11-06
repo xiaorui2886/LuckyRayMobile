@@ -123,7 +123,7 @@ test("R1-1 — search page1 AND page2 both carry q; page2 only appends rust resu
 // 2. online A -> offline A hard-retires
 // ---------------------------------------------------------------------------
 
-test("R1-2 — online A → offline A bumps the epoch, clears rows, lands offline", async () => {
+test("R1-2 — online A → offline A fences old work and retains only truthful cached rows", async () => {
   const { deps, ctl } = makeDeps();
   ctl.vaults = VAULT;
   ctl.listByVault.v = { items: [{ noteId: "live" }], hasMore: true, nextAfterId: "live" };
@@ -143,14 +143,17 @@ test("R1-2 — online A → offline A bumps the epoch, clears rows, lands offlin
   await settled();
   const snap = ctrl.snapshot();
   assert.equal(snap.phase, "offline", "truthful offline");
-  assert.equal(snap.rows.length, 0, "the old rows are CLEARED, not kept");
-  assert.equal(snap.vaultId, "", "the vault token is dropped too");
+  assert.deepEqual(snap.rows.map(row => row.noteId), ["live"], "same-owner last-good rows remain cached, never live-ready");
+  assert.equal(snap.vaultId, "v", "cached rows keep their exact vault identity");
+  assert.equal(snap.stale, true);
+  assert.equal(ctrl.moveAuthority().writeGranted, false, "cached rows never preserve mutation authority");
+  assert.equal(ctrl.snapshotFor("other-owner", "v"), undefined, "another owner never inherits cached rows");
 
   // The late page-2 can neither restore rows nor error the offline state.
   rejectP2!(new Error("late"));
   await tick(); await tick();
   assert.equal(ctrl.snapshot().phase, "offline");
-  assert.equal(ctrl.snapshot().rows.length, 0, "late success cannot recover old rows");
+  assert.deepEqual(ctrl.snapshot().rows.map(row => row.noteId), ["live"], "late page failure cannot alter the cached page or restore live status");
 
   // Reconnect gives a fresh discover/list.
   ctl.calls.length = 0;

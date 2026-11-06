@@ -33,6 +33,7 @@ pub(super) fn refusal_error(status: u16, prepared: &PreparedNoteOperation, resul
     let route = match prepared.route {
         NoteOperationRoute::Content => "content",
         NoteOperationRoute::KnowledgeCreateUnique => "knowledgeCreateUnique",
+        NoteOperationRoute::KnowledgeImportPlanned => "knowledgeImportPlanned",
     };
     let mut message = format!("CONTENT_MUTATION_HTTP_{status} [{code}] kind={kind} route={route}");
     // Narrow observation of the actual refused immutable rename. This is NOT
@@ -165,16 +166,19 @@ where
         .as_str()
         .ok_or("CONTENT_OPERATION_INVALID")?;
     let unique = prepared.route == NoteOperationRoute::KnowledgeCreateUnique;
-    if unique && kind != "create" {
+    let planned = prepared.route == NoteOperationRoute::KnowledgeImportPlanned;
+    if (unique || planned) && kind != "create" {
         return Err("CONTENT_OPERATION_ROUTE_INVALID".into());
     }
-    let path = if unique {
+    let (path, wire_payload) = if planned {
+        crate::managed_vault_linked_import::planned_wire(payload)?
+    } else { (if unique {
         "/v1/services/knowledge/notes".to_owned()
     } else if kind == "create" {
         "/v1/notes".to_owned()
     } else {
         format!("/v1/notes/{id}")
-    };
+    }, payload.clone()) };
     let method = match kind {
         "create" => reqwest::Method::POST,
         "delete" => reqwest::Method::DELETE,
@@ -182,15 +186,16 @@ where
         _ => return Err("CONTENT_OPERATION_INVALID".into()),
     };
     // Exactly one attempt. An uncertain result never changes route or payload.
-    let (status, result) = send(path, method, payload.clone()).await?;
+    let (status, result) = send(path, method, wire_payload).await?;
     let outcome = if status == 200 {
+        if planned { crate::managed_vault_linked_import::validate_receipt(payload, &result)?; }
         if unique && !unique_receipt_valid(payload, &result) {
             return Err("CONTENT_ACK_INVALID".into());
         }
         Outcome::Ack
     } else if status == 409 && result["code"] == "REVISION_CONFLICT" {
         if kind == "create" {
-            if unique {
+            if unique || planned {
                 Outcome::Refused(status)
             } else {
                 Outcome::LegacyCreateCollision
@@ -223,6 +228,59 @@ fn unique_receipt_valid(payload: &Value, receipt: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn planned_operation() -> PreparedNoteOperation {
+        use sha2::{Digest, Sha256};
+        PreparedNoteOperation { route: NoteOperationRoute::KnowledgeImportPlanned,
+            payload: json!({"opId":"li-test","noteId":"kn-target","vaultId":"vault",
+                "kind":"create","expectedRevision":"","title":"T","content":"[[./B.md]]",
+                "importPlan":{"version":1,"planId":"ip-test","mappingHash":"a".repeat(64),
+                    "relativePath":"T.md","contentSha256":format!("{:x}",Sha256::digest(b"[[./B.md]]"))}}) }
+    }
+
+    #[tokio::test]
+    async fn planned_dispatch_is_exact_single_attempt_and_never_legacy_fallback() {
+        let operation = planned_operation();
+        let before = operation.payload.clone();
+        let (path, wire) = crate::managed_vault_linked_import::planned_wire(&before).unwrap();
+        for (status, code) in [(409,"REVISION_CONFLICT"),(409,"IMPORT_PATH_CONFLICT"),
+            (409,"IMPORT_NOTE_ID_CONFLICT"),(404,"ENTITY_NOT_FOUND"),(403,"SCOPE_DENIED")] {
+            let mut sends = 0;
+            let (outcome, _) = dispatch(&operation, |actual, method, payload| {
+                sends += 1;
+                assert_eq!(actual,path); assert_eq!(method,reqwest::Method::POST);
+                assert_eq!(payload,wire); assert!(payload.get("importPlan").is_none());
+                async move { Ok((status,json!({"code":code}))) }
+            }).await.unwrap();
+            assert_eq!(outcome,Outcome::Refused(status)); assert_eq!(sends,1);
+            assert_eq!(operation.payload,before);
+        }
+        let mut sends=0;
+        assert_eq!(dispatch(&operation, |_,_,_| { sends+=1; async {Err("CONTENT_OFFLINE".into())} }).await.unwrap_err(),"CONTENT_OFFLINE");
+        assert_eq!(sends,1); assert_eq!(operation.payload,before);
+        let mut invalid=operation; invalid.payload["kind"]=json!("update");
+        assert!(dispatch(&invalid, |_,_,_| async { panic!("invalid planned update sent") }).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn planned_ack_checks_mapping_body_path_and_receipt_identity() {
+        let operation=planned_operation(); let p=&operation.payload;
+        let receipt=json!({"opId":p["opId"],"planId":p["importPlan"]["planId"],
+            "mappingHash":p["importPlan"]["mappingHash"],"noteId":p["noteId"],"state":"committed",
+            "document":{"noteId":p["noteId"],"vaultId":p["vaultId"],"revision":"r1",
+                "title":"T","relativePath":"T.md","content":p["content"],"resources":[]}});
+        assert_eq!(dispatch(&operation,|_,_,_| async {Ok((200,receipt.clone()))}).await.unwrap().0,Outcome::Ack);
+        let mut wrong_title=receipt.clone();wrong_title["document"]["title"]=json!("Foreign title");
+        assert_eq!(dispatch(&operation,|_,_,_| async {Ok((200,wrong_title))}).await.unwrap_err(),"CONTENT_ACK_INVALID");
+        for field in ["opId","planId","mappingHash","noteId","state"] {
+            let mut bad=receipt.clone();bad[field]=json!("wrong");
+            assert_eq!(dispatch(&operation,|_,_,_| async {Ok((200,bad))}).await.unwrap_err(),"CONTENT_ACK_INVALID");
+        }
+        for field in ["noteId","vaultId","relativePath","content","revision","title","resources"] {
+            let mut bad=receipt.clone();bad["document"].as_object_mut().unwrap().remove(field);
+            assert_eq!(dispatch(&operation,|_,_,_| async {Ok((200,bad))}).await.unwrap_err(),"CONTENT_ACK_INVALID");
+        }
+    }
 
     #[test]
     fn receiver_facts_are_bounded_and_never_copy_endpoint_or_catalog_private_values() {

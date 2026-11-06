@@ -16,9 +16,9 @@ import { invoke } from "@tauri-apps/api/core";
 /** Canonical typed hints the stream may carry. */
 export type Hint =
   | { kind: "servicesChanged"; permissionRevision: number }
-  | { kind: "materialChanged"; cursor: string }
+  | { kind: "materialChanged"; cursor: string; materialLibraryId?: string }
   | { kind: "knowledgeChanged"; vaultId: string; cursor: string }
-  | { kind: "ingestChanged"; jobId: string }
+  | { kind: "ingestChanged"; jobId: string; materialLibraryId?: string; vaultId?: string }
   | { kind: "lshStateChanged" };
 
 export type HintRecord = { generation: number; hint: unknown };
@@ -42,13 +42,13 @@ export function toHint(value: unknown): Hint | null {
         ? { kind: "servicesChanged", permissionRevision: v.permissionRevision }
         : null;
     case "materialChanged":
-      return typeof v.cursor === "string" ? { kind: "materialChanged", cursor: v.cursor } : null;
+      return typeof v.cursor === "string" ? { kind: "materialChanged", cursor: v.cursor, ...(typeof v.materialLibraryId === "string" ? {materialLibraryId:v.materialLibraryId} : {}) } : null;
     case "knowledgeChanged":
       return typeof v.vaultId === "string" && typeof v.cursor === "string"
         ? { kind: "knowledgeChanged", vaultId: v.vaultId, cursor: v.cursor }
         : null;
     case "ingestChanged":
-      return typeof v.jobId === "string" ? { kind: "ingestChanged", jobId: v.jobId } : null;
+      return typeof v.jobId === "string" ? { kind: "ingestChanged", jobId: v.jobId, ...(typeof v.materialLibraryId === "string" ? {materialLibraryId:v.materialLibraryId} : {}), ...(typeof v.vaultId === "string" ? {vaultId:v.vaultId} : {}) } : null;
     case "lshStateChanged":
       return { kind: "lshStateChanged" };
     default:
@@ -118,10 +118,12 @@ function toStatus(value: unknown): HintStatus {
 
 export function createHintSubscription(
   invokeRef: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> = invoke,
+  scope?: Readonly<{library?: string; vault?: string}>,
 ): HintSubscription {
+  const capturedScope = scope ? {...scope} : undefined;
   return {
     async start(instance: string): Promise<StartOutcome> {
-      const reply = (await invokeRef("services_hints_start", { instance })) as any;
+      const reply = (await invokeRef("services_hints_start", { instance, ...capturedScope })) as any;
       const generation = typeof reply?.generation === "number" ? reply.generation : 0;
       // `outcome` is tagged by serde; treat anything unrecognised as started so
       // the caller still checks status().
@@ -144,6 +146,7 @@ export function createHintSubscription(
         generation: expected.generation,
       })) as HintRecord[] | null;
       if (!Array.isArray(records)) return [];
+      if (records.some(record=>record?.generation === expected.generation && (record.hint as any)?.kind === "servicesChanged") && typeof window !== "undefined" && typeof window.dispatchEvent === "function") window.dispatchEvent(new Event("luckyray:library-catalog-refresh"));
       const out: DrainedHint[] = [];
       for (const record of records) {
         // Generation is part of the IPC currentness proof. A record without a
@@ -152,6 +155,9 @@ export function createHintSubscription(
         if (typeof record?.generation !== "number") continue;
         const hint = toHint(record?.hint);
         if (!hint) continue; // unknown shape fails closed
+        if (capturedScope?.library && hint.kind === "materialChanged" && hint.materialLibraryId !== capturedScope.library) continue;
+        if (capturedScope?.vault && hint.kind === "knowledgeChanged" && hint.vaultId !== capturedScope.vault) continue;
+        if (hint.kind === "ingestChanged" && (capturedScope?.library || capturedScope?.vault) && !((capturedScope?.library && hint.materialLibraryId === capturedScope.library) || (capturedScope?.vault && hint.vaultId === capturedScope.vault))) continue;
         out.push({ generation: record.generation, hint });
       }
       return out;

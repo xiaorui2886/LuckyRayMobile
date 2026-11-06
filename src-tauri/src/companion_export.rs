@@ -580,3 +580,17 @@ mod tests {
         assert!(validate_text(&"x".repeat(70_000)).is_err());
     }
 }
+
+/// Graph-only trusted caller. Not a frontend path-taking command; no change to
+/// validate_source_path or provider exposure. Source is fresh canonical PNG.
+pub(crate) fn export_graph_cache(root: &Path, path: &Path, action: &str) -> Result<serde_json::Value, String> {
+    let source=crate::graph_export::validate_cache_file(root,path)?;
+    let raw=match action {
+        "share"=>platform::share_file(&source.to_string_lossy(),"LuckyRay-Graph.png","image/png")?,
+        "save"=>platform::export_file(&source.to_string_lossy(),"LuckyRay-Graph.png","image/png","Pictures",&sha256_file(&source)?)?,
+        _=>return Err("GRAPH_EXPORT_ACTION_INVALID".into()),
+    };
+    let result:serde_json::Value=serde_json::from_str(&raw).map_err(|_|"GRAPH_EXPORT_FAILED")?;
+    if result["status"]!="ok"&&result["status"]!="created"&&result["status"]!="already_exists" {return Err("GRAPH_EXPORT_FAILED".into());}
+    Ok(result)
+}

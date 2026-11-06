@@ -1,7 +1,7 @@
 import { wikiCompletionBounds } from './wikiCompletionLayout';
 import { Prec, StateEffect, StateField, type Extension } from '@codemirror/state';
 import { EditorView, ViewPlugin, keymap, showTooltip, tooltips, type Tooltip, type ViewUpdate } from '@codemirror/view';
-import { sameWikiCompletion, wikiCompletionAt, wikiInsertion, type WikiChoice, type WikiCompletion } from './wikiCompletion';
+import { sameWikiCompletion, wikiCompletionAt, wikiInsertion, wikiCompletionInsertion, wikiCompletionAnchor, type WikiChoice, type WikiCompletion } from './wikiCompletion';
 type Result={match:WikiCompletion;items:WikiChoice[];status:string;index:number};
 export type WikiLoader=(query:string,embed?:boolean)=>Promise<{items:WikiChoice[];partial:boolean}>;
 export function cmWikiCompletion(load:WikiLoader,enabled:()=>boolean):Extension {
@@ -16,13 +16,13 @@ export function cmWikiCompletion(load:WikiLoader,enabled:()=>boolean):Extension 
   if(!enabled()||!view.hasFocus||view.composing||view.compositionStarted)return false;
   const sel=view.state.selection.main;
   if(!sel.empty||!sameWikiCompletion(wikiCompletionAt(view.state.doc.toString(),sel.head),result.match))return false;
-  const insert=wikiInsertion(item,Boolean(result.match.embed));if(!insert)return false;
+  const insert=wikiCompletionInsertion(item,result.match);if(!insert)return false;
   view.dispatch({changes:{from:result.match.from,to:result.match.to,insert},selection:{anchor:result.match.from+insert.length},effects:replace.of(null),userEvent:'input.complete'});
   view.focus();return true;
  };
  const field=StateField.define<Result|null>({create:()=>null,update(value,tr){for(const e of tr.effects)if(e.is(replace))return e.value;return tr.docChanged||tr.selection?null:value;},
-  provide:f=>showTooltip.from(f,value=>value?({pos:value.match.from,above:false,strictSide:false,arrow:false,create(view){
-   const dom=document.createElement('div');dom.className='st-wiki-completion';dom.setAttribute('role','listbox');dom.setAttribute('aria-label',value.match.embed?'匹配的附件':'匹配的笔记');
+  provide:f=>showTooltip.from(f,value=>value?({pos:wikiCompletionAnchor(value.match),above:true,strictSide:false,arrow:false,create(view){
+   const dom=document.createElement('div');dom.className='st-wiki-completion';dom.setAttribute('role','listbox');dom.setAttribute('aria-label',value.match.embed?'匹配的附件':'匹配的笔记与附件');
    const fit=()=>{const bounds=space(view);dom.style.width=Math.max(0,bounds.right-bounds.left)+'px';view.requestMeasure()};
    const style=getComputedStyle(view.dom);
    for(const key of ['--st-sheet','--st-ink','--st-line','--st-secondary','--st-selected'])dom.style.setProperty(key,style.getPropertyValue(key));
@@ -38,7 +38,7 @@ export function cmWikiCompletion(load:WikiLoader,enabled:()=>boolean):Extension 
     button.addEventListener('click',e=>{if(e.detail===0||!dragged)accept(view,item,value);start=null});dom.append(button);
    });
    if(value.status){const status=document.createElement('div');status.className='st-wiki-completion-status';status.setAttribute('role','status');status.textContent=value.status;dom.append(status)}
-   return {dom, getCoords(pos){const coords=view.coordsAtPos(pos)||view.dom.getBoundingClientRect();const bounds=space(view);return {...bounds,top:coords.top,bottom:coords.bottom,right:bounds.left}},
+   return {dom, getCoords(pos){const coords=view.coordsAtPos(pos)||view.dom.getBoundingClientRect();return coords},
     mount(){fit();window.addEventListener('resize',fit);window.visualViewport?.addEventListener('resize',fit);window.visualViewport?.addEventListener('scroll',fit)},
     destroy(){window.removeEventListener('resize',fit);window.visualViewport?.removeEventListener('resize',fit);window.visualViewport?.removeEventListener('scroll',fit)}};
   }} satisfies Tooltip):null)});

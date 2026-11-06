@@ -12,8 +12,10 @@
 // The registry performs no retries of its own: a caller re-reads after an
 // identity/generation/permission change.
 
-import { callServices, type ServicesTransport } from "./transport.ts";
+import { callServices, ServicesError, type ServicesTransport } from "./transport.ts";
 import type { OperationState, ServiceCatalog, OperationStatus } from "../../../shared/companion-services-v1/types.ts";
+
+export type RegistryScope = Readonly<{ library?: string; vault?: string }>;
 
 export type RegistryIdentity = {
   instanceId: string;
@@ -38,11 +40,119 @@ export function stateOf(catalog: ServiceCatalog | null, operationId: string): Op
 
 export class ServiceRegistry {
   private transport: ServicesTransport;
+  private readonly scoped = new Map<string, ServiceRegistry>();
+  private readonly identities = new Map<string, string>();
+  private parent: ServiceRegistry | null = null;
+  private target: Readonly<{ instance: string; scope: RegistryScope }> | null = null;
+  private refreshedAt = 0;
+  private securityRevision = 0;
+  private revocationRevision = 0;
+
+  /** Immutable capability owner. Different libraries never supersede one another. */
+  forScope(instance: string, scope: RegistryScope = {}): ServiceRegistry {
+    const root = this.parent ?? this;
+    const captured = Object.freeze({ library: scope.library || undefined, vault: scope.vault || undefined });
+    const key = JSON.stringify([instance, captured.library || "", captured.vault || ""]);
+    let entry = root.scoped.get(key);
+    if (!entry) {
+      entry = new ServiceRegistry(root.transport);
+      entry.parent = root;
+      entry.target = Object.freeze({ instance, scope: captured });
+      // Compatibility for a caller that discovered this exact scope before
+      // acquiring its immutable handle. Never seed from another library.
+      if (root.catalog?.desktopInstanceId === instance && root.scopeMatches(captured)) {
+        entry.catalog = root.catalog;
+        entry.namespace = root.namespace;
+        entry.adoptedScope = root.adoptedScope;
+        entry.refreshedAt = root.refreshedAt;
+      }
+      root.scoped.set(key, entry);
+    }
+    return entry;
+  }
+
+  /** Not authorization: every actual operation remains server-authorized. */
+  ensureAdopting(instance: string, scope?: RegistryScope, maxAgeMs = 30000): Promise<ServiceCatalog> {
+    if (this.catalog?.desktopInstanceId === instance && this.scopeMatches(scope)
+      && Date.now() - this.refreshedAt < maxAgeMs) return Promise.resolve(this.catalog);
+    return this.refreshAdopting(instance, scope);
+  }
+
+  /** Monotone local fence for retained UI, distinct from server permissionRevision. */
+  currentSecurityRevision(): number { return this.securityRevision; }
+  currentRevocationRevision(): number { return this.revocationRevision; }
+
+  /** A failed authorization retires cached permission proof, not only the request. */
+  revoke(instance: string, scope?: RegistryScope, wholeInstance = false): void {
+    const root = this.parent ?? this;
+    for (const entry of [root, ...root.scoped.values()]) {
+      const owner = entry.target?.instance ?? entry.catalog?.desktopInstanceId;
+      if (owner !== instance) continue;
+      if (!wholeInstance && (entry.target ? !entry.scopeMatchesTarget(scope) : !entry.scopeMatches(scope))) continue;
+      entry.securityRevision++;
+      entry.revocationRevision++;
+      entry.clearOwn();
+    }
+  }
+
+  /** Canonical denial of one write operation does not revoke independent reads. */
+  denyOperation(instance: string, scope: RegistryScope, operationId: string): void {
+    const root = this.parent ?? this;
+    for (const entry of [root, ...root.scoped.values()]) {
+      if (entry.catalog?.desktopInstanceId !== instance || !entry.scopeMatches(scope)) continue;
+      const operation = entry.catalog.operations?.[operationId];
+      if (!operation) continue; // absent operations already fail closed
+      entry.catalog = { ...entry.catalog, operations: { ...entry.catalog.operations,
+        [operationId]: { ...operation, state: "notGranted" } } };
+      entry.retireInflight();
+      entry.emit();
+    }
+  }
+
+  private scopeMatchesTarget(scope?: RegistryScope): boolean {
+    return JSON.stringify([this.target?.scope.library || "", this.target?.scope.vault || ""])
+      === JSON.stringify([scope?.library || "", scope?.vault || ""]);
+  }
+
+  private assertTarget(instance: string, scope?: RegistryScope): void {
+    if (this.target && (this.target.instance !== instance || !this.scopeMatchesTarget(scope)))
+      throw new ServicesError("SOURCE_CHANGED", 409);
+  }
+
+  private identityAtStart(instance: string): string | undefined {
+    return (this.parent ?? this).identities.get(instance);
+  }
+
+  private adopted(catalog: ServiceCatalog, startedIdentity: string | undefined): void {
+    const root = this.parent ?? this;
+    const identity = this.namespaceOf({instanceId: catalog.desktopInstanceId,
+      gatewayGeneration: catalog.gatewayGeneration, permissionRevision: catalog.permissionRevision});
+    const known = root.identities.get(catalog.desktopInstanceId);
+    if (known !== undefined && known !== startedIdentity && known !== identity)
+      throw new Error("services-catalog-request-superseded");
+    if (known !== undefined && known !== identity) {
+      this.securityRevision++;
+      // Retire even siblings with no catalog yet: an older cold discovery may
+      // otherwise resurrect the previous generation after this one commits.
+      for (const entry of [root, ...root.scoped.values()]) {
+        if (entry === this) continue;
+        const owner = entry.target?.instance ?? entry.catalog?.desktopInstanceId;
+        if (owner === catalog.desktopInstanceId) {
+          entry.securityRevision++;
+          entry.clearOwn();
+        }
+      }
+    }
+    root.identities.set(catalog.desktopInstanceId, identity);
+
+    this.refreshedAt = Date.now();
+  }
   private catalog: ServiceCatalog | null = null;
   private namespace = "";
   private listeners = new Set<() => void>();
+  private suppressChildEmits = false;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
-  private emit() { for (const listener of this.listeners) listener(); }
+  private emit() { for (const listener of this.listeners) listener(); if (this.parent && !this.parent.suppressChildEmits) this.parent.emit(); }
   /**
    * Local request currentness token (G1-C1).
    *
@@ -58,6 +168,8 @@ export class ServiceRegistry {
    * against each other.
    */
   private requestToken = 0;
+  private adoptedScope = "";
+  scopeMatches(scope?: {library?: string; vault?: string}): boolean { return this.adoptedScope === JSON.stringify([scope?.library || "",scope?.vault || ""]); }
   private adopting: { instance: string; token: number; task: Promise<ServiceCatalog> } | null = null;
 
   constructor(transport: ServicesTransport) {
@@ -117,37 +229,45 @@ export class ServiceRegistry {
    * must pre-state the generation it expects). Same token fence and
    * adopt-or-clear semantics as `refresh`.
    */
-  refreshAdopting(instanceId: string): Promise<ServiceCatalog> {
-    if (this.adopting?.instance === instanceId && this.adopting.token === this.requestToken) return this.adopting.task;
+  refreshAdopting(instanceId: string, scope?: {library?: string; vault?: string}): Promise<ServiceCatalog> {
+    scope = scope ? Object.freeze({ ...scope }) : undefined;
+    this.assertTarget(instanceId, scope);
+    const scopeKey = JSON.stringify([scope?.library || "",scope?.vault || ""]);
+    const requestKey = instanceId + "|" + scopeKey;
+    if (this.adopting?.instance === requestKey && this.adopting.token === this.requestToken) return this.adopting.task;
     const token = ++this.requestToken;
-    const task = this.discoverAdopting(instanceId, token).finally(() => {
+    const task = this.discoverAdopting(instanceId, token, scope).finally(() => {
       if (this.adopting?.task === task) this.adopting = null;
     });
-    this.adopting = { instance: instanceId, token, task };
+    this.adopting = { instance: requestKey, token, task };
     return task;
   }
 
-  private async discoverAdopting(instanceId: string, token: number): Promise<ServiceCatalog> {
+  private async discoverAdopting(instanceId: string, token: number, scope?: {library?: string; vault?: string}): Promise<ServiceCatalog> {
     const isCurrent = () => this.requestToken === token;
+    const startedIdentity = this.identityAtStart(instanceId);
     const catalog = await callServices<ServiceCatalog>(this.transport, {
       instance: instanceId,
+      ...scope,
       operationId: "services.discover",
       method: "GET",
       path: "/v1/services",
     });
     if (!isCurrent()) throw new Error("services-catalog-request-superseded");
-    if (catalog?.desktopInstanceId !== instanceId || typeof catalog?.gatewayGeneration !== "number") {
-      this.catalog = null;
-      this.namespace = "";
-      this.emit();
+    if (catalog?.desktopInstanceId !== instanceId || !Number.isSafeInteger(catalog?.gatewayGeneration)
+      || catalog.gatewayGeneration < 0 || !Number.isSafeInteger(catalog?.permissionRevision) || catalog.permissionRevision < 0) {
+      this.invalidate();
       throw new Error("services-catalog-generation-mismatch");
     }
+    this.adopted(catalog, startedIdentity);
+    this.adoptedScope = JSON.stringify([scope?.library || "",scope?.vault || ""]);
     this.catalog = catalog;
     this.namespace = this.namespaceOf({
       instanceId: catalog.desktopInstanceId,
       gatewayGeneration: catalog.gatewayGeneration,
       permissionRevision: catalog.permissionRevision,
     });
+    if (scope?.library || scope?.vault) this.namespace += "|scope:" + this.adoptedScope;
     this.emit();
     return catalog;
   }
@@ -156,10 +276,13 @@ export class ServiceRegistry {
     identity: RegistryIdentity,
     expectedPermissionRevision?: number,
   ): Promise<ServiceCatalog> {
+    identity = Object.freeze({...identity});
+    this.assertTarget(identity.instanceId);
     // Capture local currentness. A newer refresh or an invalidate bumps the
     // token, which retires THIS request (G1-C1).
     const token = ++this.requestToken;
     const isCurrent = () => this.requestToken === token;
+    const startedIdentity = this.identityAtStart(identity.instanceId);
 
     const catalog = await callServices<ServiceCatalog>(this.transport, {
       instance: identity.instanceId,
@@ -179,21 +302,20 @@ export class ServiceRegistry {
       catalog?.gatewayGeneration === identity.gatewayGeneration;
     if (!agrees) {
       // Only the CURRENT request may clear state on a mismatch.
-      this.catalog = null;
-      this.namespace = "";
-      this.emit();
+      this.invalidate();
       throw new Error("services-catalog-generation-mismatch");
     }
     if (
       expectedPermissionRevision !== undefined &&
       catalog.permissionRevision !== expectedPermissionRevision
     ) {
-      this.catalog = null;
-      this.namespace = "";
-      this.emit();
+      this.revocationRevision++;
+      this.invalidate();
       throw new Error("services-catalog-permission-revision-mismatch");
     }
+    this.adopted(catalog, startedIdentity);
     this.catalog = catalog;
+    this.adoptedScope = JSON.stringify(["", ""]);
     // Namespace from the ADOPTED catalog, not from caller belief.
     this.namespace = this.namespaceOf({
       instanceId: catalog.desktopInstanceId,
@@ -208,14 +330,30 @@ export class ServiceRegistry {
    * A `servicesChanged` hint carrying a NEW permission revision invalidates the
    * cache. Returns true when the caller must refresh.
    */
-  invalidateForPermissionRevision(permissionRevision: number): boolean {
+  invalidateForPermissionRevision(permissionRevision: number, instance?: string): boolean {
+    let changed = false;
+    if (!this.parent) for (const entry of this.scoped.values()) {
+      if (instance && entry.target?.instance !== instance) continue;
+      if (entry.catalog?.permissionRevision === permissionRevision) continue;
+      entry.securityRevision++;
+      entry.revocationRevision++;
+      entry.clearOwn();
+      changed = true;
+    }
+    if (instance && this.catalog?.desktopInstanceId !== instance) return changed;
     if (!this.catalog) {
+      this.securityRevision++;
+      this.revocationRevision++;
+      this.transport.invalidate?.(this.target?.instance ?? instance, this.target?.scope);
       // Nothing cached: still retire any refresh that started before the hint.
       this.retireInflight();
       this.emit();
       return true;
     }
-    if (this.catalog.permissionRevision === permissionRevision) return false;
+    if (this.catalog.permissionRevision === permissionRevision) return changed;
+    this.securityRevision++;
+    this.revocationRevision++;
+    this.transport.invalidate?.(this.target?.instance ?? this.catalog.desktopInstanceId, this.target?.scope);
     this.catalog = null;
     this.namespace = "";
     this.retireInflight();
@@ -225,6 +363,19 @@ export class ServiceRegistry {
 
   /** Desktop identity or gateway generation moved: drop everything. */
   invalidate(): void {
+    this.suppressChildEmits = true;
+    if (!this.parent) for (const entry of this.scoped.values()) {
+      entry.securityRevision++;
+      entry.clearOwn();
+    }
+    this.suppressChildEmits = false;
+    this.securityRevision++;
+    this.clearOwn();
+  }
+
+  private clearOwn(): void {
+    this.transport.invalidate?.(this.target?.instance ?? this.catalog?.desktopInstanceId, this.target?.scope);
+    this.refreshedAt = 0;
     this.catalog = null;
     this.namespace = "";
     // Retire in-flight refreshes so a late success cannot resurrect the cache.

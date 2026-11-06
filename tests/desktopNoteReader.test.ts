@@ -54,9 +54,9 @@ function readerMarkup(overrides: Record<string, unknown> = {}) {
   }
   visit(ast);
   assert.ok(found, "normal Desktop caller must still use the authority NoteSurface");
-  const env = { React, DesktopNotePreview, DesktopKnowledgeReader, NoteReadingContent, cmScope: (...parts: string[]) => ["cm", ...parts].join("|"), cachedResources, current: true, retained: false, mode: "read", loaded: true,
+  const env = { React, DesktopNotePreview, DesktopKnowledgeReader, NoteReadingContent, cmScope: (...parts: string[]) => ["cm", ...parts].join("|"), cachedResources, registerOverlay: () => () => {}, current: true, retained: false, mode: "read", loaded: true,
     instance: "owner-a", vault: "vault-a", id: "note-a", title: "Owned note", content: "![[attachments/sample.png]]",
-    searchTarget: undefined, setSearchTarget() {},
+    searchTarget: undefined, setSearchTarget() {}, readingHeading: undefined, consumeReadingHeading() {},
     connectedOwner: true, epoch: { current: 7 },
     displayedRevision: { current: "r1" }, deferredIncoming: { current: null },
     pending: { current: new Map() }, failed: { current: false }, openLinkedNote: async () => {},
@@ -76,7 +76,7 @@ function readerMarkup(overrides: Record<string, unknown> = {}) {
 
 test("normal Desktop reader interprets published attachments instead of showing literal embeds", () => {
   const output = readerMarkup();
-  assert.match(output, /attachments\/sample\.png · 按需获取/);
+  assert.match(output, /sample\.png · 按需获取/);
   assert.doesNotMatch(output, /!\[\[attachments\/sample\.png\]\]/);
 });
 
@@ -87,9 +87,9 @@ test("real preview preserves attachments beside decoded prose and differentiates
     resources: [{ target: "attachments/sample.png", resourceId: "image", mimeType: "image/png", status: "resolved", version: "v1" }],
     onWikiLink() {},
   }));
-  assert.match(output, /attachments\/sample\.png · 附件尚未缓存/);
+  assert.match(output, /sample\.png · 附件尚未缓存/);
   assert.doesNotMatch(output, /!\[\[attachments\/sample\.png\]\]/);
-  assert.match(output, /<button[^>]*class="st-wiki-link"[^>]*><span[^>]*>别名<\/span><\/button>/);
+  assert.match(output, /<button[^>]*class="st-wiki-link is-unknown"[^>]*><span[^>]*>别名<\/span><\/button>/);
   assert.match(output, /<a href="https:\/\/example\.com" target="_blank" rel="noreferrer noopener"><span[^>]*>网站<\/span><\/a>/);
   assert.doesNotMatch(output, /<script|javascript:/);
 });
@@ -99,7 +99,7 @@ test("real preview never substitutes a later literal link for an entity-decoded 
   const output = renderToStaticMarkup(React.createElement(DesktopNotePreview, {
     instance: "A", vault: "v", note: "n", content, resources: [], online: false, onWikiLink() {},
   }));
-  assert.equal((output.match(/class="st-wiki-link"/g) || []).length, 1);
+  assert.equal((output.match(/class="st-wiki-link is-unknown"/g) || []).length, 1);
   assert.match(output, /data-note-source-start="12" data-note-source-end="19"/);
   assert.match(output, /\[\[a&amp;b\]\]/, "the transformed first token stays literal");
 });

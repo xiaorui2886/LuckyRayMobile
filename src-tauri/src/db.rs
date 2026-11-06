@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 // Append-only migrations retain existing note and offline preparation data.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 15;
 const LEGACY_CREDENTIAL_WAL_CLEANUP_KEY: &str = "legacy_credential_wal_cleanup_pending";
 pub const OUTBOX_PENDING: &str = "pending";
 pub const OUTBOX_UPLOADING: &str = "uploading";
@@ -370,14 +370,75 @@ const MIGRATIONS: &[&str] = &[
       UNIQUE(parent, name_key)
     );
     "#,
+    // v13: historical names are durable local user data, not Desktop cache.
+    // No pre-upgrade history is invented; every previously persisted nonempty
+    // title is retained only when a later note_update actually changes it.
+    r#"
+    CREATE TABLE IF NOT EXISTS local_note_title_history (
+      note_id TEXT NOT NULL REFERENCES local_note_item(note_id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      PRIMARY KEY(note_id, title)
+    );
+    "#,
+    // v14 — widen the existing note identity, preserving EVERY persisted column.
+    // SQLite cannot alter a primary key in place. This append-only migration
+    // rebuilds it transactionally; pending operations/audits/uploads are untouched.
+    r#"
+    CREATE TABLE note_cache_scope_v14 (
+      desktop_instance_id TEXT NOT NULL,
+      note_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      relative_path TEXT,
+      content TEXT NOT NULL DEFAULT '',
+      revision TEXT NOT NULL,
+      updated_at TEXT,
+      dirty INTEGER NOT NULL DEFAULT 0,
+      base_revision TEXT,
+      vault_id TEXT NOT NULL DEFAULT '',
+      server_document TEXT,
+      draft_generation INTEGER NOT NULL DEFAULT 0,
+      conflict_document TEXT,
+      deleted INTEGER NOT NULL DEFAULT 0,
+      pending_kind TEXT NOT NULL DEFAULT 'update',
+      editor_epoch INTEGER NOT NULL DEFAULT 0,
+      editor_generation INTEGER NOT NULL DEFAULT 0,
+      cached_document TEXT,
+      create_collision_block INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (desktop_instance_id, vault_id, note_id)
+    );
+    INSERT INTO note_cache_scope_v14 SELECT * FROM note_cache;
+    DROP TABLE note_cache;
+    ALTER TABLE note_cache_scope_v14 RENAME TO note_cache;
+    "#,
+    // v15: add the exact-path import plan transport without changing any
+    // existing operation bytes, identity, generation or immutable audit.
+    r#"
+    CREATE TABLE content_note_operation_v15 (
+      desktop_instance_id TEXT NOT NULL, vault_id TEXT NOT NULL, note_id TEXT NOT NULL,
+      op_id TEXT NOT NULL, payload TEXT NOT NULL, draft_generation INTEGER NOT NULL,
+      route TEXT NOT NULL DEFAULT 'content' CHECK(route IN ('content','knowledgeCreateUnique','knowledgeImportPlanned')),
+      PRIMARY KEY(desktop_instance_id,vault_id,note_id));
+    INSERT INTO content_note_operation_v15(desktop_instance_id,vault_id,note_id,op_id,payload,draft_generation,route)
+      SELECT desktop_instance_id,vault_id,note_id,op_id,payload,draft_generation,route FROM content_note_operation;
+    DROP TABLE content_note_operation;
+    ALTER TABLE content_note_operation_v15 RENAME TO content_note_operation;
+    "#,
+
 ];
 
 pub struct Db {
     conn: Connection,
 }
 
+#[path = "managed_vault_purge.rs"]
+pub(crate) mod managed_vault_purge;
+
 #[path = "content_db.rs"]
 pub(crate) mod content_db;
+#[path = "content_graph_db.rs"]
+pub(crate) mod content_graph_db;
+#[path = "local_note_upload_db.rs"]
+mod local_note_upload_db;
 
 /// Startup-failure classification for [`Db::open_kind`].
 ///
@@ -439,6 +500,11 @@ impl Db {
     }
 
     fn migrate_kind(&mut self) -> Result<(), (String, OpenFailure)> {
+        // Connection-local scalar: use the same actual-link scanner before SQL LIMITs.
+        self.conn.create_scalar_function("luckyray_attachment_reference", 2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(content_db::has_attachment_reference(&ctx.get::<String>(0)?, &ctx.get::<String>(1)?))
+        ).map_err(|e| (format!("attachment reference function: {e}"), OpenFailure::Other))?;
         let current: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -493,7 +559,7 @@ impl Db {
             .map_err(|e| format!("health integrity check: {e}"))?;
         let integrity_ok = integrity.eq_ignore_ascii_case("ok");
         let mut ok_tables = true;
-        for t in ["paired_desktop", "sync_cursor", "asset_cache", "note_cache", "capture_outbox", "capture_attachment", "local_inbox_item", "local_inbox_attachment", "local_note_item", "local_note_tag", "local_note_folder", "local_asset_item", "local_asset_tag", "content_note_operation", "content_note_attachment", "content_vault_cache", "content_response_cache"] {
+        for t in ["paired_desktop", "sync_cursor", "asset_cache", "note_cache", "capture_outbox", "capture_attachment", "local_inbox_item", "local_inbox_attachment", "local_note_item", "local_note_tag", "local_note_folder", "local_note_title_history", "local_asset_item", "local_asset_tag", "content_note_operation", "content_note_attachment", "content_vault_cache", "content_response_cache"] {
             let n: i64 = self
                 .conn
                 .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", params![t], |r| r.get(0))
@@ -590,7 +656,12 @@ impl Db {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("paired tx: {e}"))?;
+        // Credential replacement is not authorization to replay old uncertain
+        // note writes. Preserve them verbatim and require explicit review.
+        tx.execute("INSERT OR IGNORE INTO app_meta(key,value) SELECT 'content.pairing-review.v1:' || json_array(desktop_instance_id,vault_id,note_id),'pending' FROM note_cache WHERE desktop_instance_id=?1 AND dirty=1", [instance]).map_err(|e| format!("park prior notes: {e}"))?;
         tx.execute("DELETE FROM paired_desktop", []).map_err(|e| format!("clear paired: {e}"))?;
+        tx.execute("INSERT INTO app_meta(key,value) VALUES('content.resource.authority.v1','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", []).map_err(|e| format!("resource authority: {e}"))?;
+        tx.execute("DELETE FROM content_response_cache", []).map_err(|e| format!("content cache authority: {e}"))?;
         tx.execute(
             "INSERT INTO paired_desktop VALUES (?1,?2,?3,?4,?5,?6,?7,?8,datetime('now'))",
             params![instance, name, platform, app_version, protocol_version, fp, base_url, ""],
@@ -598,6 +669,20 @@ impl Db {
         .map_err(|e| format!("upsert paired: {e}"))?;
         tx.commit().map_err(|e| format!("paired commit: {e}"))?;
         Ok(())
+    }
+
+    /// Address recovery is not a new pairing. No other table/column changes.
+    pub(crate) fn update_paired_endpoint(&mut self, instance:&str, fingerprint:&str,
+        old_base:&str, paired_at:&str, new_base:&str) -> Result<(),String> {
+        let tx=self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_|"ENDPOINT_SAVE_UNCONFIRMED")?;
+        let changed=tx.execute("UPDATE paired_desktop SET base_url=?5 WHERE desktop_instance_id=?1 AND certificate_fingerprint=?2 AND base_url=?3 AND paired_at=?4",
+            params![instance,fingerprint,old_base,paired_at,new_base]).map_err(|_|"ENDPOINT_SAVE_UNCONFIRMED")?;
+        if changed!=1 { return Err("ENDPOINT_SOURCE_CHANGED".into()); }
+        let actual:String=tx.query_row("SELECT base_url FROM paired_desktop WHERE desktop_instance_id=?1",[instance],|row|row.get(0))
+            .map_err(|_|"ENDPOINT_SAVE_UNCONFIRMED")?;
+        if actual!=new_base { return Err("ENDPOINT_SAVE_UNCONFIRMED".into()); }
+        tx.commit().map_err(|_|"ENDPOINT_SAVE_UNCONFIRMED".into())
     }
 
     /// Legacy M2.x rows may still contain a credential. Callers must first
@@ -721,6 +806,7 @@ impl Db {
             "sync_cursor",
             "asset_tag_cache",
             "asset_cache",
+            "content_response_cache",
             "ai_event_cache",
             "ai_run_cache",
             "paired_desktop",
@@ -728,6 +814,8 @@ impl Db {
             tx.execute(&format!("DELETE FROM {table}"), [])
                 .map_err(|e| format!("revoke {table}: {e}"))?;
         }
+        tx.execute("INSERT INTO app_meta(key,value) VALUES('content.resource.authority.v1','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", []).map_err(|e| e.to_string())?;
+        tx.execute("INSERT OR IGNORE INTO app_meta(key,value) SELECT 'content.pairing-review.v1:' || json_array(desktop_instance_id,vault_id,note_id),'pending' FROM note_cache WHERE dirty=1", []).map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM note_cache WHERE dirty=0", []).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| format!("revoke commit: {e}"))?;
         Ok(())
@@ -970,7 +1058,7 @@ impl Db {
         self.conn
             .execute(
                 "INSERT INTO note_cache(desktop_instance_id,note_id,title,relative_path,content,revision,updated_at,dirty,base_revision) VALUES (?1,?2,?3,?4,?5,?6,?7,0,NULL)
-                 ON CONFLICT(desktop_instance_id, note_id) DO UPDATE SET
+                 ON CONFLICT(desktop_instance_id, vault_id, note_id) DO UPDATE SET
                    title=excluded.title, relative_path=excluded.relative_path,
                    content=excluded.content, revision=excluded.revision,
                    updated_at=excluded.updated_at, dirty=0, base_revision=NULL",
@@ -985,7 +1073,7 @@ impl Db {
             .conn
             .prepare(
                 "SELECT note_id, title, relative_path, revision, updated_at, dirty, vault_id
-                 FROM note_cache WHERE desktop_instance_id=?1 AND (deleted=0 OR dirty=1) ORDER BY updated_at DESC",
+                 FROM note_cache WHERE desktop_instance_id=?1 AND vault_id='' AND (deleted=0 OR dirty=1) ORDER BY updated_at DESC",
             )
             .map_err(|e| format!("prepare: {e}"))?;
         let rows = stmt
@@ -1004,7 +1092,7 @@ impl Db {
         self.conn
             .query_row(
                 "SELECT note_id, title, relative_path, revision, updated_at, dirty, vault_id FROM note_cache
-                 WHERE desktop_instance_id=?1 AND note_id=?2",
+                 WHERE desktop_instance_id=?1 AND vault_id='' AND note_id=?2",
                 params![instance, id],
                 |r| {
                     Ok(NoteRow { id: r.get(0)?, title: r.get(1)?, path: r.get(2)?, revision: r.get(3)?, updated_at: r.get(4)?, dirty: r.get(5)?, vault_id: r.get(6)? })
@@ -1020,7 +1108,7 @@ impl Db {
     pub fn get_note_content(&self, instance: &str, id: &str) -> Result<Option<String>, String> {
         self.conn
             .query_row(
-                "SELECT content FROM note_cache WHERE desktop_instance_id=?1 AND note_id=?2",
+                "SELECT content FROM note_cache WHERE desktop_instance_id=?1 AND vault_id='' AND note_id=?2",
                 params![instance, id],
                 |r| r.get(0),
             )
@@ -1037,7 +1125,7 @@ impl Db {
                 "UPDATE note_cache SET title=?3, content=?4, dirty=1,
                         base_revision=CASE WHEN base_revision IS NULL THEN revision ELSE base_revision END,
                         updated_at=datetime('now')
-                 WHERE desktop_instance_id=?1 AND note_id=?2",
+                 WHERE desktop_instance_id=?1 AND vault_id='' AND note_id=?2",
                 params![instance, id, title, content],
             )
             .map_err(|e| format!("local edit: {e}"))?;
@@ -1047,7 +1135,7 @@ impl Db {
     pub fn mark_note_synced(&self, instance: &str, id: &str, new_rev: &str) -> Result<(), String> {
         self.conn
             .execute(
-                "UPDATE note_cache SET revision=?3, dirty=0, base_revision=NULL WHERE desktop_instance_id=?1 AND note_id=?2",
+                "UPDATE note_cache SET revision=?3, dirty=0, base_revision=NULL WHERE desktop_instance_id=?1 AND vault_id='' AND note_id=?2",
                 params![instance, id, new_rev],
             )
             .map_err(|e| format!("mark synced: {e}"))?;
@@ -1056,7 +1144,7 @@ impl Db {
 
     pub fn delete_note(&self, instance: &str, id: &str) -> Result<(), String> {
         self.conn
-            .execute("DELETE FROM note_cache WHERE desktop_instance_id=?1 AND note_id=?2", params![instance, id])
+            .execute("DELETE FROM note_cache WHERE desktop_instance_id=?1 AND vault_id='' AND note_id=?2", params![instance, id])
             .map_err(|e| format!("delete note: {e}"))?;
         Ok(())
     }
@@ -1939,6 +2027,17 @@ impl Db {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("note update tx: {e}"))?;
+        // Capture the actual stored name in the SAME transaction as title,
+        // body and tags. This deliberately includes intermediate titles that
+        // autosave persisted, not merely explicit/finished rename gestures.
+        let previous: String = tx.query_row(
+            "SELECT title FROM local_note_item WHERE note_id=?1", params![note_id], |r| r.get(0),
+        ).optional().map_err(|e| format!("note previous title: {e}"))?
+            .ok_or_else(|| "local note not found".to_string())?;
+        if previous != title && !previous.trim().is_empty() {
+            tx.execute("INSERT OR IGNORE INTO local_note_title_history(note_id,title) VALUES (?1,?2)",
+                params![note_id, previous]).map_err(|e| format!("note preserve title: {e}"))?;
+        }
         let changed = tx
             .execute(
                 "UPDATE local_note_item
@@ -1964,6 +2063,31 @@ impl Db {
         }
         tx.commit().map_err(|e| format!("note update commit: {e}"))?;
         Ok(())
+    }
+
+    /// One SQLite statement provides a consistent metadata-only snapshot.
+    /// Include every current/historical claim; consumers must never silently
+    /// choose a current title over a different note's historical name.
+    pub fn note_link_catalog(&self) -> Result<Vec<LocalNoteLinkEntry>, String> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.note_id,n.title,n.folder,h.title FROM local_note_item n
+             LEFT JOIN local_note_title_history h ON h.note_id=n.note_id
+             ORDER BY n.note_id,h.title"
+        ).map_err(|e| format!("note link catalog prepare: {e}"))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?,
+            r.get::<_,String>(2)?, r.get::<_,Option<String>>(3)?)))
+            .map_err(|e| format!("note link catalog query: {e}"))?;
+        let mut entries: Vec<LocalNoteLinkEntry> = Vec::new();
+        for row in rows {
+            let (note_id,title,folder,historical) = row.map_err(|e| format!("note link catalog row: {e}"))?;
+            if entries.last().map(|entry| entry.note_id.as_str()) != Some(note_id.as_str()) {
+                entries.push(LocalNoteLinkEntry { note_id, title, folder, historical_names: Vec::new() });
+            }
+            if let Some(name) = historical {
+                if let Some(entry) = entries.last_mut() { entry.historical_names.push(name); }
+            }
+        }
+        Ok(entries)
     }
 
     pub fn note_get(&self, note_id: &str) -> Result<Option<LocalNoteItem>, String> {
@@ -2242,6 +2366,8 @@ impl Db {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("note delete tx: {e}"))?;
+        tx.execute("DELETE FROM local_note_title_history WHERE note_id=?1", params![note_id])
+            .map_err(|e| format!("note delete title history: {e}"))?;
         tx.execute("DELETE FROM local_note_tag WHERE note_id=?1", params![note_id])
             .map_err(|e| format!("note delete tags: {e}"))?;
         let changed = tx
@@ -2287,7 +2413,7 @@ impl Db {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("note erase transaction: {e}"))?;
-        for table in ["local_note_tag", "local_note_item", "local_note_folder"] {
+        for table in ["local_note_title_history", "local_note_tag", "local_note_item", "local_note_folder"] {
             tx.execute(&format!("DELETE FROM {table}"), [])
                 .map_err(|e| format!("note erase {table}: {e}"))?;
         }
@@ -3560,14 +3686,14 @@ impl Db {
                     }
                 }
                 ("note", "delete") => {
-                    tx.execute("DELETE FROM note_cache WHERE desktop_instance_id=?1 AND note_id=?2", params![instance, id])
+                    tx.execute("DELETE FROM note_cache WHERE desktop_instance_id=?1 AND vault_id='' AND note_id=?2", params![instance, id])
                         .map_err(|e| format!("note del: {e}"))?;
                 }
                 ("note", _) => {
                     if let Some(d) = data {
                         tx.execute(
                             "INSERT INTO note_cache(desktop_instance_id,note_id,title,relative_path,content,revision,updated_at,dirty,base_revision) VALUES (?1,?2,?3,?4,?5,?6,?7,0,NULL)
-                             ON CONFLICT(desktop_instance_id, note_id) DO UPDATE SET
+                             ON CONFLICT(desktop_instance_id, vault_id, note_id) DO UPDATE SET
                                title=excluded.title, relative_path=excluded.relative_path,
                                content=excluded.content, revision=excluded.revision,
                                updated_at=excluded.updated_at, dirty=0, base_revision=NULL",
@@ -3717,6 +3843,15 @@ pub struct InboxDetail {
     pub attachments: Vec<InboxAttachmentRow>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalNoteLinkEntry {
+    pub note_id: String,
+    pub title: String,
+    pub folder: String,
+    pub historical_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalNoteItem {
@@ -3799,6 +3934,41 @@ mod tests {
         format!("{:?}",rows.collect::<Result<Vec<_>,_>>().unwrap())
     }
 
+    fn endpoint_fixture() -> Db {
+        let db=Db::open(Path::new(":memory:")).unwrap();
+        db.conn.execute("INSERT INTO paired_desktop VALUES('endpoint-synthetic','PC','windows','1',1,'pin','https://192.168.1.20:7303','untouched-legacy-test-value','original-time')",[]).unwrap();
+        db.conn.execute("INSERT INTO note_cache(desktop_instance_id,vault_id,note_id,title,content,revision,dirty) VALUES('endpoint-synthetic','A','test-note','Synthetic note','draft body','r1',1)",[]).unwrap();
+        db.conn.execute("INSERT INTO app_meta VALUES('endpoint.test.authorization','unchanged')",[]).unwrap();
+        db
+    }
+
+    #[test]
+    fn endpoint_recovery_updates_one_column_without_repairing_or_discarding_data() {
+        let mut db=endpoint_fixture();
+        let before=db.paired().unwrap().unwrap();
+        let tables:Vec<String>=db.conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'paired_desktop' ORDER BY name").unwrap()
+            .query_map([],|r|r.get(0)).unwrap().collect::<Result<_,_>>().unwrap();
+        let snapshots:Vec<_>=tables.iter().map(|t|(t.clone(),dump_table(&db.conn,t))).collect();
+        let changes:i64=db.conn.query_row("SELECT total_changes()",[],|r|r.get(0)).unwrap();
+        db.update_paired_endpoint(&before.instance_id,&before.fingerprint,&before.base_url,&before.paired_at,"https://192.168.1.20:12345").unwrap();
+        let after=db.paired().unwrap().unwrap();
+        assert_eq!(after.base_url,"https://192.168.1.20:12345");
+        assert_eq!(after.instance_id,before.instance_id);assert_eq!(after.fingerprint,before.fingerprint);assert_eq!(after.paired_at,before.paired_at);
+        assert_eq!(after.legacy_credential,before.legacy_credential);assert_eq!(after.display_name,before.display_name);assert_eq!(after.platform,before.platform);assert_eq!(after.app_version,before.app_version);assert_eq!(after.protocol_version,before.protocol_version);
+        assert_eq!(db.conn.query_row("SELECT total_changes()",[],|r|r.get::<_,i64>(0)).unwrap(),changes+1);
+        for (table,rows) in snapshots {assert_eq!(dump_table(&db.conn,&table),rows,"{table} must be preserved");}
+    }
+
+    #[test]
+    fn endpoint_recovery_cas_and_failed_write_leave_original_pairing_intact() {
+        let mut db=endpoint_fixture();let before=dump_table(&db.conn,"paired_desktop");
+        for (instance,pin,url,time) in [("other","pin","https://192.168.1.20:7303","original-time"),("endpoint-synthetic","wrong","https://192.168.1.20:7303","original-time"),("endpoint-synthetic","pin","https://192.168.1.20:99","original-time"),("endpoint-synthetic","pin","https://192.168.1.20:7303","repaired-time")] {
+            assert_eq!(db.update_paired_endpoint(instance,pin,url,time,"https://192.168.1.20:12345").unwrap_err(),"ENDPOINT_SOURCE_CHANGED");assert_eq!(dump_table(&db.conn,"paired_desktop"),before);
+        }
+        db.conn.execute_batch("CREATE TRIGGER endpoint_test_fail BEFORE UPDATE OF base_url ON paired_desktop BEGIN SELECT RAISE(ABORT,'synthetic write failure'); END;").unwrap();
+        assert_eq!(db.update_paired_endpoint("endpoint-synthetic","pin","https://192.168.1.20:7303","original-time","https://192.168.1.20:12345").unwrap_err(),"ENDPOINT_SAVE_UNCONFIRMED");assert_eq!(dump_table(&db.conn,"paired_desktop"),before);
+    }
+
     #[test]
     fn rollback_v11_reopen_preserves_bodies_drafts_frozen_operations_and_preparation_records() {
         let path = std::env::temp_dir().join(format!("lr-rollback-v11-{}.db", uuid::Uuid::new_v4()));
@@ -3861,6 +4031,100 @@ mod tests {
         std::fs::create_dir_all(&dir).ok();
         let path = dir.join("test.db");
         (Db::open(&path).expect("open+migrate"), path)
+    }
+
+    #[test]
+    fn local_title_history_tracks_persisted_names_without_rewriting_bodies() {
+        let mut db = temp_db();
+        db.note_insert("note-a", "Old", "[[Old|alias]]\n```\n[[Old]]\n```", &["tag".into()], None).unwrap();
+        db.note_insert("note-inbound", "Inbound", "[[Old#heading|中文]]", &[], None).unwrap();
+        let body = db.note_get("note-a").unwrap().unwrap().content;
+        for title in ["Typing", "New", "New", "Old"] {
+            db.note_update("note-a", title, &body, &["tag".into()]).unwrap();
+        }
+        let catalog = db.note_link_catalog().unwrap();
+        let a = catalog.iter().find(|n| n.note_id == "note-a").unwrap();
+        assert_eq!(a.title, "Old");
+        assert_eq!(a.historical_names, vec!["New", "Old", "Typing"]);
+        assert_eq!(db.note_get("note-inbound").unwrap().unwrap().content, "[[Old#heading|中文]]");
+        assert_eq!(db.note_get("note-a").unwrap().unwrap().content, body);
+        let serialized = serde_json::to_value(a).unwrap();
+        assert!(serialized.get("content").is_none());
+        assert!(serialized.get("historicalNames").is_some());
+        assert_eq!(serialized.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn local_title_history_excludes_blank_and_unchanged_names_keeps_collisions() {
+        let mut db = temp_db();
+        db.note_insert("note-a", " \t\n", "a", &[], None).unwrap();
+        db.note_update("note-a", "Old", "b", &[]).unwrap();
+        db.note_update("note-a", "Old", "body only", &["new tag".into()]).unwrap();
+        assert!(db.note_link_catalog().unwrap()[0].historical_names.is_empty());
+        db.note_update("note-a", "New", "body only", &[]).unwrap();
+        db.note_insert("note-b", "Old", "b", &[], None).unwrap();
+        db.note_update("note-b", "Other", "b", &[]).unwrap();
+        db.note_insert("note-c", "Old", "c", &[], None).unwrap();
+        let entries = db.note_link_catalog().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].historical_names, vec!["Old"]);
+        assert_eq!(entries[1].historical_names, vec!["Old"]);
+        assert_eq!(entries[2].title, "Old"); // no precedence/suppression of any claim
+        assert!(db.note_update("note-missing", "X", "", &[]).is_err());
+        assert_eq!(db.note_link_catalog().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn local_title_history_and_note_update_roll_back_together() {
+        let mut db = temp_db();
+        db.note_insert("note-a", "Old", "original", &["old tag".into()], None).unwrap();
+        db.conn.execute_batch("CREATE TRIGGER reject_note_tag BEFORE INSERT ON local_note_tag BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
+        assert!(db.note_update("note-a", "New", "changed", &["new tag".into()]).is_err());
+        let note = db.note_get("note-a").unwrap().unwrap();
+        assert_eq!(note.title, "Old"); assert_eq!(note.content, "original");
+        assert_eq!(note.tags, vec!["old tag"]);
+        assert!(db.note_link_catalog().unwrap()[0].historical_names.is_empty());
+        db.conn.execute_batch("DROP TRIGGER reject_note_tag;").unwrap();
+        db.note_update("note-a", "New", "changed", &[]).unwrap();
+        db.note_update("note-a", "New", "changed", &[]).unwrap();
+        assert_eq!(db.note_link_catalog().unwrap()[0].historical_names, vec!["Old"]);
+    }
+
+    #[test]
+    fn local_title_history_upgrade_idempotency_restart_reset_and_delete() {
+        let (mut db, path) = temp_db_at();
+        db.note_insert("note-a", "Pre-upgrade", "original", &[], None).unwrap();
+        db.conn.execute_batch("DROP TABLE local_note_title_history; PRAGMA user_version=12;").unwrap();
+        db.migrate_kind().unwrap();
+        assert!(db.note_link_catalog().unwrap()[0].historical_names.is_empty(), "never infer unknown history");
+        db.note_update("note-a", "New", "original", &[]).unwrap();
+        db.migrate_kind().unwrap();
+        drop(db);
+        let mut db = Db::open(&path).unwrap();
+        assert_eq!(db.note_link_catalog().unwrap()[0].historical_names, vec!["Pre-upgrade"]);
+        db.reset_full().unwrap();
+        assert_eq!(db.note_link_catalog().unwrap()[0].historical_names, vec!["Pre-upgrade"]);
+        assert_eq!(db.health().unwrap()["schemaVersion"], SCHEMA_VERSION);
+        db.note_delete("note-a").unwrap();
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM local_note_title_history", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
+        db.note_insert("note-b", "B", "b", &[], None).unwrap();
+        db.note_update("note-b", "C", "b", &[]).unwrap();
+        db.note_erase_all().unwrap();
+        assert!(db.note_link_catalog().unwrap().is_empty());
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM local_note_title_history", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn local_title_history_migration_failure_does_not_advance_version() {
+        let (mut db, path) = temp_db_at();
+        db.conn.execute_batch("DROP TABLE local_note_title_history; PRAGMA user_version=12;").unwrap();
+        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut read_only = Db { conn };
+        assert!(read_only.migrate_kind().is_err());
+        assert_eq!(read_only.conn.query_row("PRAGMA user_version", [], |r| r.get::<_,i64>(0)).unwrap(), 12);
+        drop(read_only);
+        db.migrate_kind().unwrap();
+        assert_eq!(db.health().unwrap()["ok"], true);
     }
 
     #[test]

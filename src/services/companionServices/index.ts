@@ -26,6 +26,8 @@ export { createFixtureTransport, type FixtureTransport } from "./fixtureTranspor
 export { createTauriServicesTransport, base64Of } from "./productionTransport.ts";
 export { createHintSubscription, toHint, type Hint, type HintRecord, type HintSubscription } from "./hintSubscription.ts";
 
+import { productionReadCoordinator } from "./readCoordinator.ts";
+import { ServicesError, errorCodeOf } from "./transport.ts";
 import { withReadBackoff } from "./readBackoff.ts";
 import type { ServicesTransport } from "./transport.ts";
 import { createTauriServicesTransport } from "./productionTransport.ts";
@@ -62,14 +64,37 @@ export function createCompanionServices(
    */
   hints: HintSubscription | null = null,
 ): CompanionServices {
+  let registry: ServiceRegistry;
+  const guarded: ServicesTransport = { invalidate: (instance,scope) => transport.invalidate?.(instance,scope), async request(request) {
+    const denialCode = (code: string, status: number) => status === 401 ? "AUTH_REVOKED"
+      : status === 403 && !["GRANT_REQUIRED", "AUTH_REVOKED", "PAIRING_REQUIRED"].includes(code) ? "SCOPE_DENIED" : code;
+    const revoke = (code: string) => {
+      if (code === "GRANT_REQUIRED" && request.method !== "GET") {
+        registry.denyOperation(request.instance, {library:request.library,vault:request.vault}, request.operationId);
+        return;
+      }
+      if (["AUTH_REVOKED", "PAIRING_REQUIRED", "GRANT_REQUIRED", "SCOPE_DENIED"].includes(code))
+        registry.revoke(request.instance, {library: request.library, vault: request.vault},
+          code === "AUTH_REVOKED" || code === "PAIRING_REQUIRED");
+    };
+    try {
+      const response = await transport.request(request);
+      if (response.status < 200 || response.status >= 300) revoke(denialCode(errorCodeOf(response.body), response.status));
+      return response;
+    } catch (error) {
+      if (error instanceof ServicesError) revoke(denialCode(error.code, error.status));
+      throw error;
+    }
+  } };
+  registry = new ServiceRegistry(guarded);
   return {
-    registry: new ServiceRegistry(transport),
-    materials: new MaterialsClient(transport),
-    knowledge: new KnowledgeClient(transport),
-    ingest: new IngestClient(transport),
+    registry,
+    materials: new MaterialsClient(guarded),
+    knowledge: new KnowledgeClient(guarded),
+    ingest: new IngestClient(guarded),
     changeFeed: new ChangeFeedClient(hints),
-    presentation: new PresentationClient(transport),
-    lsh: new LshRemoteAdapter(transport),
+    presentation: new PresentationClient(guarded),
+    lsh: new LshRemoteAdapter(guarded),
   };
 }
 
@@ -78,6 +103,13 @@ export function createCompanionServices(
  * transport. Screens call this; tests call  with the
  * fixture transport. One client set, two seams.
  */
-export function createProductionServices(): CompanionServices {
-  return createCompanionServices(withReadBackoff(createTauriServicesTransport()), createHintSubscription());
+const sharedProductionTransport = productionReadCoordinator.wrap(withReadBackoff(createTauriServicesTransport()));
+
+export function createProductionServices(scope?: Readonly<{library?: string; vault?: string}>): CompanionServices {
+  const captured = scope ? Object.freeze({...scope}) : undefined;
+  const scheduled = sharedProductionTransport;
+  const scoped: ServicesTransport = { invalidate: (instance,scope) => scheduled.invalidate?.(instance,scope), request: req => scheduled.request({
+    ...req, library: req.library ?? captured?.library, vault: req.vault ?? captured?.vault,
+  }) };
+  return createCompanionServices(scoped, createHintSubscription(undefined, captured));
 }

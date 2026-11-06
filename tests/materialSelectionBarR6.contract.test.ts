@@ -155,7 +155,8 @@ test("R6-T4 — the gesture is art-agnostic (image/video/document identical)", (
   const btnIdx = tile.indexOf('<button');
   const artIdx = tile.indexOf('className="st-media-art"');
   assert.ok(btnIdx > 0 && artIdx > btnIdx, "the art box is INSIDE the interactive element");
-  assert.match(tile, /st-media-placeholder/u, "the placeholder art still exists for documents");
+  assert.match(tile, /st-file-cover/u, "the honest format cover still exists for documents");
+  assert.match(tile, /data-kind=\{kind\}/u, "the cover retains the actual file kind");
   // The shared reducer is unchanged: holding past the threshold still fires
   // longpress, a scroll still cancels (pinned by pressGesture.contract tests).
   const pure = strip(read("src", "still", "kit", "pressGesturePure.ts"));

@@ -448,7 +448,7 @@ test("P1-T1 — the Rust command is registered and the module exists", () => {
   assert.match(lib, /services_v1::services_v1_request,/, "command registered in the handler");
   const rust = read("src-tauri", "src", "services_v1.rs");
   // Owner proof before AND after the awaited response.
-  assert.match(rust, /expected_gateway\(&state, &request\.instance\)/, "expected owner captured");
+  assert.match(rust, /expected_scoped_gateway\(&state, &request\.instance, request\.library\.as_deref\(\), request\.vault\.as_deref\(\)\)/, "expected owner captured");
   // Each Services gateway method proves the owner before the send and again
   // after the awaited response.
   const content = read("src-tauri", "src", "content.rs");
@@ -472,7 +472,7 @@ test("P1-T1 — the Rust command is registered and the module exists", () => {
 
 test("P1-T1 — the Rust transport reuses the existing pinned gateway (no new authority)", () => {
   const rust = read("src-tauri", "src", "services_v1.rs");
-  assert.match(rust, /expected_gateway/, "uses the existing expected-owner seam");
+  assert.match(rust, /expected_scoped_gateway/, "uses the existing expected-owner seam");
   assert.doesNotMatch(rust, /reqwest::Client::builder|build_pinned_client_config|Client::new\(\)/,
     "no second HTTP client / TLS authority");
   const content = read("src-tauri", "src", "content.rs");
@@ -503,7 +503,7 @@ test("P1-W1 — TS emits the exact nested wire shape Rust declares", async () =>
   const wire = captured.request;
   assert.deepEqual(
     Object.keys(wire).sort(),
-    ["body", "chunk", "instance", "method", "operationId", "path", "query"],
+    ["body", "chunk", "instance", "library", "method", "operationId", "path", "query", "vault"],
     "exactly the Rust-side field names",
   );
   assert.equal(wire.operationId, "materials.metadataPatch", "camelCase operationId, not snake_case");

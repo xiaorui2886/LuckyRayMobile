@@ -9,11 +9,13 @@
 
 import React, { useEffect, useRef } from "react";
 import { Row } from "../../presentation/still01/Still";
+import {fileFormat, type MediaKind} from "./mediaTilePure";
 import { useLongPress } from "./pressGesture";
 
 export type LibraryListRowProps = {
   title: string;
   meta: string;
+  kind?: MediaKind;
   /** Source-qualified thumbnail URL; empty/undefined keeps the placeholder. */
   thumb?: string;
   onClick: () => void;
@@ -41,7 +43,7 @@ export type LibraryListRowProps = {
   reserveThumbSpace?: boolean;
 };
 
-export function LibraryListRow({ title, meta, thumb, onClick, onVisible, onLongPress, selected = false, selecting = false, assetId, onDragSelect, onDragEnd, reserveThumbSpace = true }: LibraryListRowProps) {
+export function LibraryListRow({ title, meta, thumb, kind = "other", onClick, onVisible, onLongPress, selected = false, selecting = false, assetId, onDragSelect, onDragEnd, reserveThumbSpace = true }: LibraryListRowProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -84,14 +86,15 @@ export function LibraryListRow({ title, meta, thumb, onClick, onVisible, onLongP
     // click contract and stays untouched for every other consumer.
     <div
       ref={hostRef}
-      className={(selecting ? "is-selecting" : "") + (selected ? " is-selected" : "")}
+      className={"st-library-list-row" + (selecting ? " is-selecting" : "") + (selected ? " is-selected" : "")}
       data-asset-id={assetId}
       {...press.handlers}
     >
       <Row
         title={title}
-        meta={meta}
+        meta={thumb ? meta : `${fileFormat(title,kind)} · ${meta}`}
         thumb={thumb}
+        icon={!thumb ? kind === "image" ? "image" : kind === "video" ? "video" : "file" : undefined}
         reserveThumbSlot={reserveThumbSpace}
         onClick={() => { /* activation is owned by the gesture authority */ }}
         trail={selecting ? (

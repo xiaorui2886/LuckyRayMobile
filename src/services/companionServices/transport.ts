@@ -14,8 +14,12 @@
 // `shared/companion-services-v1/**` — it is never re-invented here.
 
 export type ServicesRequest = {
+  /** Local-only cancellation fence; never serialized to the native wire. */
+  isCurrent?: () => boolean;
   /** Bound to the Desktop instance the caller proved before the send. */
   instance: string;
+  library?: string;
+  vault?: string;
   /** Canonical operation id (operations.json), used for diagnostics only. */
   operationId: string;
   method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
@@ -32,11 +36,14 @@ export type ServicesRequest = {
 };
 
 export type ServicesResponse = {
+  /** Finite, non-negative milliseconds normalized once at the native reply boundary. */
+  retryAfterMs?: number;
   status: number;
   body: unknown;
 };
 
 export type ServicesTransport = {
+  invalidate?: (instance?: string, scope?: Readonly<{library?: string; vault?: string}>) => void;
   request: (req: ServicesRequest) => Promise<ServicesResponse>;
 };
 

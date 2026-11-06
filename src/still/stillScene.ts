@@ -19,6 +19,10 @@ export function stillScene(route: Route, key: number): Scene | null {
   // generic asset/note/run details (Knowledge -> connect is not a note).
   if (r.detail && Object.prototype.hasOwnProperty.call(ROOT_SCENE_DETAILS, r.detail)) return { name: ROOT_SCENE_DETAILS[r.detail], key };
   if (r.tab === "library" && r.detail) return { name: "asset", id: r.detail, key };
+  if (r.tab === "knowledge" && r.detail?.startsWith("note-vault:")) {
+    try { return { name: "note-vault", id: decodeURIComponent(r.detail.slice("note-vault:".length)), key }; }
+    catch { return null; }
+  }
   if (r.tab === "knowledge" && r.detail === "new") return { name: "new-note", key };
   if (r.tab === "knowledge" && r.detail?.startsWith(NOTE_EDIT_PREFIX))
     return { name: "note", id: r.detail.slice(NOTE_EDIT_PREFIX.length), key, startInEdit: true };

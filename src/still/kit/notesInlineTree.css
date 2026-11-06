@@ -1,0 +1,70 @@
+/* One shared tree style for the knowledge list and the managed note browser.
+   The browser marker lives INSIDE NoteSidePanel: paper-rail portals do not
+   inherit the knowledge-page ancestor. Keep explicit selectors for WebView 83. */
+.st-app .st-view.st-knowledge-view .st-notes-inline-tree,
+.st-app .st-note-drawer .st-managed-note-browser .st-notes-inline-tree{padding:0}
+.st-app .st-view.st-knowledge-view .st-tree-folder.st-folder-row,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-folder.st-folder-row{width:100%;min-height:46px;padding:5px 0;gap:0;border-radius:8px;font-size:14px}
+.st-app .st-view.st-knowledge-view .st-tree-folder .st-folder-symbol,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-folder .st-folder-symbol{display:flex;flex:none;margin-right:8px;color:var(--st-secondary)}
+.st-app .st-view.st-knowledge-view .st-tree-folder .st-folder-name,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-folder .st-folder-name{flex:1;min-width:0;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:1;margin:0}
+.st-app .st-view.st-knowledge-view .st-tree-disclosure,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-disclosure{display:flex;flex:none;width:13px;margin-right:8px;color:var(--st-muted);transition:transform 160ms ease}
+.st-app .st-view.st-knowledge-view .st-tree-folder[aria-expanded=true] .st-tree-disclosure,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-folder[aria-expanded=true] .st-tree-disclosure{transform:rotate(90deg)}
+.st-app .st-view.st-knowledge-view .st-tree-folder.is-selected,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-folder.is-selected{background:rgba(127,127,127,.08);background:color-mix(in srgb,var(--st-accent) 8%,transparent)}
+.st-app .st-view.st-knowledge-view .st-tree-children,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-children{margin-left:14px;padding-left:8px;border-left:1px solid var(--st-line)}
+.st-app .st-view.st-knowledge-view .st-tree-children.is-deep,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-children.is-deep{margin-left:0;padding-left:0;border-left:0}
+.st-app .st-view.st-knowledge-view .st-tree-note.st-local-note-entry,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note.st-local-note-entry{display:flex;align-items:center;min-width:0;margin:0;padding:0;border:0;border-radius:8px;background:transparent;box-shadow:none;min-height:46px}
+.st-app .st-view.st-knowledge-view .st-tree-children .st-tree-note,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-children .st-tree-note{margin:0}
+.st-app .st-view.st-knowledge-view .st-tree-note .st-note-row,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note .st-note-row{display:flex;align-items:center;gap:0;flex:1;min-width:0;min-height:46px;margin:0;padding:5px 4px 5px 21px!important;border:0!important;border-radius:8px;background:transparent;box-shadow:none;text-align:left;color:var(--st-ink)}
+.st-app .st-view.st-knowledge-view .st-tree-file-icon,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-file-icon{display:flex;flex:none;width:24px;margin-right:8px;justify-content:center;color:var(--st-muted)}
+.st-app .st-view.st-knowledge-view .st-tree-note-label,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note-label{display:flex;flex-direction:column;flex:1;min-width:0}
+.st-app .st-view.st-knowledge-view .st-tree-note .st-note-row strong,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note .st-note-row strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:1.5;font-weight:400;margin:0}
+.st-app .st-view.st-knowledge-view .st-tree-note>.st-icon-button,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note>.st-icon-button{flex:none;width:44px;height:44px;min-height:44px;margin-top:0;color:var(--st-muted)}
+.st-app .st-view.st-knowledge-view .st-tree-result-path,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-result-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--st-muted)}
+.st-app .st-view.st-knowledge-view .st-tree-note-state,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note-state{width:5px;height:5px;margin-left:8px;border-radius:50%;flex:none;background:var(--st-accent)}
+.st-app .st-view.st-knowledge-view .st-tree-note-state.is-conflict,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note-state.is-conflict,
+.st-app .st-view.st-knowledge-view .st-tree-note-state.is-incomplete,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note-state.is-incomplete{background:#b77c31}
+.st-app .st-view.st-knowledge-view .st-tree-note-state.is-missing,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note-state.is-missing{background:transparent;border:1px solid var(--st-muted)}
+.st-app .st-view.st-knowledge-view .st-tree-note:active,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note:active,
+.st-app .st-view.st-knowledge-view .st-tree-note:focus-within,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note:focus-within{background:rgba(127,127,127,.07)}
+.st-app .st-view.st-knowledge-view .st-tree-note button:focus-visible,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note button:focus-visible,
+.st-app .st-view.st-knowledge-view .st-tree-folder:focus-visible,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-folder:focus-visible{outline:2px solid var(--st-accent);outline-offset:-2px}
+.st-app .st-view.st-knowledge-view .st-tree-hint,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-hint{margin:8px 12px 12px 30px;font-size:12px;line-height:1.6;color:var(--st-muted)}
+.st-app .st-view.st-knowledge-view .st-tree-sr-only,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+.st-app[data-reduced=true] .st-tree-disclosure{transition:none}
+@media(prefers-reduced-motion:reduce){.st-app .st-view.st-knowledge-view .st-tree-disclosure,
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-disclosure{transition:none}}
+
+
+/* Explicit margins retain spacing on Android System WebView 83 (no flex gap). */
+.st-app .st-view.st-knowledge-view .st-tree-note .st-note-row > span[role=img],
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note .st-note-row > span[role=img]{margin-left:8px}
+
+
+/* Preserve the current-note indication above the shared transparent row rule. */
+.st-app .st-view.st-knowledge-view .st-tree-note .st-note-row[aria-current=page],
+.st-app .st-note-drawer .st-managed-note-browser .st-tree-note .st-note-row[aria-current=page]{background:var(--st-selected);color:var(--st-accent)}

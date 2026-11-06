@@ -1,3 +1,4 @@
+import {noteScrollNavigation} from './noteScrollIntent.ts';
 // CM6-EDITOR-R1 — the retained editor session pool (Mobile port).
 //
 // NoteSurface unmounts the edit branch on every read↔edit switch; a fresh
@@ -74,7 +75,7 @@ export function restoreCmViewScroll(scope: string): void {
   entry.scroll = undefined;
   entry.view.scrollDOM.scrollTop = snapshot.top;
   entry.view.scrollDOM.scrollLeft = snapshot.left;
-  entry.view.dispatch({ effects: snapshot.effect });
+  entry.view.dispatch({ effects: [noteScrollNavigation.of(null), snapshot.effect] });
 }
 
 /** Destroy the view for a scope the page has LEFT for good (note switch). */

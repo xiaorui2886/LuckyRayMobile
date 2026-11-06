@@ -3,9 +3,12 @@
 
 mod capture_media;
 mod companion_export;
+mod graph_export;
+mod graph_qa_timing;
 mod db;
 mod device;
 mod eventstream;
+mod endpoint_recovery;
 mod gateway;
 mod content;
 mod lsh_carrier;
@@ -15,6 +18,17 @@ mod services_hints;
 mod keystore;
 mod local_asset;
 mod local_inbox;
+mod note_import;
+mod managed_vault;
+mod managed_vault_sync;
+mod managed_vault_folder_sync;
+mod managed_vault_commands;
+mod managed_vault_import;
+mod managed_vault_transfer;
+mod managed_vault_linked_import;
+mod managed_vault_wiki_plan;
+mod managed_vault_resources;
+mod managed_vault_resource_commands;
 mod pinning;
 mod qr;
 mod secure;
@@ -23,7 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 
 use db::Db;
@@ -99,6 +113,7 @@ impl ConnIntentMirror {
 struct ConnectionLifecycle {
     gate: Arc<tokio::sync::Mutex<()>>,
     epoch: Arc<AtomicU64>,
+    recovery: Arc<endpoint_recovery::RecoveryBook>,
 }
 
 impl ConnectionLifecycle {
@@ -106,6 +121,7 @@ impl ConnectionLifecycle {
         Self {
             gate: Arc::new(tokio::sync::Mutex::new(())),
             epoch: Arc::new(AtomicU64::new(0)),
+            recovery: Arc::new(endpoint_recovery::RecoveryBook::default()),
         }
     }
 
@@ -352,9 +368,9 @@ struct ConnState {
 // Connection / Pairing
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn conn_state(state: State<'_, SharedState>) -> Result<ConnState, String> {
-    match conn_state_impl(&state) {
+    match crate::graph_qa_timing::connection_status(|| conn_state_impl(&state)) {
         Ok(v) => Ok(v),
         Err(error) => {
             // [LR] triage diagnostic: the ACTUAL failure code behind a
@@ -371,8 +387,9 @@ fn conn_state(state: State<'_, SharedState>) -> Result<ConnState, String> {
 
 fn conn_state_impl(state: &State<'_, SharedState>) -> Result<ConnState, String> {
     let secure_store = secure::SecureCredentialStoreImpl;
-    let (paired_opt, stats) = {
+    let (paired_opt, stats, ws) = {
         let g = state.lock().unwrap();
+        let (paired, stats) = {
         let mut db = g.db.lock().unwrap();
         // The first state read after an M2.x upgrade evacuates any legacy DB
         // credential into the Keystore before the UI exposes a usable pair.
@@ -385,10 +402,8 @@ fn conn_state_impl(state: &State<'_, SharedState>) -> Result<ConnState, String> 
             None => None,
         };
         (paired, stats)
-    };
-    let ws = {
-        let g = state.lock().unwrap();
-        g.eventstream.snapshot()
+        };
+        (paired, stats, g.eventstream.snapshot())
     };
     let identity = paired_opt.as_ref().map(|p| {
         serde_json::json!({
@@ -960,6 +975,7 @@ async fn asset_thumbnail(
     state: State<'_, SharedState>,
     app: tauri::AppHandle,
     instance: String,
+    library: Option<String>,
     id: String,
     // MATERIAL-LIBRARY-INSTANT-R1 REPAIR-R2 (3B): a bounded RETRY of a
     // thumbnail whose cached bytes failed to decode ON THIS DEVICE. It skips
@@ -976,16 +992,17 @@ async fn asset_thumbnail(
     // the network request, so an A->B switch can never send A's asset id to B.
     // The thumbnail cache is keyed by instance, so the same capture also
     // decides which cache rows are legitimately visible here.
-    let owner = crate::content::expected_thumbnail_source(&state, &instance)?;
+    let owner = crate::content::expected_thumbnail_source(&state, &instance, library.as_deref())?;
     if id.is_empty() || id.len()>160 || !id.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'-'||c==b'_') {return Err("CONTENT_ID_INVALID".into());}
     // Everything below is keyed by the CAPTURED owner, never by the raw
     // parameter, so the cache rows and the fetch cannot disagree.
-    let instance = owner.instance().to_string();
+    let real_instance = owner.instance().to_string();
+    let instance = owner.cache_owner();
     crate::content::material_access_check(&state,&instance,&id)?;
     let captured_version=with_db(&state,|db|db.asset_version(&instance,&id))?;
     if version.as_ref().is_some_and(|v|!v.is_empty()&&captured_version.as_deref()!=Some(v.as_str())) {return Err("CONTENT_VERSION_CHANGED".into());}
     if preview.unwrap_or(false) {
-        let value = crate::content::asset_screen_preview(&state, &app, &instance, &id, version.as_deref().unwrap_or(""),force.unwrap_or(false)).await?;
+        let value = crate::content::asset_screen_preview(&state, &app, &real_instance, library.as_deref(), &id, version.as_deref().unwrap_or(""),force.unwrap_or(false)).await?;
         owner.verify(&state)?;
         return Ok(value);
     }
@@ -1880,6 +1897,16 @@ async fn local_inbox_ingest_shares(state: State<'_, SharedState>) -> Result<serd
 // Local Note & Unified Search (M2.8 Mobile-local Knowledge domain)
 // ---------------------------------------------------------------------------
 
+// Once an identity has a file authority, stale legacy editor commands must not
+// mutate the retained SQLite migration source. The DB lock precedes the vault lock.
+fn guard_migrated_legacy_write(app: &tauri::AppHandle, db: &mut Db, note_id: Option<&str>) -> Result<(), String> {
+    db.managed_recover()?;
+    let root=app.path().app_data_dir().map_err(|e|e.to_string())?;
+    let _guard=managed_vault::lock()?;
+    let store=managed_vault::Store::new(&root)?;
+    store.guard_legacy_write(note_id)
+}
+
 #[tauri::command]
 async fn local_note_list(
     state: State<'_, SharedState>,
@@ -1923,9 +1950,11 @@ async fn local_note_create_folder(
 
 #[tauri::command]
 async fn local_note_set_folder(
+    app: tauri::AppHandle,
     state: State<'_, SharedState>, noteId: String, folder: String,
 ) -> Result<serde_json::Value, String> {
     let note = with_db(&state, |db| {
+        guard_migrated_legacy_write(&app,db,Some(&noteId))?;
         db.note_set_folder(&noteId, &folder)?;
         db.note_get(&noteId)?.ok_or_else(|| "local note not found".to_string())
     })?;
@@ -1939,6 +1968,11 @@ async fn local_note_set_folder(
 async fn local_note_tags(state: State<'_, SharedState>) -> Result<serde_json::Value, String> {
     let tags = with_db(&state, |db| db.note_tag_vocabulary(100))?;
     Ok(serde_json::json!({ "tags": tags }))
+}
+#[tauri::command]
+async fn local_note_link_catalog(state: State<'_, SharedState>) -> Result<serde_json::Value, String> {
+    let items = with_db(&state, |db| db.note_link_catalog())?;
+    Ok(serde_json::json!({ "items": items }))
 }
 #[tauri::command]
 async fn local_note_get(
@@ -1967,6 +2001,7 @@ async fn local_note_add(
 
 #[tauri::command]
 async fn local_note_update(
+    app: tauri::AppHandle,
     state: State<'_, SharedState>,
     noteId: String,
     title: String,
@@ -1974,6 +2009,7 @@ async fn local_note_update(
     tags: Vec<String>,
 ) -> Result<serde_json::Value, String> {
     with_db(&state, |db| {
+        guard_migrated_legacy_write(&app,db,Some(&noteId))?;
         db.note_update(&noteId, &title, &content, &tags)
     })?;
     let note = with_db(&state, |db| db.note_get(&noteId))?.ok_or("updated note not found")?;
@@ -1982,6 +2018,7 @@ async fn local_note_update(
 
 #[tauri::command]
 async fn local_note_set_flags(
+    app: tauri::AppHandle,
     state: State<'_, SharedState>,
     noteId: String,
     pinned: Option<bool>,
@@ -1989,6 +2026,7 @@ async fn local_note_set_flags(
     archived: Option<bool>,
 ) -> Result<String, String> {
     with_db(&state, |db| {
+        guard_migrated_legacy_write(&app,db,Some(&noteId))?;
         db.note_set_flags(&noteId, pinned, favorite, archived)
     })?;
     Ok("ok".into())
@@ -1996,10 +2034,11 @@ async fn local_note_set_flags(
 
 #[tauri::command]
 async fn local_note_delete(
+    app: tauri::AppHandle,
     state: State<'_, SharedState>,
     noteId: String,
 ) -> Result<String, String> {
-    with_db(&state, |db| db.note_delete(&noteId))?;
+    with_db(&state, |db| { guard_migrated_legacy_write(&app,db,Some(&noteId))?; db.note_delete(&noteId) })?;
     Ok("deleted".into())
 }
 
@@ -2012,9 +2051,10 @@ async fn local_note_stats(
 
 #[tauri::command]
 async fn local_note_erase_all(
+    app: tauri::AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<String, String> {
-    let count = with_db(&state, |db| db.note_erase_all())?;
+    let count = with_db(&state, |db| { guard_migrated_legacy_write(&app,db,None)?; db.note_erase_all() })?;
     Ok(format!("local notes erased ({count} notes)"))
 }
 
@@ -2254,7 +2294,9 @@ async fn local_asset_thumbnail(
 ) -> Result<serde_json::Value, String> {
     use sha2::Digest;
     let asset = with_db(&state, |db| db.asset_get(&assetId))?.ok_or("local asset not found")?;
-    if asset.kind != "image" {
+    // Screen previews remain image-only. Grid thumbnails also use Android's
+    // built-in PDF/media/text renderers; unsupported formats return no preview.
+    if preview.unwrap_or(false) && asset.kind != "image" {
         return Err("thumbnail unavailable for this kind".into());
     }
     if local_asset::check_integrity(&asset.local_path, asset.size_bytes, &asset.content_hash, false)?.status != "healthy" {
@@ -2492,7 +2534,10 @@ async fn conn_resume(state: State<'_, SharedState>, app: tauri::AppHandle) -> Re
                 .start(&gw.ws_url(), &gw.ws_authorization(), &paired.fingerprint, app)
                 .await
             {
-                Ok(()) => Ok(conn_result_json(CONN_STATUS_RESUMED, true, None)),
+                Ok(()) => {
+                    es.check_connection();
+                    Ok(conn_result_json(CONN_STATUS_RESUMED, true, None))
+                }
                 // A rejected credential leaves the worker in re_pair_required;
                 // that terminal state is authoritative and must stand.
                 Err(_) => Ok(conn_result_json(CONN_STATUS_DEFERRED_TRANSPORT, true, None)),
@@ -2502,7 +2547,7 @@ async fn conn_resume(state: State<'_, SharedState>, app: tauri::AppHandle) -> Re
 }
 
 #[tauri::command]
-async fn ws_stop(state: State<'_, SharedState>) -> Result<String, String> {
+async fn ws_stop(state: State<'_, SharedState>, app: tauri::AppHandle) -> Result<String, String> {
     // An explicit stop is a standing opt-out. It runs under the SAME gate as
     // every start/resume and invalidates the epoch, so a resume that already
     // observed the pre-stop state is rejected when it tries to take the gate.
@@ -2521,6 +2566,10 @@ async fn ws_stop(state: State<'_, SharedState>) -> Result<String, String> {
     // The mirror flips BEFORE attempting the disk write, so a failed save can
     // never let this process auto-recover what the user just disconnected.
     mirror_conn_intent(&state, ConnectionIntent::ManualStop);
+    // All pages consume the App snapshot. The retired worker cannot emit a
+    // final status after its generation was invalidated, so publish the real
+    // stopped snapshot here instead of only refreshing Settings' local shell.
+    let _ = app.emit("lr:ws-status", es.snapshot());
     if let Err(error) = persist_conn_intent(&state, CONN_INTENT_MANUAL_STOP) {
         // The worker IS stopped and this process honours the opt-out; only
         // cross-process durability is compromised. Report that exactly rather
@@ -2642,8 +2691,8 @@ fn move_task_to_back() -> bool {
 /// INTERACTION-CLOSURE-R1 (用户问题1): system-bar appearance follows the app
 /// color mode. Visual only; applySystemBarInsets() geometry is untouched.
 #[tauri::command]
-fn set_system_bar_appearance(dark: bool, dimmed: Option<bool>) -> bool {
-    device::set_system_bar_appearance(dark, dimmed.unwrap_or(false))
+fn set_system_bar_appearance(dark: bool, dimmed: Option<bool>, status_rgb: Option<i32>, navigation_rgb: Option<i32>) -> bool {
+    device::set_system_bar_appearance(dark, dimmed.unwrap_or(false), status_rgb.unwrap_or(-1), navigation_rgb.unwrap_or(-1))
 }
 
 // ---------------------------------------------------------------------------
@@ -2807,7 +2856,7 @@ pub fn run() {
     #[cfg(mobile)]
     let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
     builder
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({ let handler: fn(tauri::ipc::Invoke) -> bool=tauri::generate_handler![
             conn_state,
             conn_pair,
             conn_pair_file,
@@ -2817,6 +2866,8 @@ pub fn run() {
             sync_run,
             assets_refresh,
             content::content_capabilities,
+            content::content_library_catalog,
+            content::content_scope_changed,
             services_v1::services_v1_request,
             services_hints::services_hints_start,
             services_hints::services_hints_state,
@@ -2825,10 +2876,12 @@ pub fn run() {
             lsh_surface::lsh_surface_state,
             lsh_surface::lsh_surface_bootstrap,
             lsh_surface::lsh_surface_open,
+            lsh_surface::lsh_surface_embed,
             lsh_surface::lsh_surface_stop,
             content::content_assets,
             content::content_navigation,
             content::content_asset_detail,
+            content::content_asset_preview,
             content::content_asset_file,
             content::content_cancel,
             content::content_note_resource,
@@ -2842,6 +2895,7 @@ pub fn run() {
             content::content_cached_resource,
             content::content_open_resource,
             content::notes::content_sync,
+            content::content_graph_cache,
             content::notes::content_vaults,
             content::notes::offline::content_offline_libraries,
             content::notes::offline::content_offline_notes,
@@ -2869,6 +2923,7 @@ pub fn run() {
             content::notes::content_note_create_authority,
             content::notes::content_note_resolve,
             content::notes::uploads::content_note_attach,
+            content::notes::uploads::content_note_local_attachment,
             assets_local,
             asset_detail,
             asset_thumbnail,
@@ -2895,13 +2950,51 @@ pub fn run() {
             local_inbox_stats,
             local_inbox_erase_all,
             local_inbox_ingest_shares,
+            managed_vault_resource_commands::managed_vault_attach,
+            content::library_attachment::note_attach_library_asset,
+            managed_vault_resource_commands::managed_vault_resource_get,
+            managed_vault_resource_commands::managed_vault_resource_open,
+            managed_vault_import::managed_vault_import_legacy_receipt,
+            managed_vault_commands::managed_vault_list,
+            managed_vault_commands::managed_vault_remove,
+            managed_vault_commands::managed_vault_purge,
+            managed_vault_commands::managed_vault_restore,
+            managed_vault_commands::managed_vault_create,
+            managed_vault_commands::managed_vault_sync_to_phone,
+            managed_vault_commands::managed_vault_transfer_preview,
+            managed_vault_commands::managed_vault_transfer_commit,
+            managed_vault_commands::managed_vault_sync_targets,
+            managed_vault_commands::managed_vault_select,
+            managed_vault_commands::managed_vault_migration_status,
+            managed_vault_commands::managed_vault_migration_prepare,
+            managed_vault_commands::managed_vault_migration_commit,
+            managed_vault_commands::managed_vault_note_list,
+            managed_vault_commands::managed_vault_note_get,
+            managed_vault_commands::managed_vault_note_hydrate,
+            managed_vault_commands::managed_vault_note_create,
+            managed_vault_commands::managed_vault_note_save,
+            managed_vault_commands::managed_vault_note_move,
+            managed_vault_commands::managed_vault_note_trash,
+            managed_vault_commands::managed_vault_note_flags,
+            managed_vault_commands::managed_vault_folders,
+            managed_vault_commands::managed_vault_folder_create,
+            managed_vault_commands::managed_vault_link_catalog,
+            managed_vault_commands::managed_vault_resolve_legacy,
             local_note_list,
             local_note_folders,
             local_note_create_folder,
             local_note_set_folder,
             local_note_tags,
             local_note_get,
+            local_note_link_catalog,
             local_note_add,
+            content::notes::offline::content_cache_libraries,
+            content::notes::offline::content_cache_clear,
+            content::notes::local_upload::content_local_note_upload_target,
+            content::notes::local_upload::content_local_note_upload,
+            note_import::local_note_import_pick,
+            note_import::local_note_import_pending,
+            note_import::local_note_import_ack,
             local_note_update,
             local_note_set_flags,
             local_note_delete,
@@ -2912,6 +3005,7 @@ pub fn run() {
             local_asset_list,
             local_asset_get,
             local_asset_import,
+            content::material_import::content_material_import,
             local_asset_update,
             local_asset_tags,
             local_asset_set_flags,
@@ -2924,6 +3018,7 @@ pub fn run() {
             local_asset_reconcile,
             companion_export,
             companion_share_file,
+            graph_export::graph_export_png,
             companion_share_text,
             open_attachment,
             companion_storage_stats,
@@ -2943,11 +3038,21 @@ pub fn run() {
             move_task_to_back,
             set_system_bar_appearance,
             qr_scan,
+            endpoint_recovery::conn_endpoint_prepare,
+            endpoint_recovery::conn_endpoint_update,
+            endpoint_recovery::conn_endpoint_cancel,
             qr_cancel,
             db_health,
             db_export_diagnostics,
             db_reset_full,
-        ])
+        ]; move |invoke: tauri::ipc::Invoke| {
+            if !graph_qa_timing::enabled() {return handler(invoke);}
+            let command=invoke.message.command().to_string();
+            let start=graph_qa_timing::epoch_ms();
+            let handled=handler(invoke);
+            graph_qa_timing::dispatch(&command,start,handled);
+            handled
+        }})
         .setup(|app| {
             println!("[LR] APP STARTED (setup)");
             let data_dir = app.path().app_data_dir().map_err(|e| format!("data dir: {e}"))?;
@@ -4675,16 +4780,17 @@ mod tests {
         #[test]
         fn r6_owner_fence_rejects_wrong_and_empty_owner() {
             let state = g1e_state("A", "http://a");
-            let ok = crate::content::expected_thumbnail_source(&state, "A")
+            let ok = crate::content::expected_thumbnail_source(&state, "A", None)
                 .expect("the paired owner captures");
             assert_eq!(ok.instance(), "A");
-            let wrong = crate::content::expected_thumbnail_source(&state, "B")
+            let wrong = crate::content::expected_thumbnail_source(&state, "B", None)
                 .err().expect("a different Desktop is refused").to_string();
             assert!(wrong.contains("CONTENT_SOURCE_CHANGED"), "err: {wrong}");
-            let empty = crate::content::expected_thumbnail_source(&state, "")
+            let empty = crate::content::expected_thumbnail_source(&state, "", None)
                 .err().expect("an unnamed owner is refused").to_string();
             assert!(empty.contains("CONTENT_SOURCE_CHANGED") || empty.to_lowercase().contains("empty"),
                 "err: {empty}");
         }
     }
 }
+
