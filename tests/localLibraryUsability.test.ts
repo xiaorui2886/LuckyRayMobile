@@ -302,7 +302,8 @@ test("A4: local asset detail exposes archive/unarchive through the flag authorit
 
 test("A5: local mutations converge through localDataStore(asset)", () => {
   // Import now publishes the local asset domain (was screen-local reloadKey).
-  assert.match(SCREEN, /localDataStore\.publish\("asset"\)/, "import publishes the local domain");
+  assert.match(SCREEN, /onImported=\{\(destination, name\) => \{\s*if \(destination\.kind === 'local'\) \{ localDataStore\.publish\('asset'\);/,
+    "successful local imports publish the local domain, not Desktop imports");
   // The library reloads the LOCAL list from the local bus.
   assert.match(SCREEN, /const localVersion = useSyncExternalStore\(/);
   assert.match(SCREEN, /localDataStore\.subscribe\(fn\)/);
@@ -330,12 +331,19 @@ test("A5: local mutations converge through localDataStore(asset)", () => {
   const asset = read("src", "still", "StillAsset.tsx");
   const publishes = asset.split('localDataStore.publish("asset")').length - 1;
   assert.ok(publishes >= 4, `favorite/archive/rename/tag/delete publish on success (saw ${publishes})`);
-  // A cancelled import publishes nothing.
-  const importBody = SCREEN.slice(SCREEN.indexOf("async function importMedia"), SCREEN.indexOf("const [thumbMap"));
-  assert.match(importBody, /if \(r\?\.cancelled\) toast\.info\("已取消导入"\);/, "cancel path exists");
-  const cancelIdx = importBody.indexOf("已取消导入");
-  const publishIdx = importBody.indexOf('localDataStore.publish("asset")');
-  assert.ok(publishIdx > cancelIdx, "the publish sits behind the cancel check");
+  // Import now lives in the destination-bound sheet. Cancellation and
+  // failure must never reach the parent success callback that publishes.
+  const importSheet = read("src", "still", "kit", "MaterialImportSheet.tsx");
+  const importBody = importSheet.slice(importSheet.indexOf("const importFile ="), importSheet.indexOf("return <Sheet"));
+  assert.match(importBody, /destination\.kind === 'local' \? await api\.localAssetImport\(kind\) : await api\.contentMaterialImport\(/,
+    "local and Desktop imports retain separate authorities");
+  assert.match(importBody, /if \(result\?\.cancelled\) return;/, "cancel returns before success");
+  const cancelIdx = importBody.indexOf("if (result?.cancelled) return;");
+  const publishIdx = importBody.indexOf("onImported(destination,");
+  assert.ok(publishIdx > cancelIdx, "success callback sits behind cancellation guard");
+  assert.doesNotMatch(importBody.slice(importBody.indexOf("catch (e)")), /onImported\(|localDataStore\.publish/,
+    "failure and cleanup never publish success");
+  assert.doesNotMatch(importSheet, /localDataStore\.publish/, "sheet cannot bypass parent success authority");
 });
 
 // ---------- A6: truthful loaded state / identity labels ----------

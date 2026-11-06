@@ -28,7 +28,7 @@ def main():
     original_lock = lock_path.read_bytes()
     packages = tomllib.loads(original_lock.decode())["package"]
     direct = {}
-    for name in ("rusqlite", "serde", "serde_json", "uuid", "sha2", "unicode-normalization", "tokio", "futures-util"):
+    for name in ("rusqlite", "serde", "serde_json", "uuid", "sha2", "unicode-normalization", "tokio", "futures-util", "pulldown-cmark"):
         matches = [p for p in packages if p["name"] == name]
         if len(matches) != 1:
             raise RuntimeError(f"Expected one locked version of {name}")
@@ -73,6 +73,7 @@ sha2 = "=''' + direct["sha2"] + '''"
 unicode-normalization = "=''' + direct["unicode-normalization"] + '''"
 tokio = { version = "=''' + direct["tokio"] + '''", features = ["full"] }
 futures-util = "=''' + direct["futures-util"] + '''"
+pulldown-cmark = { version = "=''' + direct["pulldown-cmark"] + '''", default-features = false }
 ''')
         env = dict(os.environ)
         env.setdefault("CARGO_TARGET_DIR", str(work / "target"))

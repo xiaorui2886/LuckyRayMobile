@@ -103,5 +103,13 @@ test("ime authority — the generic, non-duplicating viewport logic is retained"
   // must survive: they keep the shell tied to the visible area and the focused
   // control scrolled into view on old WebViews.
   assert.ok(/--app-viewport-h/.test(appTsx), "visual-viewport height tracking retained");
-  assert.ok(/scrollIntoView/.test(appTsx), "focused-control reveal retained");
+  assert.match(appTsx, /import \{[^}]*installTextEntryReveal[^}]*\} from "\.\/services\/textEntryTarget"/);
+  assert.match(appTsx, /useEffect\(\(\) => installTextEntryReveal\(document\), \[\]\)/,
+    "focused-control reveal is installed with cleanup returned to React");
+  const reveal = readFileSync(join(ROOT, "src", "services", "textEntryTarget.ts"), "utf-8");
+  assert.match(reveal, /if \(target\.isConnected && doc\.activeElement === target\) \{\s*target\.scrollIntoView\(/,
+    "only the still-connected focused control is revealed");
+  assert.match(reveal, /if \(!isTextEntryTarget\(target\)\) return;/, "non-text controls cannot trigger reveal");
+  assert.match(reveal, /doc\.removeEventListener\('focusin', onFocus\)/);
+  assert.match(reveal, /view\.clearTimeout\(timer\)/, "pending reveal is cancelled on cleanup");
 });

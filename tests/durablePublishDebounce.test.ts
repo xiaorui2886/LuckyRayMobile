@@ -1,3 +1,4 @@
+import { MaterialAttachmentSaveBarrier } from "../src/still/kit/materialAttachmentSaveBarrier.ts";
 import { trackKnowledgeWrite } from "../src/services/knowledgeCacheSafety.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -21,6 +22,7 @@ function editorHarness() {
   const owner = { current: 1 };
   const failed = { current: false };
   const pending = { current: new Set<Promise<unknown>>() };
+  const materialSaveBarrier = new MaterialAttachmentSaveBarrier();
   const projections: any[] = [];
   let leaseCommits = 0;
   let durable: any = null;
@@ -31,6 +33,7 @@ function editorHarness() {
   });
   const edit = runInNewContext(`${editCode}\nedit;`, {
     api: { contentNoteEdit: (args: any) => new Promise((resolve, reject) => saves.push({ args, resolve, reject })) },
+    materialSaveBarrier: { current: materialSaveBarrier },
     trackKnowledgeWrite, owner, failed, pending, navigationActivity: { current: 0 },
     editGeneration: { current: 0 }, epoch: { current: 7 }, displayedRevision: { current: "r1" },
     publisher: { current: publisher }, editingLease: { current: { committed: () => leaseCommits++ } },
@@ -47,6 +50,8 @@ function editorHarness() {
   return {
     edit, state, owner, failed, pending, projections, publisher, published,
     leaseCommits: () => leaseCommits,
+    beginMaterialSave: () => materialSaveBarrier.begin(),
+    saveCount: () => saves.length,
     commit: async (index: number) => {
       const save = saves[index];
       durable = { ...save.args, dirty: true, relativePath: "Docs/note.md" };
@@ -222,5 +227,25 @@ test("production completion from a retired owner cannot wake or certify the succ
   assert.equal(editor.published.length, 1);
   assert.equal(editor.published[0].content, "new-session");
   assert.equal(editor.state.note.content, "new-session");
+  editor.publisher.dispose();
+});
+
+
+test("production edit waits for the real material-save barrier and saves only the latest queued input", async () => {
+  const editor = editorHarness();
+  const release = editor.beginMaterialSave();
+  const older = editor.edit("Title", "queued-older");
+  const latest = editor.edit("Title", "queued-latest");
+  assert.equal(editor.saveCount(), 0, "no note save crosses the active material attachment commit");
+  assert.equal(editor.pending.current.size, 2);
+  release();
+  await settle();
+  assert.equal(editor.saveCount(), 1, "only the newest queued generation reaches native save");
+  assert.equal(await older, false, "superseded queued input cannot report a durable receipt");
+  await editor.commit(0);
+  assert.equal(await latest, true);
+  assert.equal(editor.state.note.content, "queued-latest");
+  assert.equal(editor.pending.current.size, 0);
+  assert.equal(editor.leaseCommits(), 1);
   editor.publisher.dispose();
 });

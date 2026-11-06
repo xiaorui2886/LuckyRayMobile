@@ -11,6 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isTextEntryTarget } from "../src/services/textEntryTarget.ts";
 import { dragDismissDecision } from "../src/still/kit/sheetDrag.ts";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -51,7 +52,7 @@ test("qa fix — re-tapping an already-focused input hides the dock again", () =
   assert.match(appTsx, /if \(h < closedViewportHeight - 60\) \{[\s\S]*?setEditingText\(true\);/,
     "shrink re-enters the text-entry state");
   assert.match(appTsx, /closedViewportHeight/, "hysteresis anchor present (IME overshoot bounce cannot un-hide)");
-  assert.match(appTsx, /a instanceof HTMLInputElement \|\| a instanceof HTMLTextAreaElement/,
+  assert.match(appTsx, /if \(h < closedViewportHeight - 60\) \{\s*const a = document\.activeElement;\s*if \(isTextEntryTarget\(a\)\) \{\s*setEditingText\(true\)/,
     "shrink branch confirms a real text session before hiding");
 });
 
@@ -175,4 +176,28 @@ test("qa fix — library view toggle reacts immediately (state, not raw storage)
 // ---- 14. engineering copy gone --------------------------------------------------
 test("qa fix — asset info no longer shows the engineering note", () => {
   assert.doesNotMatch(assetTsx, /信息层与图片层分开/, "engineering copy removed from both info sheets");
+});
+
+// Test the production helper without requiring a browser; restore all globals.
+test("qa fix — shared text admission rejects non-text controls", () => {
+  const names = ["HTMLElement", "HTMLInputElement", "HTMLTextAreaElement"] as const;
+  const saved = names.map(name => Object.getOwnPropertyDescriptor(globalThis, name));
+  class Element { isContentEditable = false; }
+  class Input extends Element { type: string; constructor(type: string) { super(); this.type = type; } }
+  class Textarea extends Element {}
+  try {
+    for (const [name, value] of [["HTMLElement", Element], ["HTMLInputElement", Input], ["HTMLTextAreaElement", Textarea]] as const)
+      Object.defineProperty(globalThis, name, { configurable: true, value });
+    const admits = (target: unknown) => isTextEntryTarget(target as EventTarget | null);
+    for (const type of ["text", "search", "email", "password", "number", "tel", "url"])
+      assert.equal(admits(new Input(type)), true, type);
+    assert.equal(admits(new Textarea()), true);
+    assert.equal(admits(Object.assign(new Element(), { isContentEditable: true })), true);
+    for (const type of ["checkbox", "radio", "range", "color", "file", "hidden", "button", "submit", "reset", "image"])
+      assert.equal(admits(new Input(type)), false, type);
+    assert.equal(admits(new Element()), false);
+    assert.equal(admits(null), false);
+  } finally {
+    names.forEach((name, i) => { if (saved[i]) Object.defineProperty(globalThis, name, saved[i]!); else Reflect.deleteProperty(globalThis, name); });
+  }
 });

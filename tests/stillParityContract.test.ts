@@ -107,7 +107,22 @@ test("still parity — authority copies preserve the staged design blobs", () =>
   for (const [file, digest] of Object.entries(AUTHORITY_DIGESTS)) {
     const rawSource = read("src", "presentation", "still01", file);
     if (file === "Views.tsx") {
-      assert.equal(sha256(rawSource), digest, "reviewed original-home refinement, restored My/task pages and retained masonry composition drifted");
+      // Preserve the independently recorded 03fa3f3 design digest. Reverse
+      // only the later recent-visit accessibility/kind labels and optional
+      // destination-aware import label; assert each exact adapter first.
+      const viewAdapters = [
+        ['}>最近浏览</SectionTitle>', '}>最近收集的画面</SectionTitle>'],
+        ['key={a.id} aria-label={`${a.title} · ${a.meta}`} title={a.meta} onClick', 'key={a.id} onClick'],
+        ["<Icon name={a.kind==='video'?'play':a.kind==='image'?'image':'file'} size={24}/>", '<Icon name="image" size={24}/>'],
+        ['onNew:()=>void;newLabel?:string;onBrowse:', 'onNew:()=>void;onBrowse:'],
+        ["label={p.newLabel??(library?'导入到本机':(p.disableNew?'新建（仅本机）':'新建笔记'))}", "label={library?'导入到本机':(p.disableNew?'新建（仅本机）':'新建笔记')}"],
+      ];
+      let pinnedViews = rawSource;
+      for (const [addition, original] of viewAdapters) {
+        assert.equal(pinnedViews.split(addition).length, 2, "one scoped recent-visit/import-label adapter: " + addition);
+        pinnedViews = pinnedViews.replace(addition, original);
+      }
+      assert.equal(sha256(pinnedViews), digest, "all unrelated original-home, My/task, and masonry bytes remain pinned");
       const start = rawSource.indexOf("export function AgentView(");
       const end = rawSource.indexOf("export function SettingsView(", start);
       assert.ok(start > 0 && end > start, "unmodified AgentView remains a distinct composition");
@@ -122,6 +137,19 @@ test("still parity — authority copies preserve the staged design blobs", () =>
     // chrome, read toggle and command icons. Pin that bounded component plus
     // the untouched prefix independently; do not bless other kit changes.
     if (file === "Still.tsx") {
+      // The current product routes the existing browse button through its
+      // retained paper rail. Verify each exact addition before reversing only
+      // that adapter; keep the original prefix/body digests unchanged.
+      const railAdapters = [
+        ["import {useNotePaperRail} from '../../still/kit/NotePaperRail';\n", ""],
+        [" const rail=useNotePaperRail();\n", ""],
+        ["onClick={()=>rail?rail.open('left'):p.onBrowse()}", "onClick={p.onBrowse}"],
+        ['title="打开笔记列表" onPointerDown={e=>e.preventDefault()} onClick={p.onBrowse}', 'title="打开笔记列表" onClick={p.onBrowse}'],
+      ];
+      for (const [addition, original] of railAdapters) {
+        assert.equal(source.split(addition).length, 2, "one scoped paper-rail adapter: " + addition);
+        source = source.replace(addition, original);
+      }
    // Normalize only this reviewed paper-scroll touch owner, not generic styles.
    const paperTouch = " {/* Touch arbitration stops at this scroll container, before the outer swipe owner. */}\n <main style={{touchAction:'pan-y'}} className={'st-note-paper'+(p.mode==='edit'?' is-editing':'')}>";
    assert.equal(source.split(paperTouch).length, 2, 'the actual scroll paper owns pan-y exactly once');
@@ -249,10 +277,13 @@ test("still parity — every root renders an authority View", () => {
   const shellTsx = read("src", "still", "StillShell.tsx");
   for (const [cond, view] of [
     ['rootTab === "home"', "StillHome"],
-    ['rootTab === "knowledge"', "StillKnowledge"],
   ] as const) {
     assert.match(shellTsx, new RegExp(`${cond.replace(/"/g, '"')} [?:] <${view}`), `${view} is routed for its root`);
   }
+  assert.match(shellTsx, /if \(rootTab === "knowledge"\) knowledgeVisited\.current = true;/, "knowledge retention starts only after visiting that root");
+  assert.match(shellTsx, /knowledgeVisited\.current \? <div key="retained-knowledge" hidden=\{rootTab !== "knowledge"\}/, "visited knowledge stays mounted but hidden off-root");
+  assert.match(shellTsx, /<StillKnowledge conn=\{conn\} active=\{rootTab === "knowledge" && !top\} \/>/, "retained knowledge receives its actual root/detail activity boundary");
+  assert.equal((shellTsx.match(/<StillKnowledge /g) || []).length, 1, "only one knowledge root exists");
   assert.match(shellTsx,/agentVisited\.current \? <div key="retained-agent" hidden=\{rootTab !== "ai"\}/,"LSH retains one visited root, hidden on other tabs");
   assert.match(shellTsx,/<StillAgent conn=\{conn\} active=\{rootTab === "ai" && !top\} \/>/,"retained Agent gets actual root/detail activity boundary");
   assert.equal((shellTsx.match(/<StillAgent /g) || []).length, 1, "only one Agent root exists");

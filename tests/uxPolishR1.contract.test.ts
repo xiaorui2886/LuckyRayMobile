@@ -324,7 +324,11 @@ test("ux-r1 — the bottom magnifier becomes Favorite through existing authoriti
 });
 
 test("ux-r1 — the zoom gesture is retained; the redundant hint is gone", () => {
-  assert.match(ASSET, /onDoubleClick=\{\(\) => \{ if \(video\) return; setZoom\(\(z\) => \(z === 1 \? 2 : 1\)\)/, "double-tap zoom kept");
+  assert.match(ASSET, /onDoubleClick=\{\(\) => \{ if \(!imageZoomable\) return; setZoom\(\(z\) => \(z === 1 \? 2 : 1\)\)/, "double-tap zoom kept");
+  assert.match(ASSET, /const imageZoomable = Boolean\(\(src \|\| poster\) && !video && !pendingVideo\)/,
+    "images and thumbnails can zoom, videos and pending videos cannot");
+  assert.match(ASSET, /onDoubleClick=\{\(\) => \{[^\n]*setOffset\(\{ x: 0, y: 0 \}\)/,
+    "double-tap recenters the media layer");
   assert.match(ASSET, /data-media-zoom-layer="true"/, "media zoom layer kept");
   assert.match(ASSET, /base\.current\.distance/, "pinch zoom kept");
   assert.doesNotMatch(ASSET, /双击图片可放大/, "the redundant hint is removed from both details");
